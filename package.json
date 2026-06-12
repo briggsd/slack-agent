@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node --env-file=.env dist/index.js",
-    "check": "tsc --noEmit && vitest run",
+    "check": "tsc --noEmit && npm --prefix runner run check && vitest run",
     "test": "vitest run"
   },
   "dependencies": {

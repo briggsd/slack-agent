@@ -87,6 +87,57 @@ npm test
 | `SLACK_APP_TOKEN` | yes | — | App-Level Token for Socket Mode (`xapp-…`) |
 | `IDLE_TIMEOUT_MS` | no | `600000` | Milliseconds before an idle session runner is reaped |
 
+## Sandbox runner
+
+In production (`RUNNER_BACKEND=docker`) each Slack thread gets its own Docker
+container running the Claude Agent SDK. Containers speak the NDJSON protocol
+over stdio and persist agent state on a named Docker volume, enabling
+*resume-after-reap*: when a session's container is reaped due to inactivity
+the next message transparently restarts a new container and resumes the SDK
+session from the saved session ID.
+
+### Build the image
+
+```bash
+docker build -t slackbot-runner runner/
+```
+
+The image is based on `node:22-bookworm-slim`, runs as a non-root user,
+and includes `git`, `curl`, and `ripgrep` as agent tools.
+
+### Required environment
+
+| Variable | Required for docker | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | yes | Passed to each container via `-e ANTHROPIC_API_KEY` (value never appears in `docker` argv) |
+| `RUNNER_IMAGE` | no (default `slackbot-runner:latest`) | Docker image to run |
+| `RUNNER_BACKEND` | no (default `fake`) | Set to `docker` to enable real containers |
+
+See `.env.example` for the full list of tunable settings.
+
+### Resume-after-reap
+
+The runner persists the SDK session ID to `/workspace/.slackbot/session-id`
+inside the container. `/workspace` is a named Docker volume
+(`slackbot-ws-<sanitized-session-key>`), which survives container restarts.
+On the next container start the runner reads the file and passes
+`resume: <session-id>` to `query()`, continuing the conversation from where
+it left off.
+
+**Note — volume garbage collection**: Docker volumes accumulate one per Slack
+thread and are never automatically removed. Run `docker volume prune` (or a
+scheduled cleanup script) to reclaim disk space from old sessions.
+
+### Smoke test
+
+```bash
+# Requires ANTHROPIC_API_KEY and a running Docker daemon
+bash scripts/smoke-docker.sh
+```
+
+This is NOT part of the CI gate. It builds the image, starts a real container,
+and sends one message end-to-end.
+
 ## Architecture
 
 See `planning/ARCHITECTURE.md` for the full design.
