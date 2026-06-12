@@ -3,6 +3,8 @@ import { App } from '@slack/bolt';
 import { loadConfig } from './config.js';
 import { SessionManager } from './sessions/manager.js';
 import { FakeRunnerFactory } from './runner/fake.js';
+import { DockerRunnerFactory } from './runner/docker.js';
+import type { RunnerFactory } from './runner/types.js';
 import { registerSlackHandlers } from './slack/listener.js';
 import type { SlackClientLike } from './slack/responder.js';
 
@@ -45,7 +47,24 @@ async function main(): Promise<void> {
     },
   };
 
-  const factory = new FakeRunnerFactory();
+  let factory: RunnerFactory;
+  if (config.RUNNER_BACKEND === 'docker') {
+    const dc = config.docker;
+    factory = new DockerRunnerFactory({
+      image: dc.RUNNER_IMAGE,
+      readyTimeoutMs: dc.RUNNER_READY_TIMEOUT_MS,
+      turnTimeoutMs: dc.RUNNER_TURN_TIMEOUT_MS,
+      killGraceMs: dc.RUNNER_KILL_GRACE_MS,
+      memory: dc.RUNNER_MEMORY,
+      cpus: dc.RUNNER_CPUS,
+      pidsLimit: dc.RUNNER_PIDS_LIMIT,
+    });
+    console.log(`[gateway] using DockerRunnerFactory (image=${dc.RUNNER_IMAGE})`);
+  } else {
+    factory = new FakeRunnerFactory();
+    console.log('[gateway] using FakeRunnerFactory');
+  }
+
   const sessions = new SessionManager({
     idleTimeoutMs: config.IDLE_TIMEOUT_MS,
     factory,

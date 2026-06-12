@@ -1,0 +1,18 @@
+{
+  "name": "slackbot-runner",
+  "version": "0.1.0",
+  "description": "Claude Agent SDK runner container for slackbot",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.173"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}
