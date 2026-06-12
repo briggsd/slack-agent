@@ -1,4 +1,8 @@
-# Slackbot ↔ Remote Claude — Architecture
+# Slackbot ↔ Remote Claude — Architecture (planning sketch)
+
+> This was the pre-build planning sketch. The authoritative, detailed architecture
+> document (as built, incl. security model and limitations) is
+> [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
 A multi-user Slack bot where **each Slack thread is its own Claude session**, running in an
 **on-demand sandboxed environment**, with many threads active concurrently.

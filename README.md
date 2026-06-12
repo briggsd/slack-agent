@@ -1,6 +1,8 @@
 # slackbot
 
-A Slack gateway for Claude sessions. Each Slack thread maps to its own isolated runner session. In M1 a `FakeRunner` echoes messages; M2 wires in a real Docker-based Claude Agent SDK runner.
+A Slack gateway for Claude sessions. Each Slack thread maps to its own Claude Agent SDK session running in an isolated, on-demand Docker sandbox; agent-generated files are uploaded back into the thread.
+
+**→ Detailed architecture, security model, limitations, and operational notes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 
 ## Prerequisites
 
