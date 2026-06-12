@@ -1,5 +1,5 @@
 {
-  "name": "slackbot-runner",
+  "name": "slack-agent-runner",
   "version": "0.1.0",
   "description": "Claude Agent SDK runner container for slackbot",
   "type": "module",
@@ -14,5 +14,6 @@
   "devDependencies": {
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0"
-  }
+  },
+  "license": "MIT"
 }

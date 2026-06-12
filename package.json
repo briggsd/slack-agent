@@ -1,5 +1,5 @@
 {
-  "name": "slackbot",
+  "name": "slack-agent",
   "version": "0.1.0",
   "description": "Slack gateway for Claude sessions",
   "type": "module",
@@ -21,5 +21,10 @@
   },
   "allowScripts": {
     "esbuild@0.21.5": true
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/briggsd/slack-agent.git"
   }
 }
