@@ -138,6 +138,26 @@ export class SessionManager {
         for await (const event of session.runner.send(item.message)) {
           if (event.type === 'status') {
             await updatePlaceholder(this.slack, placeholder, `_${event.text}_`);
+          } else if (event.type === 'file') {
+            try {
+              await this.slack.uploadFile({
+                channel: item.channel,
+                thread_ts: item.threadTs,
+                filename: event.name,
+                data: event.data,
+              });
+            } catch (uploadErr: unknown) {
+              const uploadMsg =
+                uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+              console.error(
+                `[session] file upload failed in ${session.key} (${event.name}): ${uploadMsg}`,
+              );
+              await updatePlaceholder(
+                this.slack,
+                placeholder,
+                `:x: Failed to upload file ${event.name}: ${uploadMsg}`,
+              );
+            }
           } else if (event.type === 'text') {
             await updatePlaceholder(this.slack, placeholder, event.text);
           } else if (event.type === 'error') {

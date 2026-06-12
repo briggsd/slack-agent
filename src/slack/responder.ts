@@ -13,6 +13,13 @@ export interface SlackClientLike {
     ts: string;
     text: string;
   }): Promise<void>;
+
+  uploadFile(params: {
+    channel: string;
+    thread_ts: string;
+    filename: string;
+    data: Buffer;
+  }): Promise<void>;
 }
 
 export interface Placeholder {

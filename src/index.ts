@@ -47,6 +47,17 @@ async function main(): Promise<void> {
         text: params.text,
       });
     },
+    async uploadFile(params) {
+      // Verified against node_modules/@slack/web-api/dist/methods.d.ts:
+      // FilesUploadV2Arguments extends FileUploadV2 (extends FileUpload) with
+      // channel_id, thread_ts, file (Buffer), filename
+      await app.client.files.uploadV2({
+        channel_id: params.channel,
+        thread_ts: params.thread_ts,
+        filename: params.filename,
+        file: params.data,
+      });
+    },
   };
 
   let factory: RunnerFactory;

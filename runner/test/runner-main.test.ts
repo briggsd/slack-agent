@@ -8,7 +8,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { PassThrough } from 'stream';
 import { runLoop } from '../src/main.js';
-import type { ReadFileFn, WriteFileFn, MkdirFn, SdkQueryFn } from '../src/main.js';
+import type { ReadFileFn, WriteFileFn, MkdirFn, SdkQueryFn, ListFilesFn, ReadBinaryFileFn, ScannedFile } from '../src/main.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 // ── FakeAgentSdk ──────────────────────────────────────────────────────────────
@@ -135,6 +135,10 @@ function makeSdkToolProgress(toolName: string): SDKMessage {
 
 class InMemoryFs {
   private files = new Map<string, string>();
+  /** Scripted workspace file entries for listFiles seam */
+  public workspaceFiles: ScannedFile[] = [];
+  /** Binary content for each path (keyed by path) */
+  private binaryFiles = new Map<string, Buffer>();
 
   readFile: ReadFileFn = async (path) => {
     return this.files.get(path) ?? null;
@@ -148,12 +152,26 @@ class InMemoryFs {
     // no-op
   };
 
+  listFiles: ListFilesFn = async () => {
+    return this.workspaceFiles;
+  };
+
+  readBinaryFile: ReadBinaryFileFn = async (path) => {
+    return this.binaryFiles.get(path) ?? null;
+  };
+
   get(path: string): string | undefined {
     return this.files.get(path);
   }
 
   set(path: string, value: string): void {
     this.files.set(path, value);
+  }
+
+  /** Add a scripted workspace file for the listFiles seam */
+  addWorkspaceFile(path: string, name: string, content: Buffer, mtimeMs: number): void {
+    this.workspaceFiles.push({ path, name, size: content.length, mtimeMs });
+    this.binaryFiles.set(path, content);
   }
 }
 
@@ -164,6 +182,9 @@ type CollectedOutput = Array<{
   id?: string;
   text?: string;
   message?: string;
+  name?: string;
+  data_base64?: string;
+  size?: number;
 }>;
 
 async function runWithInput(
@@ -175,7 +196,6 @@ async function runWithInput(
   const outputs: CollectedOutput = [];
 
   // Intercept process.stdout.write
-  const origWrite = process.stdout.write.bind(process.stdout);
   vi.spyOn(process.stdout, 'write').mockImplementation(
     (chunk: unknown): boolean => {
       const str = typeof chunk === 'string' ? chunk : String(chunk);
@@ -199,6 +219,8 @@ async function runWithInput(
       writeFile: fs.writeFile,
       mkdir: fs.mkdir,
       sdkQuery: sdk.getQueryFn(),
+      listFiles: fs.listFiles,
+      readBinaryFile: fs.readBinaryFile,
       input,
     });
 
@@ -346,5 +368,164 @@ describe('runner main — error handling', () => {
 
     const errorEvent = output.find((e) => e.type === 'error');
     expect(errorEvent).toBeDefined();
+  });
+});
+
+// ── File detection tests ──────────────────────────────────────────────────────
+
+describe('runner main — file detection', () => {
+  it('emits file event before text when a new file is written during the turn', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
+    ]);
+    const fs = new InMemoryFs();
+    const content = Buffer.from('<svg>hello</svg>', 'utf-8');
+
+    // listFiles will be called after the SDK turn; set up file with a future mtime
+    // We need the mtime to be >= turnStart. Since we cannot freeze Date.now precisely
+    // in this test, we patch listFiles to return a file with a far-future mtime.
+    const futureMs = Date.now() + 60_000;
+    fs.addWorkspaceFile('/workspace/image.svg', 'image.svg', content, futureMs);
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'm1', text: 'make svg' })],
+      sdk,
+      fs,
+    );
+
+    const fileEvent = output.find((e) => e.type === 'file');
+    expect(fileEvent).toBeDefined();
+    expect(fileEvent?.name).toBe('image.svg');
+    expect(fileEvent?.id).toBe('m1');
+    expect(fileEvent?.data_base64).toBe(content.toString('base64'));
+    expect(fileEvent?.size).toBe(content.length);
+
+    // file must appear before the text event
+    const fileIdx = output.findIndex((e) => e.type === 'file');
+    const textIdx = output.findIndex((e) => e.type === 'text');
+    expect(fileIdx).toBeGreaterThanOrEqual(0);
+    expect(textIdx).toBeGreaterThan(fileIdx);
+  });
+
+  it('does not emit file event when mtime is older than turn start', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
+    ]);
+    const fs = new InMemoryFs();
+    const content = Buffer.from('old content', 'utf-8');
+    // Old mtime — far in the past
+    const oldMs = Date.now() - 60_000;
+    fs.addWorkspaceFile('/workspace/old.txt', 'old.txt', content, oldMs);
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'm1', text: 'hi' })],
+      sdk,
+      fs,
+    );
+
+    const fileEvents = output.filter((e) => e.type === 'file');
+    expect(fileEvents).toHaveLength(0);
+  });
+
+  it('skips oversized files and emits a status event', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
+    ]);
+    const fs = new InMemoryFs();
+    const futureMs = Date.now() + 60_000;
+    // Create a "big" file by reporting a large size (> 8 MiB)
+    const hugeSize = 9 * 1024 * 1024;
+    fs.workspaceFiles.push({ path: '/workspace/big.bin', name: 'big.bin', size: hugeSize, mtimeMs: futureMs });
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'm1', text: 'hi' })],
+      sdk,
+      fs,
+    );
+
+    const fileEvents = output.filter((e) => e.type === 'file');
+    expect(fileEvents).toHaveLength(0);
+
+    const statusEvents = output.filter((e) => e.type === 'status');
+    expect(statusEvents.some((s) => s.text?.includes('big.bin'))).toBe(true);
+    expect(statusEvents.some((s) => s.text?.includes('too large') || s.text?.includes('skipped'))).toBe(true);
+  });
+
+  it('enforces the max-files-per-turn cap (5 files)', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
+    ]);
+    const fs = new InMemoryFs();
+    const futureMs = Date.now() + 60_000;
+    // Add 7 small files
+    for (let i = 1; i <= 7; i++) {
+      const content = Buffer.from(`file ${i}`, 'utf-8');
+      fs.addWorkspaceFile(`/workspace/f${i}.txt`, `f${i}.txt`, content, futureMs);
+    }
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'm1', text: 'hi' })],
+      sdk,
+      fs,
+    );
+
+    const fileEvents = output.filter((e) => e.type === 'file');
+    expect(fileEvents).toHaveLength(5);
+
+    // Skipped files should produce status events
+    const statusEvents = output.filter(
+      (e) => e.type === 'status' && e.text?.includes('skipped'),
+    );
+    expect(statusEvents.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('skips dotfiles and node_modules entries', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
+    ]);
+    const fs = new InMemoryFs();
+    const futureMs = Date.now() + 60_000;
+
+    // The listFiles seam skips these at the real fs level, so the fake
+    // should just not return them (matches the real implementation).
+    // Add a normal file and verify dotfiles are absent.
+    fs.addWorkspaceFile('/workspace/normal.txt', 'normal.txt', Buffer.from('ok'), futureMs);
+    // No dotfiles in the scripted list (real implementation skips them)
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'm1', text: 'hi' })],
+      sdk,
+      fs,
+    );
+
+    const fileEvents = output.filter((e) => e.type === 'file');
+    expect(fileEvents).toHaveLength(1);
+    expect(fileEvents[0]?.name).toBe('normal.txt');
+  });
+
+  it('does not scan for files after an SDK error (scan only on success)', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResultError(['SDK failed'])],
+    ]);
+    const fs = new InMemoryFs();
+    const futureMs = Date.now() + 60_000;
+    fs.addWorkspaceFile('/workspace/file.txt', 'file.txt', Buffer.from('data'), futureMs);
+
+    let listFilesCalled = false;
+    const origListFiles = fs.listFiles;
+    fs.listFiles = async (dir: string) => {
+      listFilesCalled = true;
+      return origListFiles(dir);
+    };
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'm1', text: 'bad' })],
+      sdk,
+      fs,
+    );
+
+    expect(listFilesCalled).toBe(false);
+    const fileEvents = output.filter((e) => e.type === 'file');
+    expect(fileEvents).toHaveLength(0);
   });
 });

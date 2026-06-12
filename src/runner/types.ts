@@ -1,5 +1,6 @@
 export type RunnerEvent =
   | { type: 'status'; text: string }   // progress note (tool use etc.)
+  | { type: 'file'; name: string; data: Buffer }  // file produced during the turn
   | { type: 'text'; text: string }     // final assistant text for this turn
   | { type: 'error'; message: string };
 

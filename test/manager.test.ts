@@ -253,3 +253,51 @@ describe('SessionManager — enqueueExisting', () => {
     expect(manager.has('NO:SESSION')).toBe(false);
   });
 });
+
+describe('SessionManager — file upload', () => {
+  it('uploads a file event into the session thread', async () => {
+    const slack = new FakeSlackClient();
+    const fileData = Buffer.from('svg content', 'utf-8');
+    const factory = new FakeRunnerFactory([
+      [
+        { type: 'file', name: 'output.svg', data: fileData },
+        { type: 'text', text: 'here is your svg' },
+      ] as RunnerEvent[],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    await manager.enqueueNew('C:T', { message: 'make svg', channel: 'C', threadTs: 'T' });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(slack.uploads).toHaveLength(1);
+    const upload = slack.uploads[0];
+    expect(upload?.filename).toBe('output.svg');
+    expect(upload?.channel).toBe('C');
+    expect(upload?.thread_ts).toBe('T');
+    expect(upload?.data).toEqual(fileData);
+  });
+
+  it('upload failure updates placeholder with error but turn still completes', async () => {
+    const slack = new FakeSlackClient();
+    slack.uploadError = new Error('upload failed: forbidden');
+    const fileData = Buffer.from('data', 'utf-8');
+    const factory = new FakeRunnerFactory([
+      [
+        { type: 'file', name: 'fail.bin', data: fileData },
+        { type: 'text', text: 'done anyway' },
+      ] as RunnerEvent[],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    await manager.enqueueNew('C:T', { message: 'test', channel: 'C', threadTs: 'T' });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Upload failed → error text in placeholder
+    const updateTexts = slack.updates.map((u) => u.text);
+    expect(updateTexts.some((t) => t.includes('fail.bin'))).toBe(true);
+    expect(updateTexts.some((t) => t.includes('upload failed') || t.includes('forbidden'))).toBe(true);
+
+    // Turn still completes — the final text update appears
+    expect(updateTexts.some((t) => t === 'done anyway')).toBe(true);
+  });
+});
