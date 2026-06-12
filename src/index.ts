@@ -1,5 +1,7 @@
 import 'dotenv/config';
-import { App } from '@slack/bolt';
+// @slack/bolt is CommonJS — a named import fails at runtime under ESM
+import bolt from '@slack/bolt';
+const { App } = bolt;
 import { loadConfig } from './config.js';
 import { SessionManager } from './sessions/manager.js';
 import { FakeRunnerFactory } from './runner/fake.js';
