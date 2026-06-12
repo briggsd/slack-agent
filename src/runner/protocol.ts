@@ -26,6 +26,7 @@ export type UserMessage = {
 export type RunnerToGatewayMessage =
   | ReadyMessage
   | StatusMessage
+  | FileMessage
   | TextMessage
   | ErrorMessage;
 
@@ -39,6 +40,18 @@ export type StatusMessage = {
   type: 'status';
   id: string;
   text: string;
+};
+
+/**
+ * File produced during the turn.
+ * Emitted zero or more times per turn, always before the final text/error.
+ */
+export type FileMessage = {
+  type: 'file';
+  id: string;
+  name: string;
+  data_base64: string;
+  size: number;
 };
 
 /** Final assistant text for this turn. Emitted exactly once per user_message. */

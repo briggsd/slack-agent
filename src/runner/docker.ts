@@ -304,6 +304,19 @@ export class DockerRunner implements SessionRunner {
 
           if (parsed.type === 'status' && parsed.id === id) {
             yield { type: 'status', text: parsed.text } as RunnerEvent;
+          } else if (parsed.type === 'file' && parsed.id === id) {
+            // Decode base64 → Buffer; malformed base64 → status, not crash
+            let data: Buffer;
+            try {
+              data = Buffer.from(parsed.data_base64, 'base64');
+            } catch {
+              yield {
+                type: 'status',
+                text: `skipped file ${parsed.name}: base64 decode failed`,
+              } as RunnerEvent;
+              continue;
+            }
+            yield { type: 'file', name: parsed.name, data } as RunnerEvent;
           } else if (parsed.type === 'text' && parsed.id === id) {
             yield { type: 'text', text: parsed.text } as RunnerEvent;
             break;

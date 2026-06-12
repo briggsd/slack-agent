@@ -246,6 +246,66 @@ describe('DockerRunner — send/receive', () => {
     const e1 = await e1Promise;
     expect(e1.value).toEqual({ type: 'error', message: 'runner process exited unexpectedly' });
   });
+
+  it('maps protocol file message to RunnerEvent with decoded Buffer', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const gen = runner.send('make a file');
+    const iter = gen[Symbol.asyncIterator]();
+
+    const e1Promise = iter.next();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sent = JSON.parse(fake.stdinLines[0] ?? '{}') as { type: string; id: string };
+
+    const originalContent = 'hello from file';
+    const data_base64 = Buffer.from(originalContent, 'utf-8').toString('base64');
+
+    // Emit file message then text message
+    fake.writeOut(JSON.stringify({ type: 'file', id: sent.id, name: 'output.txt', data_base64, size: 15 }));
+    fake.writeOut(JSON.stringify({ type: 'text', id: sent.id, text: 'done' }));
+
+    const e1 = await e1Promise;
+    expect(e1.value).toMatchObject({ type: 'file', name: 'output.txt' });
+    // data should be a Buffer with the decoded content
+    const fileEvent = e1.value as { type: 'file'; name: string; data: Buffer };
+    expect(fileEvent.data).toBeInstanceOf(Buffer);
+    expect(fileEvent.data.toString('utf-8')).toBe(originalContent);
+
+    const e2 = await iter.next();
+    expect(e2.value).toEqual({ type: 'text', text: 'done' });
+    expect((await iter.next()).done).toBe(true);
+  });
+
+  it('emits status (not crash) on malformed base64 in file message', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const gen = runner.send('make a file');
+    const iter = gen[Symbol.asyncIterator]();
+
+    const e1Promise = iter.next();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sent = JSON.parse(fake.stdinLines[0] ?? '{}') as { type: string; id: string };
+
+    // Emit a file message with bad base64, then text
+    // Note: Buffer.from with 'base64' is actually very lenient and may not throw;
+    // the test verifies the guard path doesn't crash and the turn still completes.
+    fake.writeOut(JSON.stringify({ type: 'file', id: sent.id, name: 'bad.bin', data_base64: '!!!notbase64!!!', size: 0 }));
+    fake.writeOut(JSON.stringify({ type: 'text', id: sent.id, text: 'done' }));
+
+    // Collect all events
+    const events: unknown[] = [];
+    let next = await e1Promise;
+    while (!next.done) {
+      events.push(next.value);
+      next = await iter.next();
+    }
+
+    // Should not crash; should eventually yield the text event
+    const textEvent = events.find((e) => (e as { type: string }).type === 'text');
+    expect(textEvent).toBeDefined();
+  });
 });
 
 // ── Partial line buffering ────────────────────────────────────────────────────

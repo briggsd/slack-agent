@@ -30,6 +30,7 @@ oauth_config:
       - channels:history
       - groups:history
       - im:history
+      - files:write
 settings:
   event_subscriptions:
     bot_events:
@@ -127,6 +128,17 @@ it left off.
 **Note — volume garbage collection**: Docker volumes accumulate one per Slack
 thread and are never automatically removed. Run `docker volume prune` (or a
 scheduled cleanup script) to reclaim disk space from old sessions.
+
+### File forwarding
+
+Files the agent saves under `/workspace` during a turn are automatically
+uploaded to the Slack thread at the end of that turn. The agent is instructed
+to save artifacts (SVGs, CSVs, PDFs, etc.) there so they reach the user.
+
+Limits per turn: up to **5 files**, max **8 MiB per file**, max **16 MiB total**.
+Files that exceed a cap are skipped and a note is posted to the thread.
+
+The Slack app requires the **`files:write`** bot scope for uploads.
 
 ### Smoke test
 
