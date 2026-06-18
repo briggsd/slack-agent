@@ -152,13 +152,19 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     const provider = providerFor(req.lease.host);
     const helper = credentialHelper(provider.credentialUsername());
 
-    // git -C <workdir> push origin <branch> (entrypoint is git, so no leading 'git').
+    // git -C <workdir> push origin HEAD:<branch> (entrypoint is git, so no leading 'git').
+    // Push the cloned working tree's current HEAD to the new remote branch. The agentic
+    // implement step commits on whatever branch the clone left checked out (the repo's
+    // default), and the orchestrator does not create a local branch named req.branch — so
+    // pushing the bare `req.branch` refspec fails ("src refspec … does not match any").
+    // The `HEAD:req.branch` form creates the remote branch from HEAD regardless of the
+    // local branch name.
     const gitArgs = [
       '-C', req.workdir,
       '-c', `credential.helper=${helper}`,
       'push',
       'origin',
-      req.branch,
+      `HEAD:${req.branch}`,
     ];
 
     const args = this.dockerRunArgs(req.volume, gitArgs);

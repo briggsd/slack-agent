@@ -338,7 +338,7 @@ describe('DockerGitNodeExecutor — push', () => {
   const branch = 'slackbot/oneshot-task-001';
   const token = 'ghp-super-secret-push-token';
 
-  it('spawns docker run with git -C <workdir> push origin <branch>', async () => {
+  it('spawns docker run with git -C <workdir> push origin HEAD:<branch>', async () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
@@ -364,12 +364,15 @@ describe('DockerGitNodeExecutor — push', () => {
     expect(args[epIdx + 1]).toBe('git');
     expect(epIdx).toBeLessThan(args.indexOf(image));
 
-    // git -C <workdir> push origin <branch> (git supplied by the entrypoint)
+    // git -C <workdir> push origin HEAD:<branch> (git supplied by the entrypoint).
+    // HEAD:<branch> creates the remote branch from the cloned tree's current HEAD —
+    // see the push() comment for why the bare-<branch> refspec cannot work.
     expect(args).toContain('-C');
     expect(args).toContain(workdir);
     expect(args).toContain('push');
     expect(args).toContain('origin');
-    expect(args).toContain(branch);
+    expect(args).toContain(`HEAD:${branch}`);
+    expect(args).not.toContain(branch);
 
     // Security opt
     expect(args).toContain('--security-opt');
