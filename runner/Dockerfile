@@ -1,10 +1,13 @@
 FROM node:22-bookworm-slim
 
-# Install useful agent tools
+# Install useful agent tools.
+# ca-certificates is required for git-over-HTTPS to verify TLS (the slim base + the
+# git-node clone/push path need it; without it git fails "server certificate verification failed").
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ripgrep \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user

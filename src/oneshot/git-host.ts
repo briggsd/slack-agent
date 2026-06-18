@@ -10,6 +10,23 @@ import type { GitHost } from '../broker/types.js';
 
 export type FetchFn = typeof fetch;
 
+/**
+ * Read a short, safe reason from a failed GitHub response. GitHub's error body carries
+ * the actual cause (e.g. "No commits between main and X") and never echoes the request's
+ * Authorization header, so it is safe to surface — unlike the token we sent.
+ */
+async function safeReason(res: Response): Promise<string> {
+  try {
+    const data = (await res.json()) as { message?: unknown };
+    if (typeof data.message === 'string' && data.message !== '') {
+      return ` — ${data.message.slice(0, 200)}`;
+    }
+  } catch {
+    // body not JSON / already consumed — fall through
+  }
+  return '';
+}
+
 export interface GitHostProvider {
   readonly host: GitHost;
   /** HTTPS clone URL with NO secret embedded (token applied at runtime via the helper). */
@@ -53,7 +70,7 @@ export class GithubProvider implements GitHostProvider {
     });
 
     if (!res.ok) {
-      throw new Error(`GitHub API error ${res.status} fetching repo metadata`);
+      throw new Error(`GitHub API error ${res.status} fetching repo metadata${await safeReason(res)}`);
     }
 
     const data = (await res.json()) as { default_branch?: unknown };
@@ -90,8 +107,8 @@ export class GithubProvider implements GitHostProvider {
     });
 
     if (!res.ok) {
-      // Never include the token in the error message
-      throw new Error(`GitHub API error ${res.status} creating pull request`);
+      // GitHub's response body carries the reason and never echoes our token.
+      throw new Error(`GitHub API error ${res.status} creating pull request${await safeReason(res)}`);
     }
 
     const data = (await res.json()) as { html_url?: unknown };

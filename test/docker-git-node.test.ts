@@ -259,8 +259,14 @@ describe('DockerGitNodeExecutor — clone', () => {
     // Image
     expect(args).toContain(image);
 
-    // git clone present
-    expect(args).toContain('git');
+    // Entrypoint forced to git, before the image (the runner image's default
+    // entrypoint runs the agent, so git args alone would be ignored).
+    const epIdx = args.indexOf('--entrypoint');
+    expect(epIdx).toBeGreaterThan(-1);
+    expect(args[epIdx + 1]).toBe('git');
+    expect(epIdx).toBeLessThan(args.indexOf(image));
+
+    // git clone present (clone is git's arg; the entrypoint supplies `git`)
     expect(args).toContain('clone');
     expect(args).toContain('https://github.com/owner/repo.git');
     expect(args).toContain(workdir);
@@ -352,8 +358,13 @@ describe('DockerGitNodeExecutor — push', () => {
     const eIdx = args.indexOf('-e');
     expect(args[eIdx + 1]).toBe('GIT_TOKEN');
 
-    // git -C <workdir> push origin <branch>
-    expect(args).toContain('git');
+    // Entrypoint forced to git, before the image
+    const epIdx = args.indexOf('--entrypoint');
+    expect(epIdx).toBeGreaterThan(-1);
+    expect(args[epIdx + 1]).toBe('git');
+    expect(epIdx).toBeLessThan(args.indexOf(image));
+
+    // git -C <workdir> push origin <branch> (git supplied by the entrypoint)
     expect(args).toContain('-C');
     expect(args).toContain(workdir);
     expect(args).toContain('push');

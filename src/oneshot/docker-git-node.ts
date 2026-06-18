@@ -111,30 +111,40 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     this.fetchFn = opts.fetchFn ?? fetch;
   }
 
+  /**
+   * Build the `docker run` argv for a git command. The image is forced to run `git`
+   * via `--entrypoint git` — the default git image here (slackbot-runner) has an
+   * ENTRYPOINT that runs the agent, so passing git args without overriding the
+   * entrypoint would silently run the agent instead of git.
+   */
+  private dockerRunArgs(volume: string, gitArgs: string[]): string[] {
+    return [
+      'run',
+      '--rm',
+      '-v', `${volume}:/workspace`,
+      '-e', 'GIT_TOKEN',   // name-only: value inherited from spawn env, never in argv
+      '--security-opt', 'no-new-privileges',
+      '--entrypoint', 'git',
+      this.image,
+      ...gitArgs,
+    ];
+  }
+
   async clone(req: CloneRequest): Promise<void> {
     const provider = providerFor(req.lease.host);
     const cloneUrl = provider.cloneUrl(req.repo);
     const helper = credentialHelper(provider.credentialUsername());
 
-    // git credential helper that reads $GIT_TOKEN from container env — no token in argv
-    const gitCmd = [
-      'git',
+    // git args (the entrypoint is git, so no leading 'git'). The credential helper
+    // reads $GIT_TOKEN from the container env — no token in argv.
+    const gitArgs = [
       '-c', `credential.helper=${helper}`,
       'clone',
       cloneUrl,
       req.workdir,
     ];
 
-    const args: string[] = [
-      'run',
-      '--rm',
-      '-v', `${req.volume}:/workspace`,
-      '-e', 'GIT_TOKEN',   // name-only: value inherited from spawn env, never in argv
-      '--security-opt', 'no-new-privileges',
-      this.image,
-      ...gitCmd,
-    ];
-
+    const args = this.dockerRunArgs(req.volume, gitArgs);
     await runDocker(this.spawnFn, args, req.lease.token, 'git clone', `repo: ${req.repo}`);
   }
 
@@ -142,9 +152,8 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     const provider = providerFor(req.lease.host);
     const helper = credentialHelper(provider.credentialUsername());
 
-    // git -C <workdir> push origin <branch> with the credential helper
-    const gitCmd = [
-      'git',
+    // git -C <workdir> push origin <branch> (entrypoint is git, so no leading 'git').
+    const gitArgs = [
       '-C', req.workdir,
       '-c', `credential.helper=${helper}`,
       'push',
@@ -152,16 +161,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
       req.branch,
     ];
 
-    const args: string[] = [
-      'run',
-      '--rm',
-      '-v', `${req.volume}:/workspace`,
-      '-e', 'GIT_TOKEN',   // name-only: value inherited from spawn env, never in argv
-      '--security-opt', 'no-new-privileges',
-      this.image,
-      ...gitCmd,
-    ];
-
+    const args = this.dockerRunArgs(req.volume, gitArgs);
     await runDocker(this.spawnFn, args, req.lease.token, 'git push', `repo: ${req.repo}, branch: ${req.branch}`);
   }
 
