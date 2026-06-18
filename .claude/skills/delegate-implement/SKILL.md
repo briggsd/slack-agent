@@ -15,13 +15,18 @@ context and never type the slice yourself** — research, spec, hand off, verify
 1. **Research non-trivial bits first** (subagent). For anything you can't implement confidently
    from memory — an SDK call, a protocol shape, a Slack API — spawn an `Explore` subagent to
    find the grounding (real `.d.ts`, existing patterns) and report back. Don't guess in the spec.
-2. **Write the spec** from `planning/_spec-template.md`. Cite the design note(s) in `design/`
-   (the *why*) and the exact files to touch. Make acceptance criteria directly testable. **Cite
-   the invariants the slice touches** (below) so the implementer can't unknowingly violate them.
+2. **Write the spec** to `planning/m<N>-s<NN>-spec.md` from `planning/_spec-template.md`. Cite the
+   design note(s) in `design/` (the *why*) and the exact files to touch — and **inline the grounded
+   facts** (line numbers, API shapes) so the implementer doesn't need `design/` (it's gitignored
+   and absent from worktrees). Make acceptance criteria directly testable. **Cite the invariants
+   the slice touches** (below).
 3. **Spin an isolated worktree** — `new-worktree.sh <backend>/<slug>` (see Worktrees below).
-4. **Hand off to the implementer subagent** — Sonnet by default; Haiku for mechanical/trivial
-   slices. Give it the spec, the worktree path, and the gate command. It implements, adds tests,
-   runs `npm run gate`, and reports with the gate output.
+4. **Commit the spec into the slice branch, then hand off.** Copy the spec into the worktree and
+   commit it there as the branch's first commit — keep it *tracked*, never leave it untracked in
+   the worktree (an untracked spec trips `merge-worktree.sh`'s dirty-guard at teardown). Then hand
+   off to the implementer subagent — Sonnet by default, Haiku for mechanical/trivial slices —
+   giving it the worktree path, the spec path, and the gate command. It implements, adds tests,
+   runs `npm run gate`, and reports with the gate output (the implementer must NOT touch the spec).
 5. **Coordinator-verify** — reconcile the report ⇆ `git diff`; run `npm run gate` yourself in the
    worktree. A "done" claim is not a passing gate until you've seen it.
 6. **Review locally with the factory** + triage (see Review below).
@@ -94,7 +99,9 @@ bun ~/workspace/ai-code-review-factory/src/cli.ts run --git-diff --base main \
 ```
 
 The factory's flags can change — its `review:local` script and `delegate-implement` SKILL.md are
-the source of truth; verify the invocation there if it errors.
+the source of truth; verify the invocation there if it errors. Running it in the worktree drops a
+`.ai-review/` working dir in cwd — it's gitignored, so it won't trip teardown; the grounded findings
+are in `<output-dir>/runs/<id>/summary.json` (`.findings`), with raw/withheld ones in the trace.
 
 **Triage discipline** (from the factory's hard-won rules):
 - **Don't trust the headline.** A reviewer can fail (timeout/`schema_invalid`) and still read

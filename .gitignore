@@ -11,3 +11,6 @@ dist/
 
 # Local design / exploration notes (not part of the published repo)
 design/
+
+# ai-code-review-factory output when run locally in a checkout/worktree
+.ai-review/
