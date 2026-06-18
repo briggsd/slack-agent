@@ -1,6 +1,6 @@
 /**
  * OneShotOrchestrator — a SessionRunner that executes the minimal one-shot blueprint:
- *   parse → lease → clone → implement (inner agent) → push → open PR → revoke → done
+ *   parse → lease → run blueprint (clone → implement → push → open PR) → revoke → done
  *
  * All dependencies are injected (inner runner, broker, git nodes) so this is
  * fully testable offline. The real git node executor and live wiring are S03/S05.
@@ -11,6 +11,10 @@ import type { CredentialBroker, CredentialLease } from '../broker/types.js';
 import type { GitNodeExecutor } from './git-node.js';
 import { parseOneShotTask } from './parse.js';
 import { volumeNameFor } from '../runner/docker.js';
+import { REPO_ONESHOT_PROFILE_ID } from '../profiles/registry.js';
+import { blueprintFor } from './blueprints/registry.js';
+import { runBlueprint } from './executor.js';
+import type { BlueprintContext, NodeDeps } from './blueprints/types.js';
 
 export class OneShotOrchestrator implements SessionRunner {
   private readonly inner: SessionRunner;
@@ -82,58 +86,33 @@ export class OneShotOrchestrator implements SessionRunner {
           }
         };
 
+        const ctx: BlueprintContext = {
+          host,
+          repo,
+          instruction,
+          taskId: self.taskId,
+          volume: self.volume,
+          workdir,
+          branch,
+          lease,
+        };
+
+        const deps: NodeDeps = {
+          inner: self.inner,
+          gitNodes: self.gitNodes,
+        };
+
         try {
-          // Clone
-          yield { type: 'status', text: 'cloning repository…' } satisfies RunnerEvent;
-          await self.gitNodes.clone({ lease, repo, workdir, volume: self.volume });
-
-          // Implement (inner agent runner)
-          yield { type: 'status', text: 'implementing…' } satisfies RunnerEvent;
-          let implementResult = '';
-          let innerError: string | null = null;
-
-          for await (const ev of self.inner.send(instruction)) {
-            if (ev.type === 'status') {
-              yield { type: 'status', text: ev.text } satisfies RunnerEvent;
-            } else if (ev.type === 'text') {
-              implementResult = ev.text;
-            } else if (ev.type === 'error') {
-              innerError = ev.message;
-              // Treat inner agent error as a blueprint failure — break and handle below
-              break;
-            }
-            // file events from inner runner are not forwarded in this minimal blueprint
+          // runBlueprint converts a node failure into a yielded error event and
+          // returns normally — node failures DO NOT enter the catch below; they come
+          // out as forwarded error events and the lease is revoked by `finally`. The
+          // catch only handles an orchestrator-level throw (e.g. blueprintFor on an
+          // unknown id). If you add cleanup/metrics to the catch, mirror it into the
+          // node path too — it will not run for node failures.
+          for await (const ev of runBlueprint(blueprintFor(REPO_ONESHOT_PROFILE_ID), ctx, deps)) {
+            yield ev;
           }
-
-          if (innerError !== null) {
-            throw new Error(`Inner agent error: ${innerError}`);
-          }
-
-          // Push
-          yield { type: 'status', text: 'pushing branch…' } satisfies RunnerEvent;
-          await self.gitNodes.push({ lease, repo, branch, workdir, volume: self.volume });
-
-          // Open PR
-          yield { type: 'status', text: 'opening pull request…' } satisfies RunnerEvent;
-          // Title: first ~72 chars of the instruction (first line)
-          const title = instruction.split('\n')[0]?.slice(0, 72) ?? instruction.slice(0, 72);
-          const body = implementResult !== ''
-            ? implementResult.slice(0, 500)
-            : `Automated one-shot implementation.\n\nTask: ${title}`;
-
-          const { url } = await self.gitNodes.openChangeRequest({
-            lease,
-            repo,
-            head: branch,
-            // base is a hint only — DockerGitNodeExecutor detects the repo's real
-            // default branch and uses that, so this value is not relied on.
-            base: 'main',
-            title,
-            body,
-          });
-
           await revokeOnce();
-          yield { type: 'text', text: `Opened PR: ${url}` } satisfies RunnerEvent;
         } catch (err: unknown) {
           await revokeOnce();
           const msg = err instanceof Error ? err.message : String(err);
