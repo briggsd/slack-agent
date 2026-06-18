@@ -14,6 +14,7 @@ function stripMention(text: string, botUserId: string): string {
 
 /** Shape of the event body we care about for app_mention */
 export interface MentionEventBody {
+  team_id?: string;
   event: {
     type: 'app_mention';
     user?: string;
@@ -28,6 +29,7 @@ export interface MentionEventBody {
 
 /** Shape of the event body we care about for message */
 export interface MessageEventBody {
+  team_id?: string;
   event: {
     type: 'message';
     user?: string;
@@ -59,8 +61,12 @@ export async function handleMention(
   // Ignore edited/deleted subtypes
   if (ev.subtype !== undefined) return;
 
-  const sessionKey = `${ev.channel}:${ev.thread_ts ?? ev.ts}`;
+  // team_id is always present on real Slack event envelopes; 'unknown' is a defensive
+  // placeholder so the key never starts with an empty segment. Recorded, not enforced —
+  // do NOT drop or branch on a missing team here; tenancy enforcement/validation is M6.
+  const team = body.team_id ?? 'unknown';
   const threadTs = ev.thread_ts ?? ev.ts;
+  const sessionKey = `${team}:${ev.channel}:${threadTs}`;
   const message = stripMention(ev.text, deps.botUserId);
 
   console.log(`[listener] mention → session=${sessionKey}`);
@@ -69,6 +75,8 @@ export async function handleMention(
     message,
     channel: ev.channel,
     threadTs,
+    ...(body.team_id !== undefined && { teamId: body.team_id }),
+    ...(ev.user !== undefined && { userId: ev.user }),
   });
 }
 
@@ -97,7 +105,9 @@ export async function handleMessage(
   // A message that mentions the bot also fires app_mention — let that handler own it
   if (ev.text !== undefined && ev.text.includes(`<@${deps.botUserId}>`)) return;
 
-  const sessionKey = `${ev.channel}:${ev.thread_ts}`;
+  // See handleMention: 'unknown' is a defensive placeholder, recorded-not-enforced (M6).
+  const team = body.team_id ?? 'unknown';
+  const sessionKey = `${team}:${ev.channel}:${ev.thread_ts}`;
   const message = (ev.text ?? '').trim();
   if (message === '') return;
 
@@ -105,6 +115,8 @@ export async function handleMessage(
     message,
     channel: ev.channel,
     threadTs: ev.thread_ts,
+    ...(body.team_id !== undefined && { teamId: body.team_id }),
+    ...(ev.user !== undefined && { userId: ev.user }),
   });
 
   if (!routed) {

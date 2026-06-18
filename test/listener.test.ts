@@ -3,6 +3,7 @@ import { handleMention, handleMessage } from '../src/slack/listener.js';
 import type { HandlerDeps, MentionEventBody, MessageEventBody } from '../src/slack/listener.js';
 import { FakeRunnerFactory } from '../src/runner/fake.js';
 import { SessionManager } from '../src/sessions/manager.js';
+import type { QueueItem } from '../src/sessions/manager.js';
 import { FakeSlackClient } from './responder.test.js';
 
 function makeDeps(idleTimeoutMs = 60_000): {
@@ -16,7 +17,10 @@ function makeDeps(idleTimeoutMs = 60_000): {
   return { deps: { sessions, slack, botUserId: 'U_BOT' }, factory, slack };
 }
 
-function mentionBody(overrides: Partial<MentionEventBody['event']> = {}): MentionEventBody {
+function mentionBody(
+  overrides: Partial<MentionEventBody['event']> = {},
+  topLevel: Partial<Omit<MentionEventBody, 'event'>> = {},
+): MentionEventBody {
   return {
     event: {
       type: 'app_mention',
@@ -26,10 +30,14 @@ function mentionBody(overrides: Partial<MentionEventBody['event']> = {}): Mentio
       channel: 'C_CHAN',
       ...overrides,
     },
+    ...topLevel,
   };
 }
 
-function messageBody(overrides: Partial<MessageEventBody['event']> = {}): MessageEventBody {
+function messageBody(
+  overrides: Partial<MessageEventBody['event']> = {},
+  topLevel: Partial<Omit<MessageEventBody, 'event'>> = {},
+): MessageEventBody {
   return {
     event: {
       type: 'message',
@@ -40,6 +48,7 @@ function messageBody(overrides: Partial<MessageEventBody['event']> = {}): Messag
       thread_ts: '100.000',
       ...overrides,
     },
+    ...topLevel,
   };
 }
 
@@ -57,7 +66,7 @@ describe('handleMention', () => {
     // Wait for async queue drain
     await new Promise((r) => setTimeout(r, 10));
     expect(factory.creates).toHaveLength(1);
-    expect(factory.creates[0]).toBe('C_CHAN:100.000');
+    expect(factory.creates[0]).toBe('unknown:C_CHAN:100.000');
     // The runner should have received the stripped message
     const runner = factory.runners[0];
     expect(runner).toBeDefined();
@@ -70,7 +79,7 @@ describe('handleMention', () => {
       deps,
     );
     await new Promise((r) => setTimeout(r, 10));
-    expect(factory.creates[0]).toBe('C_CHAN:99.000');
+    expect(factory.creates[0]).toBe('unknown:C_CHAN:99.000');
   });
 
   it('ignores bot messages', async () => {
@@ -168,5 +177,79 @@ describe('handleMessage (thread replies)', () => {
     await handleMessage(bodyNoThread, deps);
     await new Promise((r) => setTimeout(r, 10));
     expect(factory.creates).toHaveLength(0);
+  });
+});
+
+describe('handleMention + handleMessage — teamId/userId on QueueItem', () => {
+  it('records team_id from envelope and user from event on enqueueNew (mention)', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const sessions = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    const capturedItems: QueueItem[] = [];
+    const original = sessions.enqueueNew.bind(sessions);
+    sessions.enqueueNew = async (key: string, item: QueueItem): Promise<void> => {
+      capturedItems.push(item);
+      return original(key, item);
+    };
+
+    const deps: HandlerDeps = { sessions, slack, botUserId: 'U_BOT' };
+
+    await handleMention(
+      mentionBody({}, { team_id: 'T_TEAM' }),
+      deps,
+    );
+
+    expect(capturedItems).toHaveLength(1);
+    expect(capturedItems[0]?.teamId).toBe('T_TEAM');
+    expect(capturedItems[0]?.userId).toBe('U_USER');
+  });
+
+  it('falls back team_id to undefined when envelope has no team_id', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const sessions = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    const capturedItems: QueueItem[] = [];
+    const original = sessions.enqueueNew.bind(sessions);
+    sessions.enqueueNew = async (key: string, item: QueueItem): Promise<void> => {
+      capturedItems.push(item);
+      return original(key, item);
+    };
+
+    const deps: HandlerDeps = { sessions, slack, botUserId: 'U_BOT' };
+
+    await handleMention(mentionBody(), deps);
+
+    expect(capturedItems).toHaveLength(1);
+    expect(capturedItems[0]?.teamId).toBeUndefined();
+    expect(capturedItems[0]?.userId).toBe('U_USER');
+  });
+
+  it('records team_id from envelope and user from event on enqueueExisting (message)', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const sessions = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+    const deps: HandlerDeps = { sessions, slack, botUserId: 'U_BOT' };
+
+    // Create the session first via a mention
+    await handleMention(mentionBody({}, { team_id: 'T_TEAM' }), deps);
+    await new Promise((r) => setTimeout(r, 10));
+
+    const capturedItems: QueueItem[] = [];
+    const original = sessions.enqueueExisting.bind(sessions);
+    sessions.enqueueExisting = (key: string, item: QueueItem): boolean => {
+      capturedItems.push(item);
+      return original(key, item);
+    };
+
+    await handleMessage(
+      messageBody({ user: 'U_OTHER' }, { team_id: 'T_TEAM' }),
+      deps,
+    );
+
+    expect(capturedItems).toHaveLength(1);
+    expect(capturedItems[0]?.teamId).toBe('T_TEAM');
+    expect(capturedItems[0]?.userId).toBe('U_OTHER');
   });
 });
