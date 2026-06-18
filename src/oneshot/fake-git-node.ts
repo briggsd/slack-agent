@@ -11,6 +11,8 @@ import type {
   BranchRequest,
   PushRequest,
   OpenChangeRequest,
+  CheckRequest,
+  CheckResult,
 } from './git-node.js';
 
 export class FakeGitNodeExecutor implements GitNodeExecutor {
@@ -18,11 +20,13 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   public branches: BranchRequest[] = [];
   public pushes: PushRequest[] = [];
   public changeRequests: OpenChangeRequest[] = [];
+  public checks: CheckRequest[] = [];
 
   private readonly prUrl: string;
   private branchError: Error | null = null;
   private pushError: Error | null = null;
   private openChangeError: Error | null = null;
+  private checkResults: Map<'lint' | 'test', CheckResult> = new Map();
 
   constructor(prUrl = 'https://example.test/pr/1') {
     this.prUrl = prUrl;
@@ -41,6 +45,11 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   /** Script openChangeRequest() to reject with the given error (for failure-path tests). */
   failNextOpenChange(err: Error): void {
     this.openChangeError = err;
+  }
+
+  /** Script runCheck() to return a specific result for the given kind. */
+  setCheckResult(kind: 'lint' | 'test', result: CheckResult): void {
+    this.checkResults.set(kind, result);
   }
 
   async clone(req: CloneRequest): Promise<void> {
@@ -73,5 +82,10 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
       throw err;
     }
     return { url: this.prUrl };
+  }
+
+  async runCheck(req: CheckRequest): Promise<CheckResult> {
+    this.checks.push(req);
+    return this.checkResults.get(req.kind) ?? { exitCode: 0, output: '' };
   }
 }

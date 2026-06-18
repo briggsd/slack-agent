@@ -187,10 +187,10 @@ describe('runBlueprint — context threading', () => {
 // ── blueprintFor registry ─────────────────────────────────────────────────────
 
 describe('blueprintFor registry', () => {
-  it('returns a blueprint with the seven expected node names in order', () => {
+  it('returns a blueprint with the nine expected node names in order', () => {
     const bp = blueprintFor('repo-oneshot');
     const names = bp.nodes.map((n) => n.name);
-    expect(names).toEqual(['clone', 'research', 'plan', 'branch', 'implement', 'push', 'open-pr']);
+    expect(names).toEqual(['clone', 'research', 'plan', 'branch', 'implement', 'lint', 'test', 'push', 'open-pr']);
   });
 
   it('throws for an unknown blueprint id', () => {
@@ -214,6 +214,8 @@ describe('repoOneshot node kinds', () => {
     expect(kindsByName['plan']).toBe('agentic');
     expect(kindsByName['branch']).toBe('deterministic');
     expect(kindsByName['implement']).toBe('agentic');
+    expect(kindsByName['lint']).toBe('deterministic');
+    expect(kindsByName['test']).toBe('deterministic');
     expect(kindsByName['push']).toBe('deterministic');
     expect(kindsByName['open-pr']).toBe('deterministic');
   });

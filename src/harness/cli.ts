@@ -66,7 +66,13 @@ if (RUNNER_BACKEND === 'docker') {
   if (githubToken !== undefined && githubToken !== '') botTokens.set('github', githubToken);
   if (gitlabToken !== undefined && gitlabToken !== '') botTokens.set('gitlab', gitlabToken);
   const broker = new BotAccountBroker(botTokens);
-  const gitNodes = new DockerGitNodeExecutor({ image: envString('GIT_IMAGE', 'slackbot-runner:latest') });
+  const lintCmdRaw = process.env['ONESHOT_LINT_CMD'];
+  const testCmdRaw = process.env['ONESHOT_TEST_CMD'];
+  const gitNodes = new DockerGitNodeExecutor({
+    image: envString('GIT_IMAGE', 'slackbot-runner:latest'),
+    ...(lintCmdRaw !== undefined && lintCmdRaw !== '' ? { lintCmd: lintCmdRaw } : {}),
+    ...(testCmdRaw !== undefined && testCmdRaw !== '' ? { testCmd: testCmdRaw } : {}),
+  });
   dispatchingFactory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);
   console.log(`[harness] one-shot mode: docker (hosts=[${[...botTokens.keys()].join(',')}])`);
 } else {

@@ -52,13 +52,27 @@ interface SpawnCall {
   fake: FakeChildProcess;
 }
 
-function makeFakeSpawn(exitCode = 0): { spawnFn: SpawnFn; calls: SpawnCall[] } {
+interface FakeSpawnOpts {
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+}
+
+function makeFakeSpawn(exitCodeOrOpts: number | FakeSpawnOpts = 0): { spawnFn: SpawnFn; calls: SpawnCall[] } {
+  const opts: FakeSpawnOpts = typeof exitCodeOrOpts === 'number'
+    ? { exitCode: exitCodeOrOpts }
+    : exitCodeOrOpts;
+  const exitCode = opts.exitCode ?? 0;
   const calls: SpawnCall[] = [];
   const spawnFn: SpawnFn = (command, args, options) => {
     const fake = new FakeChildProcess();
     calls.push({ command, args, options, fake });
-    // Simulate immediate exit
-    setImmediate(() => fake.simulateExit(exitCode));
+    // Simulate immediate exit, optionally writing output first
+    setImmediate(() => {
+      if (opts.stdout !== undefined) fake.stdout.push(opts.stdout);
+      if (opts.stderr !== undefined) fake.stderr.push(opts.stderr);
+      fake.simulateExit(exitCode);
+    });
     return fake.asChildProcess();
   };
   return { spawnFn, calls };
@@ -529,5 +543,136 @@ describe('DockerGitNodeExecutor — openChangeRequest', () => {
         expect(err.message).not.toContain(token);
       }
     });
+  });
+});
+
+// ── DockerGitNodeExecutor — runCheck ─────────────────────────────────────────
+
+describe('DockerGitNodeExecutor — runCheck', () => {
+  const image = 'slackbot-runner:test';
+  const volume = 'slackbot-ws-team01-c123-t456';
+  const workdir = '/workspace/acme-widgets';
+
+  it('lint: builds correct argv (sh entrypoint, -w workdir, NO -e GIT_TOKEN, default shell cmd)', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.runCheck({ kind: 'lint', workdir, volume });
+
+    expect(calls).toHaveLength(1);
+    const { command, args } = calls[0]!;
+    expect(command).toBe('docker');
+    expect(args).toContain('run');
+    expect(args).toContain('--rm');
+
+    // Volume mount
+    const vIdx = args.indexOf('-v');
+    expect(vIdx).toBeGreaterThan(-1);
+    expect(args[vIdx + 1]).toBe(`${volume}:/workspace`);
+
+    // Working directory flag
+    const wIdx = args.indexOf('-w');
+    expect(wIdx).toBeGreaterThan(-1);
+    expect(args[wIdx + 1]).toBe(workdir);
+
+    // Entrypoint is sh, not git
+    const epIdx = args.indexOf('--entrypoint');
+    expect(epIdx).toBeGreaterThan(-1);
+    expect(args[epIdx + 1]).toBe('sh');
+
+    // Security opt
+    expect(args).toContain('--security-opt');
+    expect(args).toContain('no-new-privileges');
+
+    // Image present
+    expect(args).toContain(image);
+
+    // -c with the default auto-detect shell command
+    const cIdx = args.indexOf('-c');
+    expect(cIdx).toBeGreaterThan(-1);
+    const shellCmd = args[cIdx + 1] ?? '';
+    expect(shellCmd).toContain('package.json');
+    expect(shellCmd).toContain('npm run lint --if-present');
+    expect(shellCmd).toContain('if [');  // uses if/then/else, not &&/||
+
+    // NO -e GIT_TOKEN (checks get no credential)
+    expect(args).not.toContain('GIT_TOKEN');
+    const eIdx = args.indexOf('-e');
+    expect(eIdx).toBe(-1);
+  });
+
+  it('test: default shell cmd uses "npm run test --if-present"', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.runCheck({ kind: 'test', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    const shellCmd = args[cIdx + 1] ?? '';
+    expect(shellCmd).toContain('npm run test --if-present');
+  });
+
+  it('uses lintCmd override when configured', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint' });
+
+    await exec.runCheck({ kind: 'lint', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    expect(args[cIdx + 1]).toBe('make lint');
+  });
+
+  it('uses testCmd override when configured', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, testCmd: 'make test' });
+
+    await exec.runCheck({ kind: 'test', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    expect(args[cIdx + 1]).toBe('make test');
+  });
+
+  it('a non-zero exit RESOLVES with that exitCode (does not reject)', async () => {
+    const { spawnFn } = makeFakeSpawn(2);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    expect(result.exitCode).toBe(2);
+  });
+
+  it('captures combined stdout+stderr into output', async () => {
+    const { spawnFn } = makeFakeSpawn({ exitCode: 1, stdout: 'lint error line\n', stderr: 'from stderr\n' });
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain('lint error line');
+    expect(result.output).toContain('from stderr');
+  });
+
+  it('CREDENTIAL BOUNDARY: no GIT_TOKEN in spawn env for checks', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.runCheck({ kind: 'lint', workdir, volume });
+
+    const env = calls[0]!.options.env as Record<string, string | undefined>;
+    expect(env['GIT_TOKEN']).toBeUndefined();
+  });
+
+  it('lintCmd override does NOT also appear for test kind', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint' });
+
+    await exec.runCheck({ kind: 'test', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    // test kind should get the auto-detect default, not 'make lint'
+    expect(args[cIdx + 1]).not.toBe('make lint');
+    expect(args[cIdx + 1]).toContain('npm run test --if-present');
   });
 });

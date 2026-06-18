@@ -46,6 +46,25 @@ export interface BranchRequest {
   volume: string;
 }
 
+/** The captured result of running a lint or test check inside an ephemeral container. */
+export interface CheckResult {
+  exitCode: number;
+  output: string;
+}
+
+/**
+ * Run the project's lint or test command inside an ephemeral container on the
+ * shared volume. No credential is required — checks get no GIT_TOKEN (defense-in-depth
+ * on the credential boundary). A non-zero exit is a returned result, not a thrown error:
+ * the check ran and reported its outcome; failure is data, not an exception.
+ */
+export interface CheckRequest {
+  kind: 'lint' | 'test';
+  workdir: string;
+  /** Docker volume name to mount at /workspace (e.g. slackbot-ws-<sanitized-key>). */
+  volume: string;
+}
+
 /**
  * Deterministic, credentialed git operations. Run trusted-side; never in the
  * agent sandbox.
@@ -56,4 +75,11 @@ export interface GitNodeExecutor {
   branch(req: BranchRequest): Promise<void>;
   push(req: PushRequest): Promise<void>;
   openChangeRequest(req: OpenChangeRequest): Promise<{ url: string }>;
+  /**
+   * Run the project's lint or test command in an ephemeral container on the volume.
+   * No credential is injected (defense-in-depth: the token never reaches lint/test).
+   * A non-zero exit resolves with that exitCode — it is a returned result, not a
+   * thrown error. Only a true spawn/infrastructure failure rejects the promise.
+   */
+  runCheck(req: CheckRequest): Promise<CheckResult>;
 }
