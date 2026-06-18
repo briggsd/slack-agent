@@ -52,6 +52,11 @@ export function sanitizeKey(key: string): string {
   return key.replace(/[^a-z0-9-]/gi, '-').toLowerCase().slice(0, 64);
 }
 
+/** Canonical Docker volume name for a session's workspace. */
+export function volumeNameFor(sessionKey: string): string {
+  return `slackbot-ws-${sanitizeKey(sessionKey)}`;
+}
+
 // ── DockerRunner ──────────────────────────────────────────────────────────────
 
 export class DockerRunner implements SessionRunner {
@@ -404,7 +409,7 @@ export class DockerRunnerFactory implements RunnerFactory {
   async create(sessionKey: string, _profile: Profile): Promise<SessionRunner> {
     const safe = sanitizeKey(sessionKey);
     const containerName = `slackbot-${safe}`;
-    const volumeName = `slackbot-ws-${safe}`;
+    const volumeName = volumeNameFor(sessionKey);
 
     const args: string[] = [
       'run',

@@ -14,8 +14,11 @@ import { parseOneShotTask } from '../src/oneshot/parse.js';
 import { OneShotOrchestrator } from '../src/oneshot/orchestrator.js';
 import { DispatchingRunnerFactory } from '../src/oneshot/dispatching-factory.js';
 import { getProfile } from '../src/profiles/registry.js';
+import { volumeNameFor } from '../src/runner/docker.js';
 import type { RunnerEvent } from '../src/runner/types.js';
 import type { CredentialBroker, LeaseRequest, CredentialLease } from '../src/broker/types.js';
+
+const TEST_SESSION_KEY = 'TEAM01:C123:T456';
 
 // Helper: drain an AsyncIterable<RunnerEvent> into an array
 async function drain(iter: AsyncIterable<RunnerEvent>): Promise<RunnerEvent[]> {
@@ -110,7 +113,7 @@ describe('OneShotOrchestrator — happy path', () => {
         { type: 'text', text: 'Implementation complete.' },
       ],
     ]);
-    orch = new OneShotOrchestrator(innerRunner, broker, gitNodes, 'task-001');
+    orch = new OneShotOrchestrator(innerRunner, broker, gitNodes, TEST_SESSION_KEY, 'task-001');
   });
 
   it('runs the full blueprint in order and emits terminal text with PR url', async () => {
@@ -173,6 +176,13 @@ describe('OneShotOrchestrator — happy path', () => {
     expect(gitNodes.changeRequests[0]?.base).toBe('main');
   });
 
+  it('threads volumeNameFor(sessionKey) into clone and push requests', async () => {
+    await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+    const expectedVolume = volumeNameFor(TEST_SESSION_KEY);
+    expect(gitNodes.clones[0]?.volume).toBe(expectedVolume);
+    expect(gitNodes.pushes[0]?.volume).toBe(expectedVolume);
+  });
+
   it('the PR title is derived from the instruction (first 72 chars)', async () => {
     await drain(orch.send('github:acme/widgets add a CHANGELOG'));
     expect(gitNodes.changeRequests[0]?.title).toBe('add a CHANGELOG');
@@ -190,7 +200,7 @@ describe('OneShotOrchestrator — parse failure', () => {
     broker = new FakeBroker();
     gitNodes = new FakeGitNodeExecutor();
     const inner = new FakeRunner('test-session');
-    orch = new OneShotOrchestrator(inner, broker, gitNodes, 'task-002');
+    orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-002');
   });
 
   it('emits a single error event and makes no lease or git calls', async () => {
@@ -224,7 +234,7 @@ describe('OneShotOrchestrator — post-lease git failure', () => {
     const inner = new FakeRunner('test-session', [
       [{ type: 'text', text: 'done' }],
     ]);
-    const orch = new OneShotOrchestrator(inner, broker, gitNodes, 'task-003');
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-003');
 
     const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
 
@@ -247,7 +257,7 @@ describe('OneShotOrchestrator — post-lease git failure', () => {
     const inner = new FakeRunner('test-session', [
       [{ type: 'text', text: 'done' }],
     ]);
-    const orch = new OneShotOrchestrator(inner, broker, gitNodes, 'task-004');
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-004');
 
     const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
 
@@ -270,7 +280,7 @@ describe('OneShotOrchestrator — inner agent error', () => {
       // Script the inner runner to emit an error
       [{ type: 'error', message: 'agent crashed' }],
     ]);
-    const orch = new OneShotOrchestrator(inner, broker, gitNodes, 'task-005');
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-005');
 
     const events = await drain(orch.send('github:acme/widgets add something'));
 
@@ -297,7 +307,7 @@ describe('OneShotOrchestrator — lease failure', () => {
     const broker = new BotAccountBroker(new Map());
     const gitNodes = new FakeGitNodeExecutor();
     const inner = new FakeRunner('test-session');
-    const orch = new OneShotOrchestrator(inner, broker, gitNodes, 'task-lease');
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-lease');
 
     const events = await drain(orch.send('github:acme/widgets do something'));
 
@@ -333,7 +343,7 @@ describe('OneShotOrchestrator — revoke resilience', () => {
     const broker = new ThrowingRevokeBroker();
     const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/7');
     const inner = new FakeRunner('test-session', [[{ type: 'text', text: 'done' }]]);
-    const orch = new OneShotOrchestrator(inner, broker, gitNodes, 'task-revoke');
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-revoke');
 
     const events = await drain(orch.send('github:acme/widgets add x'));
 
@@ -354,7 +364,7 @@ describe('OneShotOrchestrator — workdir', () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
     const inner = new FakeRunner('test-session', [[{ type: 'text', text: 'done' }]]);
-    const orch = new OneShotOrchestrator(inner, broker, gitNodes, 'task-wd');
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-wd');
 
     await drain(orch.send('gitlab:group/sub/proj fix it'));
 
@@ -369,7 +379,7 @@ describe('OneShotOrchestrator — dispose', () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
     const inner = new FakeRunner('test-session');
-    const orch = new OneShotOrchestrator(inner, broker, gitNodes, 'task-006');
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-006');
 
     expect(inner.disposed).toBe(false);
     await orch.dispose();
@@ -380,7 +390,7 @@ describe('OneShotOrchestrator — dispose', () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
     const inner = new FakeRunner('test-session');
-    const orch = new OneShotOrchestrator(inner, broker, gitNodes, 'task-007');
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-007');
 
     await orch.dispose();
     await orch.dispose(); // second call must not throw

@@ -11,6 +11,8 @@ export interface CloneRequest {
   lease: CredentialLease;
   repo: string;
   workdir: string;
+  /** Docker volume name to mount at /workspace (e.g. slackbot-ws-<sanitized-key>). */
+  volume: string;
 }
 
 export interface PushRequest {
@@ -18,6 +20,8 @@ export interface PushRequest {
   repo: string;
   branch: string;
   workdir: string;
+  /** Docker volume name to mount at /workspace (e.g. slackbot-ws-<sanitized-key>). */
+  volume: string;
 }
 
 export interface OpenChangeRequest {

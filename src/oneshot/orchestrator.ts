@@ -10,22 +10,26 @@ import type { SessionRunner, RunnerEvent } from '../runner/types.js';
 import type { CredentialBroker, CredentialLease } from '../broker/types.js';
 import type { GitNodeExecutor } from './git-node.js';
 import { parseOneShotTask } from './parse.js';
+import { volumeNameFor } from '../runner/docker.js';
 
 export class OneShotOrchestrator implements SessionRunner {
   private readonly inner: SessionRunner;
   private readonly broker: CredentialBroker;
   private readonly gitNodes: GitNodeExecutor;
   private readonly taskId: string;
+  private readonly volume: string;
 
   constructor(
     inner: SessionRunner,
     broker: CredentialBroker,
     gitNodes: GitNodeExecutor,
+    sessionKey: string,
     taskId?: string,
   ) {
     this.inner = inner;
     this.broker = broker;
     this.gitNodes = gitNodes;
+    this.volume = volumeNameFor(sessionKey);
     // Mirror docker.ts correlation id style
     this.taskId = taskId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   }
@@ -81,7 +85,7 @@ export class OneShotOrchestrator implements SessionRunner {
         try {
           // Clone
           yield { type: 'status', text: 'cloning repository…' } satisfies RunnerEvent;
-          await self.gitNodes.clone({ lease, repo, workdir });
+          await self.gitNodes.clone({ lease, repo, workdir, volume: self.volume });
 
           // Implement (inner agent runner)
           yield { type: 'status', text: 'implementing…' } satisfies RunnerEvent;
@@ -107,7 +111,7 @@ export class OneShotOrchestrator implements SessionRunner {
 
           // Push
           yield { type: 'status', text: 'pushing branch…' } satisfies RunnerEvent;
-          await self.gitNodes.push({ lease, repo, branch, workdir });
+          await self.gitNodes.push({ lease, repo, branch, workdir, volume: self.volume });
 
           // Open PR
           yield { type: 'status', text: 'opening pull request…' } satisfies RunnerEvent;
@@ -121,8 +125,8 @@ export class OneShotOrchestrator implements SessionRunner {
             lease,
             repo,
             head: branch,
-            // base 'main' is an S02 simplification — S03's real git nodes will detect
-            // the remote's default branch (master/develop/…) instead of assuming main.
+            // base is a hint only — DockerGitNodeExecutor detects the repo's real
+            // default branch and uses that, so this value is not relied on.
             base: 'main',
             title,
             body,
