@@ -113,7 +113,7 @@ export async function handleMessage(
   const message = (ev.text ?? '').trim();
   if (message === '') return;
 
-  const routed = deps.sessions.enqueueExisting(sessionKey, {
+  const routed = await deps.sessions.enqueueExisting(sessionKey, {
     message,
     channel: ev.channel,
     threadTs: ev.thread_ts,

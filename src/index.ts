@@ -1,9 +1,12 @@
 import 'dotenv/config';
+import { mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 // @slack/bolt is CommonJS — a named import fails at runtime under ESM
 import bolt from '@slack/bolt';
 const { App } = bolt;
 import { loadConfig } from './config.js';
 import { SessionManager } from './sessions/manager.js';
+import { SqliteSessionStore } from './sessions/store.js';
 import { FakeRunnerFactory } from './runner/fake.js';
 import { DockerRunnerFactory } from './runner/docker.js';
 import type { RunnerFactory } from './runner/types.js';
@@ -60,6 +63,18 @@ async function main(): Promise<void> {
     },
   };
 
+  // Ensure the parent directory for the DB exists before opening it.
+  await mkdir(dirname(config.SESSION_DB_PATH), { recursive: true });
+  const store = new SqliteSessionStore(config.SESSION_DB_PATH);
+  console.log(`[gateway] session store opened at ${config.SESSION_DB_PATH}`);
+
+  const closeStore = (): void => {
+    store.close();
+    process.exit(0);
+  };
+  process.on('SIGTERM', closeStore);
+  process.on('SIGINT', closeStore);
+
   let factory: RunnerFactory;
   if (config.RUNNER_BACKEND === 'docker') {
     const dc = config.docker;
@@ -82,6 +97,7 @@ async function main(): Promise<void> {
     idleTimeoutMs: config.IDLE_TIMEOUT_MS,
     factory,
     slack,
+    store,
   });
 
   // Cast to BoltAppLike — registerSlackHandlers only needs the minimal .event() shape

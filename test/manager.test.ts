@@ -242,9 +242,9 @@ describe('SessionManager — responder integration', () => {
 });
 
 describe('SessionManager — enqueueExisting', () => {
-  it('returns false and does not create a session', () => {
+  it('returns false and does not create a session', async () => {
     const { manager } = makeManager();
-    const result = manager.enqueueExisting('NO:SESSION', {
+    const result = await manager.enqueueExisting('NO:SESSION', {
       message: 'hi',
       channel: 'C',
       threadTs: 'T',
