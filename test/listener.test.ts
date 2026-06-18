@@ -238,7 +238,7 @@ describe('handleMention + handleMessage — teamId/userId on QueueItem', () => {
 
     const capturedItems: QueueItem[] = [];
     const original = sessions.enqueueExisting.bind(sessions);
-    sessions.enqueueExisting = (key: string, item: QueueItem): boolean => {
+    sessions.enqueueExisting = async (key: string, item: QueueItem): Promise<boolean> => {
       capturedItems.push(item);
       return original(key, item);
     };

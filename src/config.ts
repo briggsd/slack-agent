@@ -45,6 +45,8 @@ export interface Config {
   SLACK_APP_TOKEN: string;
   IDLE_TIMEOUT_MS: number;
   RUNNER_BACKEND: RunnerBackend;
+  /** Path to the SQLite session database. Parent dir is created on startup. */
+  SESSION_DB_PATH: string;
   docker: DockerConfig;
 }
 
@@ -61,6 +63,7 @@ export function loadConfig(): Config {
     SLACK_APP_TOKEN: requireEnv('SLACK_APP_TOKEN'),
     IDLE_TIMEOUT_MS: optionalEnvNumber('IDLE_TIMEOUT_MS', 10 * 60 * 1000),
     RUNNER_BACKEND: backend,
+    SESSION_DB_PATH: optionalEnvString('SESSION_DB_PATH', '.data/sessions.db'),
     docker: {
       RUNNER_IMAGE: optionalEnvString('RUNNER_IMAGE', 'slackbot-runner:latest'),
       RUNNER_READY_TIMEOUT_MS: optionalEnvNumber('RUNNER_READY_TIMEOUT_MS', 30_000),
