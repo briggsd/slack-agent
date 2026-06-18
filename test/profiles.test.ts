@@ -16,12 +16,22 @@ describe('profiles registry', () => {
     expect(p).toBeDefined();
     expect(p?.id).toBe('conversational');
     expect(p?.label).toBe('Conversational');
+    expect(p?.mode).toBe('conversational');
+  });
+
+  it('PROFILES contains the repo-oneshot entry with mode one-shot', () => {
+    const p = PROFILES.get('repo-oneshot');
+    expect(p).toBeDefined();
+    expect(p?.id).toBe('repo-oneshot');
+    expect(p?.label).toBe('Repo (one-shot)');
+    expect(p?.mode).toBe('one-shot');
   });
 
   it('getProfile resolves a known id', () => {
     const p: Profile = getProfile('conversational');
     expect(p.id).toBe('conversational');
     expect(p.label).toBe('Conversational');
+    expect(p.mode).toBe('conversational');
   });
 
   it('getProfile falls back to the default for an unknown id', () => {
@@ -40,7 +50,7 @@ describe('conversational profile flows to factory.create', () => {
   it('FakeRunnerFactory records the profile passed to create()', async () => {
     const { FakeRunnerFactory } = await import('../src/runner/fake.js');
     const factory = new FakeRunnerFactory();
-    const profile: Profile = { id: 'conversational', label: 'Conversational' };
+    const profile: Profile = { id: 'conversational', label: 'Conversational', mode: 'conversational' };
     await factory.create('TEAM:C:T', profile);
     expect(factory.profiles).toHaveLength(1);
     expect(factory.profiles[0]).toEqual(profile);
