@@ -37,7 +37,7 @@ export class DispatchingRunnerFactory implements RunnerFactory {
       // profile — never the dispatching factory, never the one-shot profile.
       // This avoids dispatch recursion.
       const inner = await this.agentFactory.create(sessionKey, getProfile('conversational'));
-      return new OneShotOrchestrator(inner, this.broker, this.gitNodes);
+      return new OneShotOrchestrator(inner, this.broker, this.gitNodes, sessionKey);
     }
     return this.agentFactory.create(sessionKey, profile);
   }
