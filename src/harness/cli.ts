@@ -17,6 +17,12 @@ import { DockerRunnerFactory } from '../runner/docker.js';
 import type { RunnerFactory } from '../runner/types.js';
 import { NoopSessionStore } from '../sessions/store.js';
 import { buildGateway } from '../app.js';
+import { BotAccountBroker } from '../broker/bot-account.js';
+import { FakeBroker } from '../broker/fake.js';
+import type { GitHost } from '../broker/types.js';
+import { DockerGitNodeExecutor } from '../oneshot/docker-git-node.js';
+import { FakeGitNodeExecutor } from '../oneshot/fake-git-node.js';
+import { DispatchingRunnerFactory } from '../oneshot/dispatching-factory.js';
 
 // ─── Minimal config (does not call loadConfig — avoids requiring Slack tokens) ─
 
@@ -38,9 +44,11 @@ const RUNNER_BACKEND = envString('RUNNER_BACKEND', 'fake');
 const IDLE_TIMEOUT_MS = envNumber('IDLE_TIMEOUT_MS', 10 * 60 * 1000);
 const BOT_USER_ID = 'UHARNESS';
 
-let factory: RunnerFactory;
+let baseFactory: RunnerFactory;
+let dispatchingFactory: DispatchingRunnerFactory;
+
 if (RUNNER_BACKEND === 'docker') {
-  factory = new DockerRunnerFactory({
+  baseFactory = new DockerRunnerFactory({
     image: envString('RUNNER_IMAGE', 'slackbot-runner:latest'),
     readyTimeoutMs: envNumber('RUNNER_READY_TIMEOUT_MS', 30_000),
     turnTimeoutMs: envNumber('RUNNER_TURN_TIMEOUT_MS', 5 * 60_000),
@@ -50,9 +58,26 @@ if (RUNNER_BACKEND === 'docker') {
     pidsLimit: envNumber('RUNNER_PIDS_LIMIT', 256),
   });
   console.log('[harness] using DockerRunnerFactory');
+
+  // Build real broker + git-node executor for docker backend
+  const botTokens = new Map<GitHost, string>();
+  const githubToken = process.env['GITHUB_BOT_TOKEN'];
+  const gitlabToken = process.env['GITLAB_BOT_TOKEN'];
+  if (githubToken !== undefined && githubToken !== '') botTokens.set('github', githubToken);
+  if (gitlabToken !== undefined && gitlabToken !== '') botTokens.set('gitlab', gitlabToken);
+  const broker = new BotAccountBroker(botTokens);
+  const gitNodes = new DockerGitNodeExecutor({ image: envString('GIT_IMAGE', 'slackbot-runner:latest') });
+  dispatchingFactory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);
+  console.log(`[harness] one-shot mode: docker (hosts=[${[...botTokens.keys()].join(',')}])`);
 } else {
-  factory = new FakeRunnerFactory();
+  baseFactory = new FakeRunnerFactory();
   console.log('[harness] using FakeRunnerFactory');
+
+  // Use fakes for offline REPL so `task ...` exercises the one-shot path without Docker
+  const broker = new FakeBroker();
+  const gitNodes = new FakeGitNodeExecutor();
+  dispatchingFactory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);
+  console.log('[harness] one-shot mode: fake (offline)');
 }
 
 const fakeApp = new FakeSlackApp();
@@ -62,7 +87,7 @@ const store = new NoopSessionStore();
 buildGateway({
   app: fakeApp,
   slack,
-  factory,
+  factory: dispatchingFactory,
   store,
   idleTimeoutMs: IDLE_TIMEOUT_MS,
   botUserId: BOT_USER_ID,

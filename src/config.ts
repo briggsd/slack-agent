@@ -21,6 +21,11 @@ function optionalEnvString(name: string, defaultValue: string): string {
   return raw !== undefined && raw !== '' ? raw : defaultValue;
 }
 
+function optionalEnvMaybe(name: string): string | undefined {
+  const raw = process.env[name];
+  return raw !== undefined && raw !== '' ? raw : undefined;
+}
+
 export type RunnerBackend = 'fake' | 'docker';
 
 export interface DockerConfig {
@@ -40,6 +45,14 @@ export interface DockerConfig {
   RUNNER_PIDS_LIMIT: number;
 }
 
+export interface OneShotConfig {
+  /** Docker image used for the ephemeral credentialed git nodes (clone/push). */
+  GIT_IMAGE: string;
+  /** Per-host bot-account tokens. Absent host → that host is unavailable (lease throws). */
+  githubToken: string | undefined;
+  gitlabToken: string | undefined;
+}
+
 export interface Config {
   SLACK_BOT_TOKEN: string;
   SLACK_APP_TOKEN: string;
@@ -48,6 +61,7 @@ export interface Config {
   /** Path to the SQLite session database. Parent dir is created on startup. */
   SESSION_DB_PATH: string;
   docker: DockerConfig;
+  oneshot: OneShotConfig;
 }
 
 export function loadConfig(): Config {
@@ -72,6 +86,11 @@ export function loadConfig(): Config {
       RUNNER_MEMORY: optionalEnvString('RUNNER_MEMORY', '512m'),
       RUNNER_CPUS: optionalEnvString('RUNNER_CPUS', '1.0'),
       RUNNER_PIDS_LIMIT: optionalEnvNumber('RUNNER_PIDS_LIMIT', 256),
+    },
+    oneshot: {
+      GIT_IMAGE: optionalEnvString('GIT_IMAGE', 'slackbot-runner:latest'),
+      githubToken: optionalEnvMaybe('GITHUB_BOT_TOKEN'),
+      gitlabToken: optionalEnvMaybe('GITLAB_BOT_TOKEN'),
     },
   };
 }

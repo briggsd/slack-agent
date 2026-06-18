@@ -76,7 +76,7 @@ volume ⇒ one Agent SDK conversation.
 
 | Incoming event | Behavior |
 |---|---|
-| `app_mention` (anywhere) | Create **or reuse** the session for that thread; enqueue the text (mention stripped). This is the only way a session is born. |
+| `app_mention` (anywhere) | Create **or reuse** the session for that thread; enqueue the text (mention stripped). This is the only way a session is born. A leading `task ` keyword (e.g. `task github:owner/repo <instruction>`) instead selects the `repo-oneshot` profile — the keyword is stripped and the rest is run as a one-shot repo task (clone → implement → push → open PR). |
 | `message` that is a thread reply | Route to the session for that thread **only if one exists**; otherwise ignored silently. |
 | `message` that mentions the bot | Ignored by the message handler — Slack also fires `app_mention` for it, and processing both would answer twice. |
 | Anything with `bot_id` or a `subtype` (edits, deletes, bot posts) | Ignored. Prevents the bot replying to itself / reacting to edits. |
@@ -233,6 +233,8 @@ container is ever executed on the host.
 | `RUNNER_TURN_TIMEOUT_MS` | 300000 (5 min) | Per-message deadline |
 | `RUNNER_KILL_GRACE_MS` | 5000 | SIGTERM → force-kill grace |
 | `RUNNER_MEMORY` / `RUNNER_CPUS` / `RUNNER_PIDS_LIMIT` | `512m` / `1.0` / `256` | Per-container caps |
+| `GITHUB_BOT_TOKEN` / `GITLAB_BOT_TOKEN` | — | Bot-account tokens for one-shot repo tasks. Held gateway-side; carried only by the deterministic git nodes, never injected into the agent sandbox. Under `RUNNER_BACKEND=fake` the broker is faked and these are unused. |
+| `GIT_IMAGE` | `slackbot-runner:latest` | Image for the ephemeral credentialed git nodes (clone/push) |
 
 ---
 
