@@ -1,7 +1,7 @@
 # Task: Add a deterministic `branch` node and tell the implement node the clone workdir (kills the one-shot 422)
 
-You are implementing one slice in `/Users/jedanner/workspace/slack-agent`
-(this worktree: `/Users/jedanner/workspace/sa-wt-sonnet-m5-s04b-branch-workdir`).
+You are implementing one slice in the slack-agent repo (in an isolated worktree off
+branch `sonnet/m5-s04b-branch-workdir`).
 TypeScript, Node 20+, ESM (`.js` import specifiers), vitest, strict tsc.
 **Read the root `CLAUDE.md` first** (gate, invariants, conventions), then the
 context below. You are on branch `sonnet/m5-s04b-branch-workdir`.

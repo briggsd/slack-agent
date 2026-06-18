@@ -14,7 +14,7 @@
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import type { SpawnFn } from '../runner/docker.js';
-import type { GitNodeExecutor, CloneRequest, PushRequest, OpenChangeRequest } from './git-node.js';
+import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, OpenChangeRequest } from './git-node.js';
 import { providerFor, type FetchFn } from './git-host.js';
 
 /** Env vars the docker CLI itself may need; everything else (incl. host secrets) is dropped. */
@@ -146,6 +146,14 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
 
     const args = this.dockerRunArgs(req.volume, gitArgs);
     await runDocker(this.spawnFn, args, req.lease.token, 'git clone', `repo: ${req.repo}`);
+  }
+
+  async branch(req: BranchRequest): Promise<void> {
+    // git -C <workdir> checkout -b <branch> — purely local, no credential needed.
+    // Pass an empty token; dockerRunArgs injects -e GIT_TOKEN but no git op here reads it.
+    const gitArgs = ['-C', req.workdir, 'checkout', '-b', req.branch];
+    const args = this.dockerRunArgs(req.volume, gitArgs);
+    await runDocker(this.spawnFn, args, '', 'git branch', `repo: ${req.repo}, branch: ${req.branch}`);
   }
 
   async push(req: PushRequest): Promise<void> {

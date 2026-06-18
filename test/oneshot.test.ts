@@ -125,17 +125,20 @@ describe('OneShotOrchestrator — happy path', () => {
       .map((e) => e.text);
 
     expect(statusTexts).toContain('cloning repository…');
+    expect(statusTexts).toContain('creating branch…');
     expect(statusTexts).toContain('implementing…');
     expect(statusTexts).toContain('running tool…'); // forwarded inner status
     expect(statusTexts).toContain('pushing branch…');
     expect(statusTexts).toContain('opening pull request…');
 
-    // Verify status ordering: clone before implement before push before PR
+    // Verify status ordering: clone < branch < implement < push < PR
     const cloneIdx = statusTexts.indexOf('cloning repository…');
+    const branchIdx = statusTexts.indexOf('creating branch…');
     const implIdx = statusTexts.indexOf('implementing…');
     const pushIdx = statusTexts.indexOf('pushing branch…');
     const prIdx = statusTexts.indexOf('opening pull request…');
-    expect(cloneIdx).toBeLessThan(implIdx);
+    expect(cloneIdx).toBeLessThan(branchIdx);
+    expect(branchIdx).toBeLessThan(implIdx);
     expect(implIdx).toBeLessThan(pushIdx);
     expect(pushIdx).toBeLessThan(prIdx);
 
@@ -161,13 +164,21 @@ describe('OneShotOrchestrator — happy path', () => {
   it('sends the instruction to the inner runner', async () => {
     await drain(orch.send('github:acme/widgets add a CHANGELOG'));
     expect(innerRunner.sends).toHaveLength(1);
-    expect(innerRunner.sends[0]).toBe('add a CHANGELOG');
+    const sent = innerRunner.sends[0] ?? '';
+    // The composed directive must contain the original instruction, the workdir, and a commit instruction
+    expect(sent).toContain('add a CHANGELOG');
+    expect(sent).toContain('/workspace/acme-widgets');
+    expect(sent.toLowerCase()).toContain('commit');
   });
 
-  it('records clone, push, and openChangeRequest calls', async () => {
+  it('records clone, branch, push, and openChangeRequest calls', async () => {
     await drain(orch.send('github:acme/widgets add a CHANGELOG'));
     expect(gitNodes.clones).toHaveLength(1);
     expect(gitNodes.clones[0]?.repo).toBe('acme/widgets');
+    expect(gitNodes.branches).toHaveLength(1);
+    expect(gitNodes.branches[0]?.branch).toContain('slackbot/oneshot-');
+    expect(gitNodes.branches[0]?.workdir).toBe('/workspace/acme-widgets');
+    expect(gitNodes.branches[0]?.volume).toBe(volumeNameFor(TEST_SESSION_KEY));
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.pushes[0]?.repo).toBe('acme/widgets');
     expect(gitNodes.pushes[0]?.branch).toContain('slackbot/oneshot-');
@@ -267,6 +278,38 @@ describe('OneShotOrchestrator — post-lease git failure', () => {
     const errorEvents = events.filter((e) => e.type === 'error');
     expect(errorEvents).toHaveLength(1);
     expect(events.filter((e) => e.type === 'text')).toHaveLength(0);
+  });
+});
+
+// ── OneShotOrchestrator — branch failure ─────────────────────────────────────
+
+describe('OneShotOrchestrator — branch failure', () => {
+  it('revokes the lease and emits error when branch rejects', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    gitNodes.failNextBranch(new Error('branch failed: no such workdir'));
+    const inner = new FakeRunner('test-session');
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-branch-fail');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    // Lease acquired and revoked exactly once
+    expect(broker.leases).toHaveLength(1);
+    expect(broker.revokes).toHaveLength(1);
+
+    // Terminal event is an error
+    const errorEvents = events.filter((e) => e.type === 'error');
+    expect(errorEvents).toHaveLength(1);
+
+    // Branch fails before implement — inner runner must not be sent anything
+    expect(inner.sends).toHaveLength(0);
+
+    // No text event (no PR url)
+    expect(events.filter((e) => e.type === 'text')).toHaveLength(0);
+
+    // No push or openChangeRequest calls
+    expect(gitNodes.pushes).toHaveLength(0);
+    expect(gitNodes.changeRequests).toHaveLength(0);
   });
 });
 

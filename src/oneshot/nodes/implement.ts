@@ -9,7 +9,12 @@ export const implementNode: OneShotNode = {
 
     let innerError: string | null = null;
 
-    for await (const ev of deps.inner.send(ctx.instruction)) {
+    const directive =
+      `The repository is cloned at ${ctx.workdir} on branch ${ctx.branch}. ` +
+      `Make all file changes inside that directory and commit them there with git before finishing.\n\n` +
+      ctx.instruction;
+
+    for await (const ev of deps.inner.send(directive)) {
       if (ev.type === 'status') {
         yield { type: 'status', text: ev.text };
       } else if (ev.type === 'text') {
