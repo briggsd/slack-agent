@@ -179,8 +179,13 @@ export class SessionManager {
 
       // Reset idle timer each time we start processing a message
       this.resetIdleTimer(session);
-      // Bump last_active_at on each turn
-      this.store.touch(session.key, Date.now());
+      // Bump last_active_at on each turn. A store hiccup must not abort the drain loop.
+      try {
+        this.store.touch(session.key, Date.now());
+      } catch (touchErr: unknown) {
+        const touchMsg = touchErr instanceof Error ? touchErr.message : String(touchErr);
+        console.error(`[session] store.touch failed for ${session.key}: ${touchMsg}`);
+      }
 
       let placeholder: Placeholder | null = null;
       try {

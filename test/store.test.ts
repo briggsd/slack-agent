@@ -103,7 +103,7 @@ describe('SqliteSessionStore', () => {
     expect(row?.status).toBe('reaped');
   });
 
-  it('recordSession with INSERT OR REPLACE is idempotent', () => {
+  it('recordSession upsert updates last_active_at and status but preserves created_at', () => {
     const base = {
       session_key: 'DUP',
       team_id: 'T',
@@ -116,10 +116,18 @@ describe('SqliteSessionStore', () => {
       status: 'active' as const,
     };
     store.recordSession(base);
-    store.recordSession({ ...base, last_active_at: 2_000 });
+
+    // Simulate re-activation: a second recordSession for the same key
+    // (e.g. after idle reap and rehydration).
+    store.recordSession({ ...base, created_at: 9_999, last_active_at: 2_000 });
+
     const row = store.get('DUP');
-    // second insert wins (INSERT OR REPLACE)
+    // last_active_at must reflect the second call
     expect(row?.last_active_at).toBe(2_000);
+    // created_at must NOT be overwritten — original value is preserved
+    expect(row?.created_at).toBe(1_000);
+    // status is reset to active
+    expect(row?.status).toBe('active');
   });
 
   it('touch is a no-op for unknown keys (does not throw)', () => {

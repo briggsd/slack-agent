@@ -89,6 +89,7 @@ npm test
 | `SLACK_BOT_TOKEN` | yes | — | Bot User OAuth Token (`xoxb-…`) |
 | `SLACK_APP_TOKEN` | yes | — | App-Level Token for Socket Mode (`xapp-…`) |
 | `IDLE_TIMEOUT_MS` | no | `600000` | Milliseconds before an idle session runner is reaped |
+| `SESSION_DB_PATH` | no | `.data/sessions.db` | Path to the SQLite session DB; parent dir is auto-created; mount on a persistent volume in production |
 
 ## Sandbox runner
 
@@ -130,6 +131,12 @@ it left off.
 **Note — volume garbage collection**: Docker volumes accumulate one per Slack
 thread and are never automatically removed. Run `docker volume prune` (or a
 scheduled cleanup script) to reclaim disk space from old sessions.
+
+**Note — SQLite state files**: The session store runs in WAL mode, which means
+three files are written: `.db`, `.db-wal`, and `.db-shm`. Back up all three
+together, or use `sqlite3 <db-path> ".backup <dest>"` for a consistent snapshot.
+`sessions` table rows accumulate indefinitely until a future GC slice removes
+reaped rows.
 
 ### File forwarding
 

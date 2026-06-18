@@ -60,11 +60,58 @@ export interface SessionStore {
 
 export class SqliteSessionStore implements SessionStore {
   private readonly db: Database.Database;
+  private readonly stmtRecord: Database.Statement<[
+    string,
+    string | null,
+    string | null,
+    string,
+    string,
+    string,
+    number,
+    number,
+    string,
+  ]>;
+  private readonly stmtTouch: Database.Statement<[number, string]>;
+  private readonly stmtSetStatus: Database.Statement<[string, string]>;
+  private readonly stmtGet: Database.Statement<[string], SessionRow>;
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.createSchema();
+
+    // Hoist all prepared statements so they are compiled once, not per-call.
+    this.stmtRecord = this.db.prepare<[
+      string,
+      string | null,
+      string | null,
+      string,
+      string,
+      string,
+      number,
+      number,
+      string,
+    ]>(`
+      INSERT INTO sessions
+        (session_key, team_id, user_id, channel_id, thread_ts, profile_id,
+         created_at, last_active_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_key) DO UPDATE SET
+        last_active_at = excluded.last_active_at,
+        status = 'active'
+    `);
+
+    this.stmtTouch = this.db.prepare<[number, string]>(
+      'UPDATE sessions SET last_active_at = ? WHERE session_key = ?',
+    );
+
+    this.stmtSetStatus = this.db.prepare<[string, string]>(
+      'UPDATE sessions SET status = ? WHERE session_key = ?',
+    );
+
+    this.stmtGet = this.db.prepare<[string], SessionRow>(
+      'SELECT * FROM sessions WHERE session_key = ?',
+    );
   }
 
   private createSchema(): void {
@@ -101,23 +148,7 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   recordSession(row: NewSessionRow): void {
-    const stmt = this.db.prepare<[
-      string,
-      string | null,
-      string | null,
-      string,
-      string,
-      string,
-      number,
-      number,
-      string,
-    ]>(`
-      INSERT OR REPLACE INTO sessions
-        (session_key, team_id, user_id, channel_id, thread_ts, profile_id,
-         created_at, last_active_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    stmt.run(
+    this.stmtRecord.run(
       row.session_key,
       row.team_id,
       row.user_id,
@@ -131,24 +162,15 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   touch(key: string, atMs: number): void {
-    const stmt = this.db.prepare<[number, string]>(
-      'UPDATE sessions SET last_active_at = ? WHERE session_key = ?',
-    );
-    stmt.run(atMs, key);
+    this.stmtTouch.run(atMs, key);
   }
 
   setStatus(key: string, status: SessionStatus): void {
-    const stmt = this.db.prepare<[string, string]>(
-      'UPDATE sessions SET status = ? WHERE session_key = ?',
-    );
-    stmt.run(status, key);
+    this.stmtSetStatus.run(status, key);
   }
 
   get(key: string): SessionRow | undefined {
-    const stmt = this.db.prepare<[string], SessionRow>(
-      'SELECT * FROM sessions WHERE session_key = ?',
-    );
-    return stmt.get(key);
+    return this.stmtGet.get(key);
   }
 
   close(): void {

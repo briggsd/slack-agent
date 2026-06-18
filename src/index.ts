@@ -68,6 +68,13 @@ async function main(): Promise<void> {
   const store = new SqliteSessionStore(config.SESSION_DB_PATH);
   console.log(`[gateway] session store opened at ${config.SESSION_DB_PATH}`);
 
+  const closeStore = (): void => {
+    store.close();
+    process.exit(0);
+  };
+  process.on('SIGTERM', closeStore);
+  process.on('SIGINT', closeStore);
+
   let factory: RunnerFactory;
   if (config.RUNNER_BACKEND === 'docker') {
     const dc = config.docker;
