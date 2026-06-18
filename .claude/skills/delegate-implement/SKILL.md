@@ -15,18 +15,20 @@ context and never type the slice yourself** — research, spec, hand off, verify
 1. **Research non-trivial bits first** (subagent). For anything you can't implement confidently
    from memory — an SDK call, a protocol shape, a Slack API — spawn an `Explore` subagent to
    find the grounding (real `.d.ts`, existing patterns) and report back. Don't guess in the spec.
-2. **Write the spec** to `planning/m<N>-s<NN>-spec.md` from `planning/_spec-template.md`. Cite the
-   design note(s) in `design/` (the *why*) and the exact files to touch — and **inline the grounded
-   facts** (line numbers, API shapes) so the implementer doesn't need `design/` (it's gitignored
-   and absent from worktrees). Make acceptance criteria directly testable. **Cite the invariants
-   the slice touches** (below).
-3. **Spin an isolated worktree** — `new-worktree.sh <backend>/<slug>` (see Worktrees below).
-4. **Commit the spec into the slice branch, then hand off.** Copy the spec into the worktree and
-   commit it there as the branch's first commit — keep it *tracked*, never leave it untracked in
-   the worktree (an untracked spec trips `merge-worktree.sh`'s dirty-guard at teardown). Then hand
-   off to the implementer subagent — Sonnet by default, Haiku for mechanical/trivial slices —
-   giving it the worktree path, the spec path, and the gate command. It implements, adds tests,
-   runs `npm run gate`, and reports with the gate output (the implementer must NOT touch the spec).
+2. **Spin an isolated worktree** — `new-worktree.sh <backend>/<slug>` (see Worktrees below).
+3. **Write the spec INTO the worktree and commit it there.** Author
+   `planning/m<N>-s<NN>-spec.md` directly in the worktree from `planning/_spec-template.md`, and
+   commit it as the branch's first commit (tracked — never left untracked, which would trip
+   `merge-worktree.sh`'s dirty-guard). Cite the design note(s) in `design/` (the *why*) and the
+   exact files to touch, and **inline the grounded facts** (line numbers, API shapes) so the
+   implementer doesn't need `design/` (gitignored, absent from worktrees). Make acceptance criteria
+   directly testable; **cite the invariants the slice touches** (below). Write it ONLY in the
+   worktree — never in the main checkout's `planning/`, or the stray untracked copy collides with
+   the post-merge ff-sync of local main.
+4. **Hand off to the implementer subagent** — Sonnet by default, Haiku for mechanical/trivial
+   slices — giving it the worktree path, the spec path, and the gate command. It implements, adds
+   tests, runs `npm run gate`, and reports with the gate output (the implementer must NOT touch the
+   spec).
 5. **Coordinator-verify** — reconcile the report ⇆ `git diff`; run `npm run gate` yourself in the
    worktree. A "done" claim is not a passing gate until you've seen it.
 6. **Review locally with the factory** + triage (see Review below).
