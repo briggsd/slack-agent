@@ -8,7 +8,9 @@
     "build": "tsc",
     "start": "node --env-file=.env dist/index.js",
     "check": "tsc --noEmit && npm --prefix runner run check && vitest run",
-    "test": "vitest run"
+    "test": "vitest run",
+    "boundaries": "depcruise src --config .dependency-cruiser.cjs",
+    "gate": "npm run check && npm run boundaries"
   },
   "dependencies": {
     "@slack/bolt": "^3.22.0",
@@ -16,6 +18,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "dependency-cruiser": "^17.4.3",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
   },
