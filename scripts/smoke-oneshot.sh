@@ -3,13 +3,14 @@
 #
 # Prerequisites:
 #   - Docker running
-#   - GIT_TEST_REPO    — "owner/name" of a throwaway GitHub repo you control
-#   - GIT_TEST_TOKEN   — fine-grained PAT scoped to that repo with:
+#   - GITHUB_TEST_REPO  — "owner/name" of a throwaway GitHub repo you control
+#                          (must have at least one commit on its default branch)
+#   - GITHUB_TEST_TOKEN — fine-grained PAT scoped to that repo with:
 #                          Contents: read + write
 #                          Pull requests: read + write
-#   - GIT_IMAGE        — Docker image with git installed (default: slackbot-runner:latest)
+#   - GIT_IMAGE         — Docker image with git + ca-certificates (default: slackbot-runner:latest)
 #   - The gateway must be built first: `npm run build` (this script imports from dist/).
-#   - Run: GIT_TEST_REPO=owner/name GIT_TEST_TOKEN=ghp_... bash scripts/smoke-oneshot.sh
+#   - Run: GITHUB_TEST_REPO=owner/name GITHUB_TEST_TOKEN=ghp_... bash scripts/smoke-oneshot.sh
 #
 # This script is NOT part of the CI gate — it requires a real Docker daemon,
 # a real GitHub repo, and a valid personal access token.
@@ -23,14 +24,17 @@ if [[ ! -f "${REPO_ROOT}/dist/oneshot/docker-git-node.js" ]]; then
 fi
 
 GIT_IMAGE="${GIT_IMAGE:-slackbot-runner:latest}"
-GIT_TEST_REPO="${GIT_TEST_REPO:?ERROR: GIT_TEST_REPO must be set (e.g. owner/throwaway-repo)}"
-GIT_TEST_TOKEN="${GIT_TEST_TOKEN:?ERROR: GIT_TEST_TOKEN must be set}"
+GITHUB_TEST_REPO="${GITHUB_TEST_REPO:?ERROR: GITHUB_TEST_REPO must be set (e.g. owner/throwaway-repo)}"
+GITHUB_TEST_TOKEN="${GITHUB_TEST_TOKEN:?ERROR: GITHUB_TEST_TOKEN must be set}"
 
 SMOKE_SESSION="smoke-oneshot-$$"
 SMOKE_VOLUME="slackbot-ws-$(echo "$SMOKE_SESSION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-64)"
+# Compute the branch name in bash (a fixed string injected into the node script) — do
+# not rely on JS interpolation inside the single-quoted heredoc string.
+SMOKE_BRANCH="slackbot/smoke-$$-$(date +%s)"
 
 echo ">>> Smoke test: DockerGitNodeExecutor"
-echo "    repo  : $GIT_TEST_REPO"
+echo "    repo  : $GITHUB_TEST_REPO"
 echo "    image : $GIT_IMAGE"
 echo "    volume: $SMOKE_VOLUME"
 echo ""
@@ -52,15 +56,15 @@ import { DockerGitNodeExecutor } from '${REPO_ROOT}/dist/oneshot/docker-git-node
 const executor = new DockerGitNodeExecutor({ image: '${GIT_IMAGE}' });
 
 const lease = {
-  token: process.env.GIT_TEST_TOKEN,
+  token: process.env.GITHUB_TEST_TOKEN,
   host: 'github',
-  repo: '${GIT_TEST_REPO}',
+  repo: '${GITHUB_TEST_REPO}',
   revoke: async () => {},
 };
 
 const workdir = '/workspace/smoke-repo';
 const volume  = '${SMOKE_VOLUME}';
-const branch  = 'slackbot/smoke-\${Date.now()}';
+const branch  = '${SMOKE_BRANCH}';
 
 console.log('[smoke] cloning...');
 await executor.clone({ lease, repo: lease.repo, workdir, volume });
@@ -75,8 +79,9 @@ const run = (cmd, args, opts = {}) => new Promise((res, rej) => {
 
 await run('docker', [
   'run', '--rm', '-v', volume + ':/workspace',
+  '--entrypoint', 'sh',   // the runner image's default entrypoint runs the agent, not sh
   '${GIT_IMAGE}',
-  'sh', '-c',
+  '-c',
   'git -C ' + workdir + ' checkout -b ' + branch +
   ' && echo smoke-\$(date) >> ' + workdir + '/SMOKE.md' +
   ' && git -C ' + workdir + ' add SMOKE.md' +
@@ -100,7 +105,7 @@ console.log('[smoke] PR opened:', url);
 "
 
 echo ">>> Running executor via node (ESM, importing from dist/)"
-echo "$NODE_SCRIPT" | GIT_TEST_TOKEN="$GIT_TEST_TOKEN" \
+echo "$NODE_SCRIPT" | GITHUB_TEST_TOKEN="$GITHUB_TEST_TOKEN" \
   node --input-type=module 2>&1
 
 echo ""
