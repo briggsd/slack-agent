@@ -14,7 +14,7 @@
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import type { SpawnFn } from '../runner/docker.js';
-import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, OpenChangeRequest } from './git-node.js';
+import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, OpenChangeRequest, CheckRequest, CheckResult } from './git-node.js';
 import { providerFor, type FetchFn } from './git-host.js';
 
 /** Env vars the docker CLI itself may need; everything else (incl. host secrets) is dropped. */
@@ -59,6 +59,66 @@ export function credentialHelper(username: string): string {
 }
 
 /**
+ * Reserved exit code the auto-detect check command uses to signal "nothing to run"
+ * (no package.json or no matching npm script), so a skip is distinguishable from a
+ * pass. Chosen to avoid common lint/test failure codes (typically 1–2).
+ */
+const CHECK_SKIP_EXIT = 97;
+
+/**
+ * Spawn `docker <args>` without any secret in the env, capturing combined stdout+stderr.
+ * Resolves with { exitCode, output } regardless of the exit code — a non-zero exit is
+ * returned as data, not thrown. Rejects only on a true spawn/infrastructure error (the
+ * child's `error` event). Output is capped to 4 KB to avoid runaway memory.
+ */
+function runDockerCapture(
+  spawnFn: SpawnFn,
+  args: string[],
+  what: string,
+  context: string,
+): Promise<{ exitCode: number; output: string }> {
+  return new Promise<{ exitCode: number; output: string }>((resolve, reject) => {
+    const child: ChildProcess = spawnFn('docker', args, {
+      env: dockerCheckEnv(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const CAP = 4 * 1024; // 4 KB
+    let output = '';
+    const onChunk = (chunk: Buffer | string): void => {
+      if (output.length >= CAP) return;
+      const s = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+      // Clamp per-chunk so a single huge chunk can't blow the cap before resolve.
+      output += s.slice(0, CAP - output.length);
+    };
+
+    child.stdout?.on('data', onChunk);
+    child.stderr?.on('data', onChunk);
+
+    child.once('error', (err) => {
+      reject(new Error(`${what} spawn error [${context}]: ${String(err)}`));
+    });
+    // 'close' (not 'exit') so all stdout/stderr `data` events have flushed before we resolve.
+    child.once('close', (code) => {
+      resolve({ exitCode: code ?? 1, output });
+    });
+  });
+}
+
+/**
+ * Build the minimal environment for a check container: only the docker CLI's own
+ * needs. No GIT_TOKEN — checks get no credential (defense-in-depth).
+ */
+function dockerCheckEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of DOCKER_CLI_ENV_PASSTHROUGH) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
+/**
  * Spawn `docker <args>` with GIT_TOKEN in the env (never argv), capturing stderr so a
  * failure carries a diagnosable reason. Resolves on exit 0, rejects otherwise.
  * Git's credential exchange happens over its own channel, so container stderr carries
@@ -100,15 +160,21 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
   private readonly image: string;
   private readonly spawnFn: SpawnFn;
   private readonly fetchFn: FetchFn;
+  private readonly lintCmd: string | undefined;
+  private readonly testCmd: string | undefined;
 
   constructor(opts: {
     image: string;
     spawn?: SpawnFn;
     fetchFn?: FetchFn;
+    lintCmd?: string;
+    testCmd?: string;
   }) {
     this.image = opts.image;
     this.spawnFn = opts.spawn ?? nodeSpawn;
     this.fetchFn = opts.fetchFn ?? fetch;
+    this.lintCmd = opts.lintCmd;
+    this.testCmd = opts.testCmd;
   }
 
   /**
@@ -194,5 +260,44 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
       token: req.lease.token,
       fetchFn: this.fetchFn,
     });
+  }
+
+  /**
+   * Build the `docker run` argv for a lint/test check. Uses `--entrypoint sh` so the
+   * shell command can do package-manager detection. No `-e GIT_TOKEN` — checks get no
+   * credential (defense-in-depth on the boundary).
+   */
+  private dockerCheckArgs(volume: string, workdir: string, shellCmd: string): string[] {
+    return [
+      'run',
+      '--rm',
+      '-v', `${volume}:/workspace`,
+      '-w', workdir,
+      '--security-opt', 'no-new-privileges',
+      '--entrypoint', 'sh',
+      this.image,
+      '-c', shellCmd,
+    ];
+  }
+
+  async runCheck(req: CheckRequest): Promise<CheckResult> {
+    const override = req.kind === 'lint' ? this.lintCmd : this.testCmd;
+    // Auto-detect default: exit with the reserved skip code when there is nothing to
+    // run (no package.json, or no matching npm script) so a skip is distinguishable
+    // from a pass. `req.kind` is the closed 'lint' | 'test' union — safe to interpolate.
+    const shellCmd = override !== undefined
+      ? override
+      : `if [ ! -f package.json ]; then echo "no package.json — skipping ${req.kind}"; exit ${CHECK_SKIP_EXIT}; fi; ` +
+        `if node -e "var p=require('./package.json');process.exit(p.scripts&&p.scripts.${req.kind}?0:1)"; ` +
+        `then npm run ${req.kind}; else echo "no ${req.kind} script — skipping"; exit ${CHECK_SKIP_EXIT}; fi`;
+
+    const args = this.dockerCheckArgs(req.volume, req.workdir, shellCmd);
+    const raw = await runDockerCapture(this.spawnFn, args, `check ${req.kind}`, `workdir: ${req.workdir}`);
+
+    // A skip is only meaningful for the auto-detect default; an override always "ran".
+    if (override === undefined && raw.exitCode === CHECK_SKIP_EXIT) {
+      return { exitCode: 0, output: raw.output, skipped: true };
+    }
+    return { exitCode: raw.exitCode, output: raw.output, skipped: false };
   }
 }

@@ -137,22 +137,28 @@ describe('OneShotOrchestrator — happy path', () => {
     expect(statusTexts).toContain('creating branch…');
     expect(statusTexts).toContain('implementing…');
     expect(statusTexts).toContain('running tool…'); // forwarded inner status
+    expect(statusTexts).toContain('linting…');
+    expect(statusTexts).toContain('testing…');
     expect(statusTexts).toContain('pushing branch…');
     expect(statusTexts).toContain('opening pull request…');
 
-    // Verify status ordering: clone < research < plan < branch < implement < push < PR
+    // Verify status ordering: clone < research < plan < branch < implement < lint < test < push < PR
     const cloneIdx = statusTexts.indexOf('cloning repository…');
     const researchIdx = statusTexts.indexOf('researching…');
     const planIdx = statusTexts.indexOf('planning…');
     const branchIdx = statusTexts.indexOf('creating branch…');
     const implIdx = statusTexts.indexOf('implementing…');
+    const lintIdx = statusTexts.indexOf('linting…');
+    const testIdx = statusTexts.indexOf('testing…');
     const pushIdx = statusTexts.indexOf('pushing branch…');
     const prIdx = statusTexts.indexOf('opening pull request…');
     expect(cloneIdx).toBeLessThan(researchIdx);
     expect(researchIdx).toBeLessThan(planIdx);
     expect(planIdx).toBeLessThan(branchIdx);
     expect(branchIdx).toBeLessThan(implIdx);
-    expect(implIdx).toBeLessThan(pushIdx);
+    expect(implIdx).toBeLessThan(lintIdx);
+    expect(lintIdx).toBeLessThan(testIdx);
+    expect(testIdx).toBeLessThan(pushIdx);
     expect(pushIdx).toBeLessThan(prIdx);
 
     // Terminal text contains the PR url
@@ -163,6 +169,21 @@ describe('OneShotOrchestrator — happy path', () => {
 
     // No error events
     expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
+  });
+
+  it('records two runCheck calls (lint then test) with correct workdir and volume', async () => {
+    await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    expect(gitNodes.checks).toHaveLength(2);
+    expect(gitNodes.checks[0]?.kind).toBe('lint');
+    expect(gitNodes.checks[0]?.workdir).toBe('/workspace/acme-widgets');
+    expect(gitNodes.checks[1]?.kind).toBe('test');
+    expect(gitNodes.checks[1]?.workdir).toBe('/workspace/acme-widgets');
+
+    // Both checks should have the correct volume
+    const expectedVolume = (await import('../src/runner/docker.js')).volumeNameFor(TEST_SESSION_KEY);
+    expect(gitNodes.checks[0]?.volume).toBe(expectedVolume);
+    expect(gitNodes.checks[1]?.volume).toBe(expectedVolume);
   });
 
   it('leases once and revokes once', async () => {
@@ -220,6 +241,74 @@ describe('OneShotOrchestrator — happy path', () => {
   it('the PR title is derived from the instruction (first 72 chars)', async () => {
     await drain(orch.send('github:acme/widgets add a CHANGELOG'));
     expect(gitNodes.changeRequests[0]?.title).toBe('add a CHANGELOG');
+  });
+});
+
+// ── OneShotOrchestrator — non-gating checks ──────────────────────────────────
+
+describe('OneShotOrchestrator — non-gating checks', () => {
+  it('a failing lint check does NOT block push or openChangeRequest — PR still opens', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/99');
+    // Script lint to fail
+    gitNodes.setCheckResult('lint', { exitCode: 1, output: 'boom', skipped: false });
+
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl done' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-nongating');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    // Push and openChangeRequest still called despite lint failure
+    expect(gitNodes.pushes).toHaveLength(1);
+    expect(gitNodes.changeRequests).toHaveLength(1);
+
+    // Terminal text contains PR url
+    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
+    expect(textEvents).toHaveLength(1);
+    expect(textEvents[0]?.text).toContain('Opened PR:');
+    expect(textEvents[0]?.text).toContain('https://example.test/pr/99');
+
+    // No error events (the failed lint is surfaced as a status, not an error)
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
+
+    // The lint failure status appears
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+    expect(statusTexts).toContain('lint failed (surfaced; not blocking until the retry loop lands)');
+  });
+
+  it('a skipped check reports "skipped", not "passed", and the PR still opens', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/100');
+    // Auto-detect found nothing to run for both checks.
+    gitNodes.setCheckResult('lint', { exitCode: 0, output: '', skipped: true });
+    gitNodes.setCheckResult('test', { exitCode: 0, output: '', skipped: true });
+
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl done' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-skipped');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+    expect(statusTexts).toContain('lint skipped (no command)');
+    expect(statusTexts).toContain('tests skipped (no command)');
+    expect(statusTexts).not.toContain('lint passed');
+    expect(statusTexts).not.toContain('tests passed');
+
+    // A skip is not a failure — the PR still opens.
+    expect(gitNodes.changeRequests).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
   });
 });
 

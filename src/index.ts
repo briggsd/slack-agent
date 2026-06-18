@@ -105,7 +105,11 @@ async function main(): Promise<void> {
     if (oc.githubToken !== undefined) botTokens.set('github', oc.githubToken);
     if (oc.gitlabToken !== undefined) botTokens.set('gitlab', oc.gitlabToken);
     broker = new BotAccountBroker(botTokens);
-    gitNodes = new DockerGitNodeExecutor({ image: oc.GIT_IMAGE });
+    gitNodes = new DockerGitNodeExecutor({
+      image: oc.GIT_IMAGE,
+      ...(oc.lintCommand !== undefined ? { lintCmd: oc.lintCommand } : {}),
+      ...(oc.testCommand !== undefined ? { testCmd: oc.testCommand } : {}),
+    });
     console.log(
       `[gateway] one-shot enabled (git image=${oc.GIT_IMAGE}, hosts=[${[...botTokens.keys()].join(',')}])`,
     );

@@ -1,6 +1,6 @@
 import type { SessionRunner } from '../runner/types.js';
 import type { CredentialLease, GitHost } from '../broker/types.js';
-import type { GitNodeExecutor } from './git-node.js';
+import type { GitNodeExecutor, CheckResult } from './git-node.js';
 import type { BlueprintNode, Blueprint } from '../blueprints/types.js';
 
 export interface OneShotDeps {
@@ -21,6 +21,8 @@ export interface OneShotContext {
   researchSummary?: string;
   planSummary?: string;
   implementSummary?: string;
+  lintResult?: CheckResult;
+  testResult?: CheckResult;
   prUrl?: string;
 }
 

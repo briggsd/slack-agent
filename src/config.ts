@@ -51,6 +51,10 @@ export interface OneShotConfig {
   /** Per-host bot-account tokens. Absent host → that host is unavailable (lease throws). */
   githubToken: string | undefined;
   gitlabToken: string | undefined;
+  /** Override shell command for the lint check (default: auto-detect via package.json). */
+  lintCommand: string | undefined;
+  /** Override shell command for the test check (default: auto-detect via package.json). */
+  testCommand: string | undefined;
 }
 
 export interface Config {
@@ -91,6 +95,8 @@ export function loadConfig(): Config {
       GIT_IMAGE: optionalEnvString('GIT_IMAGE', 'slackbot-runner:latest'),
       githubToken: optionalEnvMaybe('GITHUB_BOT_TOKEN'),
       gitlabToken: optionalEnvMaybe('GITLAB_BOT_TOKEN'),
+      lintCommand: optionalEnvMaybe('ONESHOT_LINT_CMD'),
+      testCommand: optionalEnvMaybe('ONESHOT_TEST_CMD'),
     },
   };
 }
