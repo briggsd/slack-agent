@@ -488,7 +488,7 @@ describe('DockerRunnerFactory', () => {
     };
 
     const factory = new DockerRunnerFactory(DEFAULT_CONFIG, fakeSpawn);
-    const runner = await factory.create('TEAM01:C123:T456');
+    const runner = await factory.create('TEAM01:C123:T456', { id: 'conversational', label: 'Conversational' });
 
     expect(capturedCommand).toBe('docker');
     expect(capturedArgs).toContain('run');

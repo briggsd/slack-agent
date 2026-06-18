@@ -1,5 +1,6 @@
 import type { SessionManager } from '../sessions/manager.js';
 import type { SlackClientLike } from './responder.js';
+import { DEFAULT_PROFILE_ID } from '../profiles/registry.js';
 
 export interface HandlerDeps {
   sessions: SessionManager;
@@ -75,6 +76,7 @@ export async function handleMention(
     message,
     channel: ev.channel,
     threadTs,
+    profileId: DEFAULT_PROFILE_ID,
     ...(body.team_id !== undefined && { teamId: body.team_id }),
     ...(ev.user !== undefined && { userId: ev.user }),
   });
@@ -115,6 +117,7 @@ export async function handleMessage(
     message,
     channel: ev.channel,
     threadTs: ev.thread_ts,
+    profileId: DEFAULT_PROFILE_ID,
     ...(body.team_id !== undefined && { teamId: body.team_id }),
     ...(ev.user !== undefined && { userId: ev.user }),
   });

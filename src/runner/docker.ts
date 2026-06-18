@@ -12,6 +12,7 @@
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess, SpawnOptions } from 'child_process';
 import type { RunnerEvent, SessionRunner, RunnerFactory } from './types.js';
+import type { Profile } from '../profiles/registry.js';
 import type {
   RunnerToGatewayMessage,
   GatewayToRunnerMessage,
@@ -399,7 +400,8 @@ export class DockerRunnerFactory implements RunnerFactory {
     this.spawnFn = spawnFn;
   }
 
-  async create(sessionKey: string): Promise<SessionRunner> {
+  // profile is threaded through for future facets; currently ignored (M4 S02 seam only)
+  async create(sessionKey: string, _profile: Profile): Promise<SessionRunner> {
     const safe = sanitizeKey(sessionKey);
     const containerName = `slackbot-${safe}`;
     const volumeName = `slackbot-ws-${safe}`;

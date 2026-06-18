@@ -1,6 +1,7 @@
 import type { RunnerFactory, SessionRunner } from '../runner/types.js';
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
 import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
+import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
 
 export interface QueueItem {
   message: string;
@@ -8,6 +9,7 @@ export interface QueueItem {
   threadTs: string;
   teamId?: string;
   userId?: string;
+  profileId?: string;
 }
 
 interface Session {
@@ -45,14 +47,16 @@ export class SessionManager {
 
   /**
    * Returns an existing session or creates a new one (for app_mention).
+   * profileId defaults to DEFAULT_PROFILE_ID when absent or unknown.
    */
-  private async getOrCreate(key: string): Promise<Session> {
+  private async getOrCreate(key: string, profileId?: string): Promise<Session> {
     const existing = this.sessions.get(key);
     if (existing !== undefined) {
       this.resetIdleTimer(existing);
       return existing;
     }
-    const runner = await this.factory.create(key);
+    const profile = getProfile(profileId ?? DEFAULT_PROFILE_ID);
+    const runner = await this.factory.create(key, profile);
     const session: Session = {
       key,
       runner,
@@ -69,7 +73,7 @@ export class SessionManager {
    * Enqueue a message for a session, creating the session if needed (for mentions).
    */
   async enqueueNew(key: string, item: QueueItem): Promise<void> {
-    const session = await this.getOrCreate(key);
+    const session = await this.getOrCreate(key, item.profileId);
     session.queue.push(item);
     void this.drain(session);
   }

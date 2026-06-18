@@ -1,4 +1,5 @@
 import type { RunnerEvent, SessionRunner, RunnerFactory } from './types.js';
+import type { Profile } from '../profiles/registry.js';
 
 export type ScriptedEvent = RunnerEvent;
 
@@ -55,6 +56,8 @@ export class FakeRunner implements SessionRunner {
 
 export class FakeRunnerFactory implements RunnerFactory {
   public creates: string[] = [];
+  /** The profile passed to each create() call, in order. */
+  public profiles: Profile[] = [];
   private script: TurnScript[];
   public runners: FakeRunner[] = [];
 
@@ -62,8 +65,9 @@ export class FakeRunnerFactory implements RunnerFactory {
     this.script = script;
   }
 
-  async create(sessionKey: string): Promise<SessionRunner> {
+  async create(sessionKey: string, profile: Profile): Promise<SessionRunner> {
     this.creates.push(sessionKey);
+    this.profiles.push(profile);
     const runner = new FakeRunner(sessionKey, this.script);
     this.runners.push(runner);
     return runner;
