@@ -12,9 +12,9 @@ import type { GitNodeExecutor } from './git-node.js';
 import { parseOneShotTask } from './parse.js';
 import { volumeNameFor } from '../runner/docker.js';
 import { REPO_ONESHOT_PROFILE_ID } from '../profiles/registry.js';
-import { blueprintFor } from './blueprints/registry.js';
-import { runBlueprint } from './executor.js';
-import type { BlueprintContext, NodeDeps } from './blueprints/types.js';
+import { blueprintFor } from './registry.js';
+import { runBlueprint } from '../blueprints/executor.js';
+import type { OneShotContext, OneShotDeps } from './context.js';
 
 export class OneShotOrchestrator implements SessionRunner {
   private readonly inner: SessionRunner;
@@ -86,7 +86,7 @@ export class OneShotOrchestrator implements SessionRunner {
           }
         };
 
-        const ctx: BlueprintContext = {
+        const ctx: OneShotContext = {
           host,
           repo,
           instruction,
@@ -97,7 +97,7 @@ export class OneShotOrchestrator implements SessionRunner {
           lease,
         };
 
-        const deps: NodeDeps = {
+        const deps: OneShotDeps = {
           inner: self.inner,
           gitNodes: self.gitNodes,
         };
