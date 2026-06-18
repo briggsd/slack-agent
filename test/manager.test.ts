@@ -43,12 +43,12 @@ describe('SessionManager — FIFO / serial within session', () => {
       return runner;
     };
 
-    await mgr.enqueueNew('C:T', {
+    await mgr.enqueueNew('TEAM:C:T', {
       message: 'msg1',
       channel: 'C',
       threadTs: 'T',
     });
-    await mgr.enqueueNew('C:T', {
+    await mgr.enqueueNew('TEAM:C:T', {
       message: 'msg2',
       channel: 'C',
       threadTs: 'T',
@@ -90,8 +90,8 @@ describe('SessionManager — concurrent across sessions', () => {
 
     const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
 
-    await manager.enqueueNew('C:T1', { message: 'hello from T1', channel: 'C', threadTs: 'T1' });
-    await manager.enqueueNew('C:T2', { message: 'hello from T2', channel: 'C', threadTs: 'T2' });
+    await manager.enqueueNew('TEAM:C:T1', { message: 'hello from T1', channel: 'C', threadTs: 'T1' });
+    await manager.enqueueNew('TEAM:C:T2', { message: 'hello from T2', channel: 'C', threadTs: 'T2' });
 
     await new Promise((r) => setTimeout(r, 5));
 
@@ -121,7 +121,7 @@ describe('SessionManager — idle reaping', () => {
     const TIMEOUT = 5_000;
     const { manager, factory } = makeManager(TIMEOUT);
 
-    await manager.enqueueNew('C:T', {
+    await manager.enqueueNew('TEAM:C:T', {
       message: 'hello',
       channel: 'C',
       threadTs: 'T',
@@ -130,12 +130,12 @@ describe('SessionManager — idle reaping', () => {
     // Drain all pending microtasks/promises by flushing the event loop
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(manager.has('C:T')).toBe(true);
+    expect(manager.has('TEAM:C:T')).toBe(true);
 
     // Advance past the idle timeout
     await vi.advanceTimersByTimeAsync(TIMEOUT + 100);
 
-    expect(manager.has('C:T')).toBe(false);
+    expect(manager.has('TEAM:C:T')).toBe(false);
     expect(factory.runners[0]?.disposed).toBe(true);
   });
 
@@ -144,19 +144,19 @@ describe('SessionManager — idle reaping', () => {
     const [release, turn] = blockingTurn();
     const { manager, factory } = makeManager(TIMEOUT, [turn]);
 
-    await manager.enqueueNew('C:T', { message: 'slow', channel: 'C', threadTs: 'T' });
+    await manager.enqueueNew('TEAM:C:T', { message: 'slow', channel: 'C', threadTs: 'T' });
     await vi.advanceTimersByTimeAsync(0);
 
     // Turn is still in flight past the idle timeout — must NOT be reaped
     await vi.advanceTimersByTimeAsync(TIMEOUT + 100);
-    expect(manager.has('C:T')).toBe(true);
+    expect(manager.has('TEAM:C:T')).toBe(true);
     expect(factory.runners[0]?.disposed).toBe(false);
 
     // Finish the turn; the next idle window may now reap it
     release();
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(TIMEOUT + 100);
-    expect(manager.has('C:T')).toBe(false);
+    expect(manager.has('TEAM:C:T')).toBe(false);
     expect(factory.runners[0]?.disposed).toBe(true);
   });
 
@@ -164,7 +164,7 @@ describe('SessionManager — idle reaping', () => {
     const TIMEOUT = 5_000;
     const { manager, factory } = makeManager(TIMEOUT);
 
-    await manager.enqueueNew('C:T', {
+    await manager.enqueueNew('TEAM:C:T', {
       message: 'first',
       channel: 'C',
       threadTs: 'T',
@@ -174,7 +174,7 @@ describe('SessionManager — idle reaping', () => {
 
     expect(factory.creates).toHaveLength(1);
 
-    await manager.enqueueNew('C:T', {
+    await manager.enqueueNew('TEAM:C:T', {
       message: 'second',
       channel: 'C',
       threadTs: 'T',
@@ -195,7 +195,7 @@ describe('SessionManager — responder integration', () => {
     const factory = new FakeRunnerFactory();
     const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
 
-    await manager.enqueueNew('C:T', {
+    await manager.enqueueNew('TEAM:C:T', {
       message: 'test',
       channel: 'C',
       threadTs: 'T',
@@ -217,7 +217,7 @@ describe('SessionManager — responder integration', () => {
     const factory = new FakeRunnerFactory();
     const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
 
-    await manager.enqueueNew('C:T', { message: 'hi', channel: 'C', threadTs: 'T' });
+    await manager.enqueueNew('TEAM:C:T', { message: 'hi', channel: 'C', threadTs: 'T' });
     await new Promise((r) => setTimeout(r, 20));
 
     // Should have at least the status update and the final text update
@@ -233,7 +233,7 @@ describe('SessionManager — responder integration', () => {
     ]);
     const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
 
-    await manager.enqueueNew('C:T', { message: 'bad', channel: 'C', threadTs: 'T' });
+    await manager.enqueueNew('TEAM:C:T', { message: 'bad', channel: 'C', threadTs: 'T' });
     await new Promise((r) => setTimeout(r, 20));
 
     const lastUpdate = slack.updates[slack.updates.length - 1];
@@ -266,7 +266,7 @@ describe('SessionManager — file upload', () => {
     ]);
     const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
 
-    await manager.enqueueNew('C:T', { message: 'make svg', channel: 'C', threadTs: 'T' });
+    await manager.enqueueNew('TEAM:C:T', { message: 'make svg', channel: 'C', threadTs: 'T' });
     await new Promise((r) => setTimeout(r, 20));
 
     expect(slack.uploads).toHaveLength(1);
@@ -289,7 +289,7 @@ describe('SessionManager — file upload', () => {
     ]);
     const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
 
-    await manager.enqueueNew('C:T', { message: 'test', channel: 'C', threadTs: 'T' });
+    await manager.enqueueNew('TEAM:C:T', { message: 'test', channel: 'C', threadTs: 'T' });
     await new Promise((r) => setTimeout(r, 20));
 
     // Upload failed → error text in placeholder

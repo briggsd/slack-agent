@@ -96,7 +96,7 @@ async function makeReadyRunner(): Promise<{
 
 describe('sanitizeKey', () => {
   it('replaces colons and special chars with hyphens', () => {
-    expect(sanitizeKey('C123:T456')).toBe('c123-t456');
+    expect(sanitizeKey('TEAM123:C123:T456')).toBe('team123-c123-t456');
   });
 
   it('lowercases', () => {
@@ -106,6 +106,14 @@ describe('sanitizeKey', () => {
   it('truncates to 64 chars', () => {
     const long = 'a'.repeat(100);
     expect(sanitizeKey(long)).toHaveLength(64);
+  });
+
+  it('3-segment key stays ≤64 chars and clean (no colons or uppercase)', () => {
+    const key = 'T123456789ABCDEF:C123456789012345678:1234567890.123456';
+    const result = sanitizeKey(key);
+    expect(result.length).toBeLessThanOrEqual(64);
+    expect(result).not.toMatch(/[A-Z:]/u);
+    expect(result).toMatch(/^[a-z0-9-]+$/u);
   });
 });
 
@@ -420,7 +428,7 @@ describe('DockerRunner — dispose', () => {
     };
     const cfg: DockerRunnerConfig = { ...DEFAULT_CONFIG, killGraceMs: 200 };
     const runner = new DockerRunner(fake.asChildProcess(), cfg, {
-      containerName: 'slackbot-c123-t456',
+      containerName: 'slackbot-team01-c123-t456',
       spawnFn,
     });
 
@@ -430,7 +438,7 @@ describe('DockerRunner — dispose', () => {
 
     expect(spawnCalls).toContainEqual({
       command: 'docker',
-      args: ['kill', 'slackbot-c123-t456'],
+      args: ['kill', 'slackbot-team01-c123-t456'],
     });
     vi.useRealTimers();
   });
@@ -480,7 +488,7 @@ describe('DockerRunnerFactory', () => {
     };
 
     const factory = new DockerRunnerFactory(DEFAULT_CONFIG, fakeSpawn);
-    const runner = await factory.create('C123:T456');
+    const runner = await factory.create('TEAM01:C123:T456');
 
     expect(capturedCommand).toBe('docker');
     expect(capturedArgs).toContain('run');
@@ -491,12 +499,12 @@ describe('DockerRunnerFactory', () => {
     const volIdx = capturedArgs.indexOf('-v');
     expect(volIdx).toBeGreaterThan(-1);
     const volArg = capturedArgs[volIdx + 1] ?? '';
-    expect(volArg).toMatch(/^slackbot-ws-c123-t456:\/workspace$/);
+    expect(volArg).toMatch(/^slackbot-ws-team01-c123-t456:\/workspace$/);
 
     // Container name
     const nameIdx = capturedArgs.indexOf('--name');
     expect(nameIdx).toBeGreaterThan(-1);
-    expect(capturedArgs[nameIdx + 1]).toBe('slackbot-c123-t456');
+    expect(capturedArgs[nameIdx + 1]).toBe('slackbot-team01-c123-t456');
 
     // Image
     expect(capturedArgs[capturedArgs.length - 1]).toBe(DEFAULT_CONFIG.image);

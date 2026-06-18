@@ -2,10 +2,12 @@ import type { RunnerFactory, SessionRunner } from '../runner/types.js';
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
 import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
 
-interface QueueItem {
+export interface QueueItem {
   message: string;
   channel: string;
   threadTs: string;
+  teamId?: string;
+  userId?: string;
 }
 
 interface Session {
