@@ -187,10 +187,10 @@ describe('runBlueprint — context threading', () => {
 // ── blueprintFor registry ─────────────────────────────────────────────────────
 
 describe('blueprintFor registry', () => {
-  it('returns a blueprint with the five expected node names in order', () => {
+  it('returns a blueprint with the seven expected node names in order', () => {
     const bp = blueprintFor('repo-oneshot');
     const names = bp.nodes.map((n) => n.name);
-    expect(names).toEqual(['clone', 'branch', 'implement', 'push', 'open-pr']);
+    expect(names).toEqual(['clone', 'research', 'plan', 'branch', 'implement', 'push', 'open-pr']);
   });
 
   it('throws for an unknown blueprint id', () => {
@@ -205,11 +205,14 @@ describe('blueprintFor registry', () => {
 // ── repoOneshot node kinds ────────────────────────────────────────────────────
 
 describe('repoOneshot node kinds', () => {
-  it('only implementNode is agentic; all others are deterministic', () => {
+  it('research, plan, implement are agentic; all others are deterministic', () => {
     const kindsByName = Object.fromEntries(
       repoOneshot.nodes.map((n) => [n.name, n.kind]),
     );
     expect(kindsByName['clone']).toBe('deterministic');
+    expect(kindsByName['research']).toBe('agentic');
+    expect(kindsByName['plan']).toBe('agentic');
+    expect(kindsByName['branch']).toBe('deterministic');
     expect(kindsByName['implement']).toBe('agentic');
     expect(kindsByName['push']).toBe('deterministic');
     expect(kindsByName['open-pr']).toBe('deterministic');
