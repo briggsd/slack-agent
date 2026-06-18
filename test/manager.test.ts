@@ -38,8 +38,8 @@ describe('SessionManager — FIFO / serial within session', () => {
     // Override factory to track when send() is called
     const originalCreate = fac.create.bind(fac);
     let runner: FakeRunner | null = null;
-    fac.create = async (key: string) => {
-      runner = (await originalCreate(key)) as FakeRunner;
+    fac.create = async (key, profile) => {
+      runner = (await originalCreate(key, profile)) as FakeRunner;
       return runner;
     };
 
@@ -81,7 +81,7 @@ describe('SessionManager — concurrent across sessions', () => {
     const factory = new FakeRunnerFactory();
     // Give each session its own runner with a blocking turn
     let callCount = 0;
-    factory.create = async (key: string) => {
+    factory.create = async (key) => {
       callCount++;
       const r = new FakeRunner(key, [callCount === 1 ? turnA : turnB]);
       factory.runners.push(r);

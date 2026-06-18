@@ -1,3 +1,5 @@
+import type { Profile } from '../profiles/registry.js';
+
 export type RunnerEvent =
   | { type: 'status'; text: string }   // progress note (tool use etc.)
   | { type: 'file'; name: string; data: Buffer }  // file produced during the turn
@@ -11,5 +13,5 @@ export interface SessionRunner {
 }
 
 export interface RunnerFactory {
-  create(sessionKey: string): Promise<SessionRunner>;
+  create(sessionKey: string, profile: Profile): Promise<SessionRunner>;
 }
