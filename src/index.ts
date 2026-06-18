@@ -11,6 +11,13 @@ import { DockerRunnerFactory } from './runner/docker.js';
 import type { RunnerFactory } from './runner/types.js';
 import type { SlackClientLike } from './slack/responder.js';
 import { buildGateway } from './app.js';
+import { BotAccountBroker } from './broker/bot-account.js';
+import { FakeBroker } from './broker/fake.js';
+import type { CredentialBroker, GitHost } from './broker/types.js';
+import { DockerGitNodeExecutor } from './oneshot/docker-git-node.js';
+import { FakeGitNodeExecutor } from './oneshot/fake-git-node.js';
+import type { GitNodeExecutor } from './oneshot/git-node.js';
+import { DispatchingRunnerFactory } from './oneshot/dispatching-factory.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -74,10 +81,16 @@ async function main(): Promise<void> {
   process.on('SIGTERM', closeStore);
   process.on('SIGINT', closeStore);
 
-  let factory: RunnerFactory;
+  // Base agent factory + the one-shot dependencies are chosen together by backend,
+  // so a fake-backend deployment never reaches for real Docker or real tokens on a
+  // `task` mention. (Mirrors src/harness/cli.ts.)
+  let baseFactory: RunnerFactory;
+  let broker: CredentialBroker;
+  let gitNodes: GitNodeExecutor;
+  const oc = config.oneshot;
   if (config.RUNNER_BACKEND === 'docker') {
     const dc = config.docker;
-    factory = new DockerRunnerFactory({
+    baseFactory = new DockerRunnerFactory({
       image: dc.RUNNER_IMAGE,
       readyTimeoutMs: dc.RUNNER_READY_TIMEOUT_MS,
       turnTimeoutMs: dc.RUNNER_TURN_TIMEOUT_MS,
@@ -87,10 +100,25 @@ async function main(): Promise<void> {
       pidsLimit: dc.RUNNER_PIDS_LIMIT,
     });
     console.log(`[gateway] using DockerRunnerFactory (image=${dc.RUNNER_IMAGE})`);
+
+    const botTokens = new Map<GitHost, string>();
+    if (oc.githubToken !== undefined) botTokens.set('github', oc.githubToken);
+    if (oc.gitlabToken !== undefined) botTokens.set('gitlab', oc.gitlabToken);
+    broker = new BotAccountBroker(botTokens);
+    gitNodes = new DockerGitNodeExecutor({ image: oc.GIT_IMAGE });
+    console.log(
+      `[gateway] one-shot enabled (git image=${oc.GIT_IMAGE}, hosts=[${[...botTokens.keys()].join(',')}])`,
+    );
   } else {
-    factory = new FakeRunnerFactory();
+    baseFactory = new FakeRunnerFactory();
     console.log('[gateway] using FakeRunnerFactory');
+
+    broker = new FakeBroker();
+    gitNodes = new FakeGitNodeExecutor();
+    console.log('[gateway] one-shot enabled (fake — no real git operations)');
   }
+
+  const factory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);
 
   buildGateway({
     // Cast to BoltAppLike — buildGateway / registerSlackHandlers only needs the minimal .event() shape

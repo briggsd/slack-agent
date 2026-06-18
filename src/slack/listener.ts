@@ -1,6 +1,6 @@
 import type { SessionManager } from '../sessions/manager.js';
 import type { SlackClientLike } from './responder.js';
-import { DEFAULT_PROFILE_ID } from '../profiles/registry.js';
+import { DEFAULT_PROFILE_ID, REPO_ONESHOT_PROFILE_ID } from '../profiles/registry.js';
 
 export interface HandlerDeps {
   sessions: SessionManager;
@@ -11,6 +11,18 @@ export interface HandlerDeps {
 /** Strip a bot mention like <@U12345> from the start of message text */
 function stripMention(text: string, botUserId: string): string {
   return text.replace(new RegExp(`^<@${botUserId}>\\s*`, 'u'), '').trim();
+}
+
+/**
+ * Recognize the one-shot trigger: a leading `task` keyword (case-insensitive)
+ * followed by the one-shot task text. Returns the task text with the keyword
+ * removed, or null if the message is not a one-shot trigger.
+ */
+export function parseOneShotTrigger(stripped: string): string | null {
+  const match = /^task\s+(.+)$/is.exec(stripped);
+  if (match === null) return null;
+  const remainder = match[1]?.trim() ?? '';
+  return remainder !== '' ? remainder : null;
 }
 
 /** Shape of the event body we care about for app_mention */
@@ -68,7 +80,10 @@ export async function handleMention(
   const team = body.team_id ?? 'unknown';
   const threadTs = ev.thread_ts ?? ev.ts;
   const sessionKey = `${team}:${ev.channel}:${threadTs}`;
-  const message = stripMention(ev.text, deps.botUserId);
+  const stripped = stripMention(ev.text, deps.botUserId);
+  const oneShot = parseOneShotTrigger(stripped);
+  const profileId = oneShot !== null ? REPO_ONESHOT_PROFILE_ID : DEFAULT_PROFILE_ID;
+  const message = oneShot ?? stripped;
 
   console.log(`[listener] mention → session=${sessionKey}`);
 
@@ -76,7 +91,7 @@ export async function handleMention(
     message,
     channel: ev.channel,
     threadTs,
-    profileId: DEFAULT_PROFILE_ID,
+    profileId,
     ...(body.team_id !== undefined && { teamId: body.team_id }),
     ...(ev.user !== undefined && { userId: ev.user }),
   });

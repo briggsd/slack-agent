@@ -116,6 +116,24 @@ and includes `git`, `curl`, and `ripgrep` as agent tools.
 | `ANTHROPIC_API_KEY` | yes | Passed to each container via `-e ANTHROPIC_API_KEY` (value never appears in `docker` argv) |
 | `RUNNER_IMAGE` | no (default `slackbot-runner:latest`) | Docker image to run |
 | `RUNNER_BACKEND` | no (default `fake`) | Set to `docker` to enable real containers |
+| `GITHUB_BOT_TOKEN` | no | Bot-account token for one-shot GitHub repo tasks. Stays gateway-side; never enters the agent sandbox. Without it, a `task github:…` reply errors. |
+| `GITLAB_BOT_TOKEN` | no | Same, for GitLab (provider not yet implemented). |
+| `GIT_IMAGE` | no (default `slackbot-runner:latest`) | Image for the ephemeral credentialed git nodes (clone/push) |
+
+## One-shot repo tasks
+
+Start a one-shot repo task by mentioning the bot with a leading `task` keyword:
+
+```
+@slackbot task github:owner/repo fix the flaky login test in auth.spec.ts
+```
+
+The bot clones the repo, runs the agent to implement the change, pushes a branch,
+and replies with a pull-request link. The git credential never enters the agent
+sandbox — only the gateway-side deterministic git nodes carry it (see
+`docs/ARCHITECTURE.md`). One-shot is fully faked under `RUNNER_BACKEND=fake` (a
+`task …` mention returns a stub PR link, no real git), so it only touches real
+repos under `RUNNER_BACKEND=docker` with a `GITHUB_BOT_TOKEN` configured.
 
 See `.env.example` for the full list of tunable settings.
 

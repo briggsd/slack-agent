@@ -21,6 +21,7 @@ export const PROFILES: ReadonlyMap<string, Profile> = new Map([
 ]);
 
 export const DEFAULT_PROFILE_ID = 'conversational';
+export const REPO_ONESHOT_PROFILE_ID = 'repo-oneshot';
 
 /**
  * Resolve a profile by id.
