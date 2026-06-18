@@ -5,13 +5,12 @@ import { dirname } from 'node:path';
 import bolt from '@slack/bolt';
 const { App } = bolt;
 import { loadConfig } from './config.js';
-import { SessionManager } from './sessions/manager.js';
 import { SqliteSessionStore } from './sessions/store.js';
 import { FakeRunnerFactory } from './runner/fake.js';
 import { DockerRunnerFactory } from './runner/docker.js';
 import type { RunnerFactory } from './runner/types.js';
-import { registerSlackHandlers } from './slack/listener.js';
 import type { SlackClientLike } from './slack/responder.js';
+import { buildGateway } from './app.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -93,15 +92,15 @@ async function main(): Promise<void> {
     console.log('[gateway] using FakeRunnerFactory');
   }
 
-  const sessions = new SessionManager({
-    idleTimeoutMs: config.IDLE_TIMEOUT_MS,
-    factory,
+  buildGateway({
+    // Cast to BoltAppLike — buildGateway / registerSlackHandlers only needs the minimal .event() shape
+    app: app as Parameters<typeof buildGateway>[0]['app'],
     slack,
+    factory,
     store,
+    idleTimeoutMs: config.IDLE_TIMEOUT_MS,
+    botUserId,
   });
-
-  // Cast to BoltAppLike — registerSlackHandlers only needs the minimal .event() shape
-  registerSlackHandlers(app as Parameters<typeof registerSlackHandlers>[0], { sessions, slack, botUserId });
 
   await app.start();
   console.log(`[gateway] Slack bot started (botUserId=${botUserId})`);

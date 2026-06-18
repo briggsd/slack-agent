@@ -131,7 +131,7 @@ export async function handleMessage(
 
 type AnyEventHandler = (args: { body: unknown }) => Promise<void>;
 
-interface BoltAppLike {
+export interface BoltAppLike {
   event(type: string, handler: AnyEventHandler): void;
 }
 
