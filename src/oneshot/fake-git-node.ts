@@ -8,21 +8,29 @@
 import type {
   GitNodeExecutor,
   CloneRequest,
+  BranchRequest,
   PushRequest,
   OpenChangeRequest,
 } from './git-node.js';
 
 export class FakeGitNodeExecutor implements GitNodeExecutor {
   public clones: CloneRequest[] = [];
+  public branches: BranchRequest[] = [];
   public pushes: PushRequest[] = [];
   public changeRequests: OpenChangeRequest[] = [];
 
   private readonly prUrl: string;
+  private branchError: Error | null = null;
   private pushError: Error | null = null;
   private openChangeError: Error | null = null;
 
   constructor(prUrl = 'https://example.test/pr/1') {
     this.prUrl = prUrl;
+  }
+
+  /** Script branch() to reject with the given error (for failure-path tests). */
+  failNextBranch(err: Error): void {
+    this.branchError = err;
   }
 
   /** Script push() to reject with the given error (for failure-path tests). */
@@ -37,6 +45,15 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
 
   async clone(req: CloneRequest): Promise<void> {
     this.clones.push(req);
+  }
+
+  async branch(req: BranchRequest): Promise<void> {
+    this.branches.push(req);
+    if (this.branchError !== null) {
+      const err = this.branchError;
+      this.branchError = null;
+      throw err;
+    }
   }
 
   async push(req: PushRequest): Promise<void> {

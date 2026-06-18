@@ -187,10 +187,10 @@ describe('runBlueprint — context threading', () => {
 // ── blueprintFor registry ─────────────────────────────────────────────────────
 
 describe('blueprintFor registry', () => {
-  it('returns a blueprint with the four expected node names in order', () => {
+  it('returns a blueprint with the five expected node names in order', () => {
     const bp = blueprintFor('repo-oneshot');
     const names = bp.nodes.map((n) => n.name);
-    expect(names).toEqual(['clone', 'implement', 'push', 'open-pr']);
+    expect(names).toEqual(['clone', 'branch', 'implement', 'push', 'open-pr']);
   });
 
   it('throws for an unknown blueprint id', () => {
