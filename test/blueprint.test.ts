@@ -1,20 +1,29 @@
 /**
- * Tests for the M5 S04a blueprint framework.
+ * Tests for the blueprint framework.
  *
- * These tests exercise the framework independently of the specific one-shot
- * nodes, using tiny stub nodes. Everything is fully offline — no Docker,
- * no network, no API.
+ * Split into two groups:
+ *   1. Engine tests — prove `runBlueprint` is generic by using a tiny local
+ *      stub Ctx/Deps, NOT the one-shot types. Import only from src/blueprints/.
+ *   2. Registry/blueprint tests — exercise blueprintFor + repoOneshot; import
+ *      from src/oneshot/.
+ *
+ * Everything is fully offline — no Docker, no network, no API.
  */
 
 import { describe, it, expect } from 'vitest';
-import type { BlueprintNode, BlueprintContext, NodeDeps, Blueprint } from '../src/oneshot/blueprints/types.js';
+import type { BlueprintNode, Blueprint } from '../src/blueprints/types.js';
 import type { RunnerEvent } from '../src/runner/types.js';
-import { runBlueprint } from '../src/oneshot/executor.js';
-import { blueprintFor } from '../src/oneshot/blueprints/registry.js';
-import { repoOneshot } from '../src/oneshot/blueprints/repo-oneshot.js';
-import { FakeRunner } from '../src/runner/fake.js';
-import { FakeGitNodeExecutor } from '../src/oneshot/fake-git-node.js';
-import { FakeBroker } from '../src/broker/fake.js';
+import { runBlueprint } from '../src/blueprints/executor.js';
+import { blueprintFor } from '../src/oneshot/registry.js';
+import { repoOneshot } from '../src/oneshot/repo-oneshot.js';
+
+// ── Engine test stub types ────────────────────────────────────────────────────
+
+interface TestCtx {
+  marker?: string;
+}
+
+interface TestDeps {}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -26,27 +35,12 @@ async function drain(gen: AsyncGenerator<RunnerEvent>): Promise<RunnerEvent[]> {
   return events;
 }
 
-function makeDeps(): NodeDeps {
-  return {
-    inner: new FakeRunner('test-session'),
-    gitNodes: new FakeGitNodeExecutor(),
-  };
+function makeCtx(): TestCtx {
+  return {};
 }
 
-async function makeCtx(overrides?: Partial<BlueprintContext>): Promise<BlueprintContext> {
-  const broker = new FakeBroker();
-  const lease = await broker.lease({ host: 'github', repo: 'acme/widgets', taskId: 'test' });
-  return {
-    host: 'github',
-    repo: 'acme/widgets',
-    instruction: 'add a CHANGELOG',
-    taskId: 'test-task',
-    volume: 'slackbot-ws-test',
-    workdir: '/workspace/acme-widgets',
-    branch: 'slackbot/oneshot-test-task',
-    lease,
-    ...overrides,
-  };
+function makeDeps(): TestDeps {
+  return {};
 }
 
 // ── runBlueprint — node ordering ─────────────────────────────────────────────
@@ -55,7 +49,7 @@ describe('runBlueprint — node ordering', () => {
   it('runs nodes in order and forwards their events', async () => {
     const calls: string[] = [];
 
-    const nodeA: BlueprintNode = {
+    const nodeA: BlueprintNode<TestCtx, TestDeps> = {
       name: 'node-a',
       kind: 'deterministic',
       async *run(): AsyncGenerator<RunnerEvent> {
@@ -65,7 +59,7 @@ describe('runBlueprint — node ordering', () => {
       },
     };
 
-    const nodeB: BlueprintNode = {
+    const nodeB: BlueprintNode<TestCtx, TestDeps> = {
       name: 'node-b',
       kind: 'deterministic',
       async *run(): AsyncGenerator<RunnerEvent> {
@@ -75,7 +69,7 @@ describe('runBlueprint — node ordering', () => {
       },
     };
 
-    const nodeC: BlueprintNode = {
+    const nodeC: BlueprintNode<TestCtx, TestDeps> = {
       name: 'node-c',
       kind: 'deterministic',
       async *run(): AsyncGenerator<RunnerEvent> {
@@ -85,8 +79,8 @@ describe('runBlueprint — node ordering', () => {
       },
     };
 
-    const blueprint: Blueprint = { id: 'test', nodes: [nodeA, nodeB, nodeC] };
-    const ctx = await makeCtx();
+    const blueprint: Blueprint<TestCtx, TestDeps> = { id: 'test', nodes: [nodeA, nodeB, nodeC] };
+    const ctx = makeCtx();
     const deps = makeDeps();
 
     const events = await drain(runBlueprint(blueprint, ctx, deps));
@@ -108,7 +102,7 @@ describe('runBlueprint — error handling', () => {
   it('a throwing node yields exactly one error event, stops, and does not re-throw', async () => {
     const laterNodeRan: boolean[] = [];
 
-    const failingNode: BlueprintNode = {
+    const failingNode: BlueprintNode<TestCtx, TestDeps> = {
       name: 'failing',
       kind: 'deterministic',
       async *run(): AsyncGenerator<RunnerEvent> {
@@ -117,7 +111,7 @@ describe('runBlueprint — error handling', () => {
       },
     };
 
-    const laterNode: BlueprintNode = {
+    const laterNode: BlueprintNode<TestCtx, TestDeps> = {
       name: 'later',
       kind: 'deterministic',
       async *run(): AsyncGenerator<RunnerEvent> {
@@ -126,8 +120,8 @@ describe('runBlueprint — error handling', () => {
       },
     };
 
-    const blueprint: Blueprint = { id: 'test', nodes: [failingNode, laterNode] };
-    const ctx = await makeCtx();
+    const blueprint: Blueprint<TestCtx, TestDeps> = { id: 'test', nodes: [failingNode, laterNode] };
+    const ctx = makeCtx();
     const deps = makeDeps();
 
     // runBlueprint must not throw — it converts the error to an event
@@ -160,37 +154,33 @@ describe('runBlueprint — error handling', () => {
 
 describe('runBlueprint — context threading', () => {
   it('a node can write ctx accumulators and a later node can read them', async () => {
-    let readSummary: string | undefined;
-    let readPrUrl: string | undefined;
+    let readMarker: string | undefined;
 
-    const writerNode: BlueprintNode = {
+    const writerNode: BlueprintNode<TestCtx, TestDeps> = {
       name: 'writer',
       kind: 'agentic',
-      async *run(ctx: BlueprintContext): AsyncGenerator<RunnerEvent> {
-        ctx.implementSummary = 'summary from writer';
-        ctx.prUrl = 'https://example.test/pr/99';
+      async *run(ctx: TestCtx): AsyncGenerator<RunnerEvent> {
+        ctx.marker = 'hello from writer';
         yield { type: 'status', text: 'wrote ctx' };
       },
     };
 
-    const readerNode: BlueprintNode = {
+    const readerNode: BlueprintNode<TestCtx, TestDeps> = {
       name: 'reader',
       kind: 'deterministic',
-      async *run(ctx: BlueprintContext): AsyncGenerator<RunnerEvent> {
-        readSummary = ctx.implementSummary;
-        readPrUrl = ctx.prUrl;
+      async *run(ctx: TestCtx): AsyncGenerator<RunnerEvent> {
+        readMarker = ctx.marker;
         yield { type: 'status', text: 'read ctx' };
       },
     };
 
-    const blueprint: Blueprint = { id: 'test', nodes: [writerNode, readerNode] };
-    const ctx = await makeCtx();
+    const blueprint: Blueprint<TestCtx, TestDeps> = { id: 'test', nodes: [writerNode, readerNode] };
+    const ctx = makeCtx();
     const deps = makeDeps();
 
     await drain(runBlueprint(blueprint, ctx, deps));
 
-    expect(readSummary).toBe('summary from writer');
-    expect(readPrUrl).toBe('https://example.test/pr/99');
+    expect(readMarker).toBe('hello from writer');
   });
 });
 

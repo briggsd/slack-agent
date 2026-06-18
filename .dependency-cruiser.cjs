@@ -43,6 +43,17 @@ module.exports = {
       to: { path: "^runner/" },
     },
     {
+      name: "blueprints-engine-stays-generic",
+      severity: "error",
+      comment:
+        "src/blueprints/ is the generic workflow engine — it must not import workflow-specific " +
+        "code (src/oneshot/) or credential/git seams (src/broker/). Keep it parameterized over " +
+        "Ctx/Deps: a workflow defines its own context + deps and consumes the engine, never the " +
+        "reverse. Move the workflow-specific piece into src/<workflow>/ instead.",
+      from: { path: "^src/blueprints/" },
+      to: { path: "^src/(oneshot|broker)/" },
+    },
+    {
       name: "no-circular",
       severity: "error",
       comment:

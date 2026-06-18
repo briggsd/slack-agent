@@ -1,10 +1,10 @@
-import type { BlueprintNode, BlueprintContext, NodeDeps } from '../types.js';
-import type { RunnerEvent } from '../../../runner/types.js';
+import type { OneShotNode, OneShotContext, OneShotDeps } from '../context.js';
+import type { RunnerEvent } from '../../runner/types.js';
 
-export const pushNode: BlueprintNode = {
+export const pushNode: OneShotNode = {
   name: 'push',
   kind: 'deterministic',
-  async *run(ctx: BlueprintContext, deps: NodeDeps): AsyncGenerator<RunnerEvent> {
+  async *run(ctx: OneShotContext, deps: OneShotDeps): AsyncGenerator<RunnerEvent> {
     yield { type: 'status', text: 'pushing branch…' };
     await deps.gitNodes.push({
       lease: ctx.lease,
