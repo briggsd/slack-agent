@@ -41,12 +41,42 @@ Gateway (this repo, src/) — single Node process
 
 ## Milestones
 
+Shipped:
+
 1. **M1 — Gateway skeleton**: Bolt Socket Mode wiring, session manager, runner
    abstraction with a fake runner, full unit-test coverage. No Docker, no Agent SDK.
 2. **M2 — Docker session runner**: runner image (Agent SDK inside), NDJSON stdio
    protocol, container lifecycle (spawn/reap/resume), DockerRunner in the gateway.
-3. **M3 — Streaming & polish**: tool-use status updates in Slack, error surfaces,
-   per-user/budget limits, ops docs.
+   Plus file forwarding (agent-produced files upload to the thread).
+
+Planned — the forward roadmap toward a multi-team internal platform. The *why*
+and *shape* of these live in `design/` (`0000` north-star, `0001` capabilities,
+`0002` tenancy + durable store, `0003` modes + profiles) and `design/open-questions.md`
+(resolved Q1–Q5, parked Q6–Q11). This is the *when*.
+
+3. **M3 — Streaming & polish** *(in flight)*: tool-use status updates in Slack,
+   streamed partial text, error surfaces. (Access control / spend limits, first
+   sketched here, moved to M6 — see design notes.)
+4. **M4 — Seams** *(the keystone; deliberately a near no-op refactor)*: thread
+   `team_id` + `user_id` through keys and `QueueItem` (`0002` §1, Q1); the profile
+   seam — `profileId` through the entry point and `RunnerFactory.create`, a static
+   registry with exactly **one** profile (`0003`); and the **persisted session
+   store** (SQLite `sessions` + `audit_events` tables, `0002` §2). Retires
+   restart-amnesia. The trace/audit *schema* is decided here (reasoning-level
+   traces, `corrections` event, `harness_version`) even though the audit layer
+   ships in M6 — those columns can't be retrofitted.
+5. **M5 — One-shot repo mode**: the second profile — blueprint orchestration
+   (deterministic clone/branch/lint/test/push/PR nodes wrapping agentic subtasks,
+   research→plan→implement first, bounded iteration + failure classifier) and the
+   **credential broker** (GitHub App short-lived scoped tokens, secrets never enter
+   the sandbox). Realizes `0001`. The broker is the headline new component.
+6. **M6 — Multi-team hardening**: turn on what M4 recorded — access control + spend
+   caps keyed on `team_id`/`user_id`; the **audit layer** (action/cost/corrections
+   trail); volume GC via `last_active_at` TTL; and **egress-lock** — the same broker
+   gains egress gating + approval-gate enforcement (one choke point, three jobs).
+7. **M7 — Scale-out**: prewarm/pool for fast startup; multi-host scheduling behind
+   `RunnerFactory` (or Managed Agents). Forward-looking opportunities (knowledge
+   flywheel Q11, measurement-driven versioning Q10) become possible on M4's schema.
 
 ## Gate
 

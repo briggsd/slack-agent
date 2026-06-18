@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Cancel superseded runs on feature branches, but never cancel a main-branch run —
+  # that would leave the merged commit with a cancelled (not passing) check.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Type-check, tests & boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # The gateway and the runner are separate packages; both need their deps so the
+      # gate (which runs tsc over each) can type-check.
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm --prefix runner ci
+
+      # The gate: exactly tsc + runner type-check + vitest. Offline — no Slack, Docker,
+      # or API. This is the same `npm run check` an agent runs locally before declaring done.
+      - name: Gate (tsc + runner check + tests)
+        run: npm run check
+
+      # Architecture boundaries: a separate, blocking step (kept out of `npm run check`
+      # so the inner loop stays minimal). Rules + remediation messages live in
+      # .dependency-cruiser.cjs — they mechanize the invariants from CLAUDE.md.
+      - name: Architecture boundaries (dependency-cruiser)
+        run: npm run boundaries
