@@ -106,11 +106,18 @@ describe('OneShotOrchestrator — happy path', () => {
   beforeEach(() => {
     broker = new FakeBroker();
     gitNodes = new FakeGitNodeExecutor('https://example.test/pr/42');
-    // Script one turn: status then final text
+    // Script three agentic turns: research, plan, implement — each with a distinct final text
     innerRunner = new FakeRunner('test-session', [
       [
         { type: 'status', text: 'running tool…' },
-        { type: 'text', text: 'Implementation complete.' },
+        { type: 'text', text: 'research done' },
+      ],
+      [
+        { type: 'text', text: 'plan done' },
+      ],
+      [
+        { type: 'status', text: 'running tool…' },
+        { type: 'text', text: 'impl done' },
       ],
     ]);
     orch = new OneShotOrchestrator(innerRunner, broker, gitNodes, TEST_SESSION_KEY, 'task-001');
@@ -125,19 +132,25 @@ describe('OneShotOrchestrator — happy path', () => {
       .map((e) => e.text);
 
     expect(statusTexts).toContain('cloning repository…');
+    expect(statusTexts).toContain('researching…');
+    expect(statusTexts).toContain('planning…');
     expect(statusTexts).toContain('creating branch…');
     expect(statusTexts).toContain('implementing…');
     expect(statusTexts).toContain('running tool…'); // forwarded inner status
     expect(statusTexts).toContain('pushing branch…');
     expect(statusTexts).toContain('opening pull request…');
 
-    // Verify status ordering: clone < branch < implement < push < PR
+    // Verify status ordering: clone < research < plan < branch < implement < push < PR
     const cloneIdx = statusTexts.indexOf('cloning repository…');
+    const researchIdx = statusTexts.indexOf('researching…');
+    const planIdx = statusTexts.indexOf('planning…');
     const branchIdx = statusTexts.indexOf('creating branch…');
     const implIdx = statusTexts.indexOf('implementing…');
     const pushIdx = statusTexts.indexOf('pushing branch…');
     const prIdx = statusTexts.indexOf('opening pull request…');
-    expect(cloneIdx).toBeLessThan(branchIdx);
+    expect(cloneIdx).toBeLessThan(researchIdx);
+    expect(researchIdx).toBeLessThan(planIdx);
+    expect(planIdx).toBeLessThan(branchIdx);
     expect(branchIdx).toBeLessThan(implIdx);
     expect(implIdx).toBeLessThan(pushIdx);
     expect(pushIdx).toBeLessThan(prIdx);
@@ -161,14 +174,24 @@ describe('OneShotOrchestrator — happy path', () => {
     expect(broker.revokes).toHaveLength(1);
   });
 
-  it('sends the instruction to the inner runner', async () => {
+  it('sends three prompts to the inner runner in order (research, plan, implement)', async () => {
     await drain(orch.send('github:acme/widgets add a CHANGELOG'));
-    expect(innerRunner.sends).toHaveLength(1);
-    const sent = innerRunner.sends[0] ?? '';
-    // The composed directive must contain the original instruction, the workdir, and a commit instruction
-    expect(sent).toContain('add a CHANGELOG');
-    expect(sent).toContain('/workspace/acme-widgets');
-    expect(sent.toLowerCase()).toContain('commit');
+    expect(innerRunner.sends).toHaveLength(3);
+
+    // research prompt: contains workdir and instruction
+    const researchSent = innerRunner.sends[0] ?? '';
+    expect(researchSent).toContain('/workspace/acme-widgets');
+    expect(researchSent).toContain('add a CHANGELOG');
+
+    // plan prompt: the planning directive (no workdir needed — agent already has context)
+    const planSent = innerRunner.sends[1] ?? '';
+    expect(planSent.toLowerCase()).toContain('plan');
+
+    // implement prompt: contains workdir and commit instruction
+    const implSent = innerRunner.sends[2] ?? '';
+    expect(implSent).toContain('/workspace/acme-widgets');
+    expect(implSent.toLowerCase()).toContain('commit');
+    // Positional indices above already pin both count and order (research, plan, implement).
   });
 
   it('records clone, branch, push, and openChangeRequest calls', async () => {
@@ -242,8 +265,11 @@ describe('OneShotOrchestrator — post-lease git failure', () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
     gitNodes.failNextPush(new Error('push failed: auth denied'));
+    // Three agentic turns succeed (research, plan, implement); push then fails
     const inner = new FakeRunner('test-session', [
-      [{ type: 'text', text: 'done' }],
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl done' }],
     ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-003');
 
@@ -265,8 +291,11 @@ describe('OneShotOrchestrator — post-lease git failure', () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
     gitNodes.failNextOpenChange(new Error('API rate limit'));
+    // Three agentic turns succeed; openChangeRequest then fails
     const inner = new FakeRunner('test-session', [
-      [{ type: 'text', text: 'done' }],
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl done' }],
     ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-004');
 
@@ -288,7 +317,11 @@ describe('OneShotOrchestrator — branch failure', () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
     gitNodes.failNextBranch(new Error('branch failed: no such workdir'));
-    const inner = new FakeRunner('test-session');
+    // Research and plan succeed before branch fails; implement is never reached
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+    ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-branch-fail');
 
     const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
@@ -301,8 +334,8 @@ describe('OneShotOrchestrator — branch failure', () => {
     const errorEvents = events.filter((e) => e.type === 'error');
     expect(errorEvents).toHaveLength(1);
 
-    // Branch fails before implement — inner runner must not be sent anything
-    expect(inner.sends).toHaveLength(0);
+    // Branch fails before implement — inner runner was only sent research and plan (2 sends)
+    expect(inner.sends).toHaveLength(2);
 
     // No text event (no PR url)
     expect(events.filter((e) => e.type === 'text')).toHaveLength(0);
@@ -320,7 +353,7 @@ describe('OneShotOrchestrator — inner agent error', () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
     const inner = new FakeRunner('test-session', [
-      // Script the inner runner to emit an error
+      // Script the research turn to emit an error
       [{ type: 'error', message: 'agent crashed' }],
     ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-005');
@@ -339,6 +372,100 @@ describe('OneShotOrchestrator — inner agent error', () => {
     const errorEvents = events.filter((e) => e.type === 'error');
     expect(errorEvents).toHaveLength(1);
     expect(events.filter((e) => e.type === 'text')).toHaveLength(0);
+  });
+});
+
+// ── OneShotOrchestrator — research failure ────────────────────────────────────
+
+describe('OneShotOrchestrator — research failure', () => {
+  it('revokes the lease, emits one error, and skips plan/implement/branch/push/pr', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const inner = new FakeRunner('test-session', [
+      // Script the research turn to emit an error event
+      [{ type: 'error', message: 'research failed: sandbox timeout' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-research-fail');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    // Lease acquired and revoked exactly once
+    expect(broker.leases).toHaveLength(1);
+    expect(broker.revokes).toHaveLength(1);
+
+    // Single terminal error event
+    const errorEvents = events.filter((e) => e.type === 'error');
+    expect(errorEvents).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'text')).toHaveLength(0);
+
+    // Only research was attempted — sends has length 1
+    expect(inner.sends).toHaveLength(1);
+
+    // No branch, push, or openChangeRequest calls
+    expect(gitNodes.branches).toHaveLength(0);
+    expect(gitNodes.pushes).toHaveLength(0);
+    expect(gitNodes.changeRequests).toHaveLength(0);
+  });
+});
+
+// ── OneShotOrchestrator — plan failure ────────────────────────────────────────
+
+describe('OneShotOrchestrator — plan failure', () => {
+  it('research succeeds, plan errors → lease revoked once, no implement/branch/push/pr', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      // plan turn errors
+      [{ type: 'error', message: 'plan failed: model overloaded' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-plan-fail');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    expect(broker.leases).toHaveLength(1);
+    expect(broker.revokes).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'text')).toHaveLength(0);
+
+    // Research and plan were attempted (2 sends); implement was never reached.
+    expect(inner.sends).toHaveLength(2);
+
+    // Plan fails before branch — no deterministic git work happened.
+    expect(gitNodes.branches).toHaveLength(0);
+    expect(gitNodes.pushes).toHaveLength(0);
+    expect(gitNodes.changeRequests).toHaveLength(0);
+  });
+});
+
+// ── OneShotOrchestrator — implement failure ───────────────────────────────────
+
+describe('OneShotOrchestrator — implement failure', () => {
+  it('research+plan+branch succeed, implement errors → lease revoked once, no push/pr', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      // implement turn errors
+      [{ type: 'error', message: 'implement failed: agent crashed' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-impl-fail');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    expect(broker.leases).toHaveLength(1);
+    expect(broker.revokes).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'text')).toHaveLength(0);
+
+    // All three agentic turns were attempted.
+    expect(inner.sends).toHaveLength(3);
+
+    // Branch ran (it precedes implement); push/PR did not (implement failed first).
+    expect(gitNodes.branches).toHaveLength(1);
+    expect(gitNodes.pushes).toHaveLength(0);
+    expect(gitNodes.changeRequests).toHaveLength(0);
   });
 });
 
@@ -385,7 +512,11 @@ describe('OneShotOrchestrator — revoke resilience', () => {
   it('a throwing revoke does not crash the turn and the PR is still reported', async () => {
     const broker = new ThrowingRevokeBroker();
     const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/7');
-    const inner = new FakeRunner('test-session', [[{ type: 'text', text: 'done' }]]);
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl done' }],
+    ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-revoke');
 
     const events = await drain(orch.send('github:acme/widgets add x'));
@@ -406,7 +537,11 @@ describe('OneShotOrchestrator — workdir', () => {
   it('collapses all repo-slug slashes so the clone workdir is a single path segment', async () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
-    const inner = new FakeRunner('test-session', [[{ type: 'text', text: 'done' }]]);
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl done' }],
+    ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-wd');
 
     await drain(orch.send('gitlab:group/sub/proj fix it'));

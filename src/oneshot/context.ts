@@ -18,6 +18,8 @@ export interface OneShotContext {
   readonly branch: string;
   readonly lease: CredentialLease;
   // accumulators
+  researchSummary?: string;
+  planSummary?: string;
   implementSummary?: string;
   prUrl?: string;
 }
