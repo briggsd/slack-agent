@@ -4,15 +4,20 @@
  * This slice (M4 S02) introduces the minimal shape and one entry. Facets
  * (system prompt, tool policy, network/resource isolation) are added in later
  * slices once the protocol supports them.
+ *
+ * M5 S02 adds `mode` to distinguish conversational sessions from one-shot
+ * repo tasks.
  */
 
 export interface Profile {
   id: string;
   label: string;
+  mode: 'conversational' | 'one-shot';
 }
 
 export const PROFILES: ReadonlyMap<string, Profile> = new Map([
-  ['conversational', { id: 'conversational', label: 'Conversational' }],
+  ['conversational', { id: 'conversational', label: 'Conversational', mode: 'conversational' }],
+  ['repo-oneshot', { id: 'repo-oneshot', label: 'Repo (one-shot)', mode: 'one-shot' }],
 ]);
 
 export const DEFAULT_PROFILE_ID = 'conversational';
