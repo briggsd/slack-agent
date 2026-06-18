@@ -94,8 +94,14 @@ else
   echo "→ remote branch $BRANCH already gone"
 fi
 
-# Sync local main so the next worktree forks from the just-merged tip.
-git -C "$MAIN" fetch origin main --quiet && git -C "$MAIN" merge --ff-only origin/main >/dev/null 2>&1 || true
+# Sync local main so the next worktree forks from the just-merged tip. Warn (don't silently
+# swallow) on failure — a stale local main is a real footgun the next slice forks from.
+git -C "$MAIN" fetch origin main --quiet || true
+if ! git -C "$MAIN" merge --ff-only origin/main >/dev/null 2>&1; then
+  echo "⚠ could not fast-forward local main to origin/main — sync it yourself once clear:" >&2
+  echo "    git -C \"$MAIN\" merge --ff-only origin/main" >&2
+  echo "  (common causes: the main checkout is on another branch, or has untracked files that collide.)" >&2
+fi
 
 # Local worktree + branch teardown. Guard against discarding real uncommitted work: find the
 # worktree's ACTUAL path (don't reconstruct the sa-wt-<slug> convention, or the guard would
