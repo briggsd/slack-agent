@@ -86,6 +86,6 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
 
   async runCheck(req: CheckRequest): Promise<CheckResult> {
     this.checks.push(req);
-    return this.checkResults.get(req.kind) ?? { exitCode: 0, output: '' };
+    return this.checkResults.get(req.kind) ?? { exitCode: 0, output: '', skipped: false };
   }
 }

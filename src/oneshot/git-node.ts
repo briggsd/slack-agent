@@ -48,8 +48,15 @@ export interface BranchRequest {
 
 /** The captured result of running a lint or test check inside an ephemeral container. */
 export interface CheckResult {
+  /** Process exit code. When `skipped` is true this is normalized to 0 (a skip is not a failure). */
   exitCode: number;
   output: string;
+  /**
+   * True when no check actually ran — the auto-detect default found no package.json
+   * or no matching npm script. A skip is distinct from a pass: nothing was checked.
+   * Always false when an operator override command is configured (it always runs).
+   */
+  skipped: boolean;
 }
 
 /**

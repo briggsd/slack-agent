@@ -592,8 +592,9 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     expect(cIdx).toBeGreaterThan(-1);
     const shellCmd = args[cIdx + 1] ?? '';
     expect(shellCmd).toContain('package.json');
-    expect(shellCmd).toContain('npm run lint --if-present');
+    expect(shellCmd).toContain('npm run lint');
     expect(shellCmd).toContain('if [');  // uses if/then/else, not &&/||
+    expect(shellCmd).toContain('skipping'); // skip path when nothing to run
 
     // NO -e GIT_TOKEN (checks get no credential)
     expect(args).not.toContain('GIT_TOKEN');
@@ -601,7 +602,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     expect(eIdx).toBe(-1);
   });
 
-  it('test: default shell cmd uses "npm run test --if-present"', async () => {
+  it('test: default shell cmd runs "npm run test" guarded by script detection', async () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
@@ -610,7 +611,8 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
     const shellCmd = args[cIdx + 1] ?? '';
-    expect(shellCmd).toContain('npm run test --if-present');
+    expect(shellCmd).toContain('npm run test');
+    expect(shellCmd).toContain('package.json');
   });
 
   it('uses lintCmd override when configured', async () => {
@@ -673,6 +675,36 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const cIdx = args.indexOf('-c');
     // test kind should get the auto-detect default, not 'make lint'
     expect(args[cIdx + 1]).not.toBe('make lint');
-    expect(args[cIdx + 1]).toContain('npm run test --if-present');
+    expect(args[cIdx + 1]).toContain('npm run test');
+  });
+
+  it('a skip exit (default, no script) RESOLVES with skipped=true and exitCode normalized to 0', async () => {
+    // 97 is the reserved skip code the auto-detect command exits with when there is
+    // nothing to run; runCheck maps it to { skipped: true, exitCode: 0 }.
+    const { spawnFn } = makeFakeSpawn(97);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    expect(result.skipped).toBe(true);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('a passing default check is NOT skipped (exitCode 0, skipped=false)', async () => {
+    const { spawnFn } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    expect(result.skipped).toBe(false);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('an override is never marked skipped, even if it exits with the reserved code', async () => {
+    // With an override configured, exit 97 is the override command's own code, not a skip.
+    const { spawnFn } = makeFakeSpawn(97);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint' });
+
+    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    expect(result.skipped).toBe(false);
+    expect(result.exitCode).toBe(97);
   });
 });

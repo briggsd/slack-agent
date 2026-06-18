@@ -8,7 +8,9 @@ export const lintNode: OneShotNode = {
     yield { type: 'status', text: 'linting…' };
     const result = await deps.gitNodes.runCheck({ kind: 'lint', workdir: ctx.workdir, volume: ctx.volume });
     ctx.lintResult = result;
-    if (result.exitCode === 0) {
+    if (result.skipped) {
+      yield { type: 'status', text: 'lint skipped (no command)' };
+    } else if (result.exitCode === 0) {
       yield { type: 'status', text: 'lint passed' };
     } else {
       yield { type: 'status', text: 'lint failed (surfaced; not blocking until the retry loop lands)' };

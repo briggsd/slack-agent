@@ -251,7 +251,7 @@ describe('OneShotOrchestrator — non-gating checks', () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/99');
     // Script lint to fail
-    gitNodes.setCheckResult('lint', { exitCode: 1, output: 'boom' });
+    gitNodes.setCheckResult('lint', { exitCode: 1, output: 'boom', skipped: false });
 
     const inner = new FakeRunner('test-session', [
       [{ type: 'text', text: 'research done' }],
@@ -280,6 +280,35 @@ describe('OneShotOrchestrator — non-gating checks', () => {
       .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
       .map((e) => e.text);
     expect(statusTexts).toContain('lint failed (surfaced; not blocking until the retry loop lands)');
+  });
+
+  it('a skipped check reports "skipped", not "passed", and the PR still opens', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/100');
+    // Auto-detect found nothing to run for both checks.
+    gitNodes.setCheckResult('lint', { exitCode: 0, output: '', skipped: true });
+    gitNodes.setCheckResult('test', { exitCode: 0, output: '', skipped: true });
+
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl done' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-skipped');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+    expect(statusTexts).toContain('lint skipped (no command)');
+    expect(statusTexts).toContain('tests skipped (no command)');
+    expect(statusTexts).not.toContain('lint passed');
+    expect(statusTexts).not.toContain('tests passed');
+
+    // A skip is not a failure — the PR still opens.
+    expect(gitNodes.changeRequests).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
   });
 });
 

@@ -59,6 +59,13 @@ export function credentialHelper(username: string): string {
 }
 
 /**
+ * Reserved exit code the auto-detect check command uses to signal "nothing to run"
+ * (no package.json or no matching npm script), so a skip is distinguishable from a
+ * pass. Chosen to avoid common lint/test failure codes (typically 1–2).
+ */
+const CHECK_SKIP_EXIT = 97;
+
+/**
  * Spawn `docker <args>` without any secret in the env, capturing combined stdout+stderr.
  * Resolves with { exitCode, output } regardless of the exit code — a non-zero exit is
  * returned as data, not thrown. Rejects only on a true spawn/infrastructure error (the
@@ -69,8 +76,8 @@ function runDockerCapture(
   args: string[],
   what: string,
   context: string,
-): Promise<CheckResult> {
-  return new Promise<CheckResult>((resolve, reject) => {
+): Promise<{ exitCode: number; output: string }> {
+  return new Promise<{ exitCode: number; output: string }>((resolve, reject) => {
     const child: ChildProcess = spawnFn('docker', args, {
       env: dockerCheckEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -275,11 +282,22 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
 
   async runCheck(req: CheckRequest): Promise<CheckResult> {
     const override = req.kind === 'lint' ? this.lintCmd : this.testCmd;
+    // Auto-detect default: exit with the reserved skip code when there is nothing to
+    // run (no package.json, or no matching npm script) so a skip is distinguishable
+    // from a pass. `req.kind` is the closed 'lint' | 'test' union — safe to interpolate.
     const shellCmd = override !== undefined
       ? override
-      : `if [ -f package.json ]; then npm run ${req.kind} --if-present; else echo "no package.json — skipping ${req.kind}"; fi`;
+      : `if [ ! -f package.json ]; then echo "no package.json — skipping ${req.kind}"; exit ${CHECK_SKIP_EXIT}; fi; ` +
+        `if node -e "var p=require('./package.json');process.exit(p.scripts&&p.scripts.${req.kind}?0:1)"; ` +
+        `then npm run ${req.kind}; else echo "no ${req.kind} script — skipping"; exit ${CHECK_SKIP_EXIT}; fi`;
 
     const args = this.dockerCheckArgs(req.volume, req.workdir, shellCmd);
-    return runDockerCapture(this.spawnFn, args, `check ${req.kind}`, `workdir: ${req.workdir}`);
+    const raw = await runDockerCapture(this.spawnFn, args, `check ${req.kind}`, `workdir: ${req.workdir}`);
+
+    // A skip is only meaningful for the auto-detect default; an override always "ran".
+    if (override === undefined && raw.exitCode === CHECK_SKIP_EXIT) {
+      return { exitCode: 0, output: raw.output, skipped: true };
+    }
+    return { exitCode: raw.exitCode, output: raw.output, skipped: false };
   }
 }

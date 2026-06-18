@@ -8,7 +8,9 @@ export const testNode: OneShotNode = {
     yield { type: 'status', text: 'testing…' };
     const result = await deps.gitNodes.runCheck({ kind: 'test', workdir: ctx.workdir, volume: ctx.volume });
     ctx.testResult = result;
-    if (result.exitCode === 0) {
+    if (result.skipped) {
+      yield { type: 'status', text: 'tests skipped (no command)' };
+    } else if (result.exitCode === 0) {
       yield { type: 'status', text: 'tests passed' };
     } else {
       yield { type: 'status', text: 'tests failed (surfaced; not blocking until the retry loop lands)' };
