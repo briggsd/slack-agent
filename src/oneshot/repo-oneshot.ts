@@ -36,7 +36,8 @@ async function decide(
   }
 }
 
-const fixLoop = boundedRetry<OneShotContext, OneShotDeps>(
+/** The implement → lint → test cycle with bounded retry. Shared with the supervised blueprint. */
+export const fixLoop = boundedRetry<OneShotContext, OneShotDeps>(
   [implementNode, lintNode, testNode],
   { name: 'implement-check-loop', maxAttempts: 2, decide },
 );

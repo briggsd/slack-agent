@@ -956,34 +956,9 @@ describe('DispatchingRunnerFactory', () => {
     expect(runner).toBeInstanceOf(OneShotOrchestrator);
   });
 
-  it('supervised-repo-oneshot orchestrator runs the supervised blueprint (same nodes as unsupervised for S02)', async () => {
-    const broker = new FakeBroker();
-    const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/supervised');
-    // Script three agentic turns for the inner runner (research, plan, implement)
-    const innerRunner = new FakeRunner('supervised-session', [
-      [{ type: 'text', text: 'research done' }],
-      [{ type: 'text', text: 'plan done' }],
-      [{ type: 'text', text: 'impl done' }],
-    ]);
-    const orch = new OneShotOrchestrator(
-      innerRunner,
-      broker,
-      gitNodes,
-      'TEAM:C:T',
-      'task-supervised',
-      'supervised-repo-oneshot',
-    );
-
-    const events: RunnerEvent[] = [];
-    for await (const ev of orch.send('github:acme/widgets fix the bug')) {
-      events.push(ev);
-    }
-
-    // PR still opens (supervised blueprint is node-identical to unsupervised in S02)
-    expect(gitNodes.changeRequests).toHaveLength(1);
-    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
-    expect(textEvents).toHaveLength(1);
-    expect(textEvents[0]?.text).toContain('Opened PR:');
-    expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
-  });
+  // The supervised orchestrator's end-to-end behaviour (the plan gate: approve / feedback /
+  // cancel / timeout) lives in test/plan-gate.test.ts, which drives the gate with resume
+  // values. Do NOT drain a supervised orchestrator with `for await` — it feeds an undefined
+  // resume, so the gate abandons but the consumer never `.return()`s, and the unbounded
+  // plan-approval loop re-plans forever.
 });

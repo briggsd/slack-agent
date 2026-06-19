@@ -27,6 +27,11 @@ export interface OneShotAgenticContext {
   // accumulators
   researchSummary?: string;
   planSummary?: string;
+  /** Set by the plan-gate node when the human approves the plan; the gate loop exits on it. */
+  planApproved?: boolean;
+  /** Raw reviewer reply from the plan gate when it is neither approve nor cancel; the plan
+   *  node folds it into the next plan as delimited data (untrusted — never as instructions). */
+  planFeedback?: string;
   implementSummary?: string;
   lintResult?: CheckResult;
   testResult?: CheckResult;

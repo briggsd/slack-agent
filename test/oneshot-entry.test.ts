@@ -43,7 +43,7 @@ function makeGateway() {
   return { fakeApp, slack, fakeBroker, fakeGitNodes, innerFactory, sessions };
 }
 
-describe('oneshot-entry — task mention triggers one-shot path', () => {
+describe('oneshot-entry — exec mention triggers the unsupervised one-shot path', () => {
   it('posts a placeholder then updates with Opened PR text', async () => {
     const { fakeApp, slack } = makeGateway();
 
@@ -52,7 +52,7 @@ describe('oneshot-entry — task mention triggers one-shot path', () => {
       channel: 'C',
       threadTs: 'T1',
       user: 'U1',
-      text: '<@UHARNESS> task github:acme/widgets do the thing',
+      text: '<@UHARNESS> exec github:acme/widgets do the thing',
       ts: 'T1',
     });
     await drain();
@@ -75,7 +75,7 @@ describe('oneshot-entry — task mention triggers one-shot path', () => {
       channel: 'C',
       threadTs: 'T1',
       user: 'U1',
-      text: '<@UHARNESS> task github:acme/widgets do the thing',
+      text: '<@UHARNESS> exec github:acme/widgets do the thing',
       ts: 'T1',
     });
     await drain();
@@ -93,7 +93,7 @@ describe('oneshot-entry — task mention triggers one-shot path', () => {
       channel: 'C',
       threadTs: 'T1',
       user: 'U1',
-      text: '<@UHARNESS> task github:acme/widgets do the thing',
+      text: '<@UHARNESS> exec github:acme/widgets do the thing',
       ts: 'T1',
     });
     await drain();
@@ -101,6 +101,74 @@ describe('oneshot-entry — task mention triggers one-shot path', () => {
     expect(fakeGitNodes.clones).toHaveLength(1);
     expect(fakeGitNodes.pushes).toHaveLength(1);
     expect(fakeGitNodes.changeRequests).toHaveLength(1);
+  });
+
+  it('task mention parks at the plan gate (prompt posted, no push) until approval', async () => {
+    const { fakeApp, slack, fakeGitNodes, sessions } = makeGateway();
+
+    await fakeApp.fireMention({
+      team: 'T1',
+      channel: 'C',
+      threadTs: 'T1',
+      user: 'U1',
+      text: '<@UHARNESS> task github:acme/widgets do the thing',
+      ts: 'T1',
+    });
+    await drain();
+
+    // Parked: the approval prompt is posted and nothing has been pushed yet.
+    const parkedUpdate = slack.updates[slack.updates.length - 1];
+    expect(parkedUpdate?.text).toContain('`approve`');
+    expect(fakeGitNodes.pushes).toHaveLength(0);
+    expect(fakeGitNodes.changeRequests).toHaveLength(0);
+
+    // A thread reply of `approve` resumes the parked run through to the PR.
+    await fakeApp.fireReply({
+      team: 'T1',
+      channel: 'C',
+      threadTs: 'T1',
+      user: 'U1',
+      text: 'approve',
+      ts: 'T1-r1',
+    });
+    await drain();
+
+    expect(fakeGitNodes.pushes).toHaveLength(1);
+    expect(fakeGitNodes.changeRequests).toHaveLength(1);
+    const lastUpdate = slack.updates[slack.updates.length - 1];
+    expect(lastUpdate?.text).toContain(`Opened PR: ${FAKE_PR_URL}`);
+
+    await sessions.disposeAll();
+  });
+
+  it('task mention then `cancel` abandons cleanly with nothing pushed', async () => {
+    const { fakeApp, slack, fakeGitNodes, sessions } = makeGateway();
+
+    await fakeApp.fireMention({
+      team: 'T3',
+      channel: 'C',
+      threadTs: 'T3',
+      user: 'U1',
+      text: '<@UHARNESS> task github:acme/widgets do the thing',
+      ts: 'T3',
+    });
+    await drain();
+    await fakeApp.fireReply({
+      team: 'T3',
+      channel: 'C',
+      threadTs: 'T3',
+      user: 'U1',
+      text: 'cancel',
+      ts: 'T3-r1',
+    });
+    await drain();
+
+    const lastUpdate = slack.updates[slack.updates.length - 1];
+    expect(lastUpdate?.text).toContain('Plan abandoned (cancelled)');
+    expect(fakeGitNodes.pushes).toHaveLength(0);
+    expect(fakeGitNodes.changeRequests).toHaveLength(0);
+
+    await sessions.disposeAll();
   });
 
   it('conversational mention through same dispatching gateway still echoes and records no lease', async () => {
