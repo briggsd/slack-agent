@@ -665,6 +665,180 @@ describe('OneShotOrchestrator — dispose', () => {
   });
 });
 
+// ── OneShotOrchestrator — bounded retry loop ─────────────────────────────────
+
+describe('OneShotOrchestrator — transient retry then success', () => {
+  it('implement runs twice, transient status appears, and PR opens', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/retry');
+
+    // Lint: fails with a transient error on cycle 1, passes on cycle 2
+    gitNodes.queueCheckResults('lint', [
+      { exitCode: 1, output: 'Connection ETIMEDOUT to registry', skipped: false },
+      { exitCode: 0, output: '', skipped: false },
+    ]);
+
+    // research(1) + plan(1) + implement×2(2) = 4 turns
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl cycle 1 done' }],
+      [{ type: 'text', text: 'impl cycle 2 done' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-retry');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    // implement ran twice (2 sends from implement; total = research + plan + impl×2 = 4)
+    expect(inner.sends).toHaveLength(4);
+
+    // The transient retry status was emitted
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+    expect(statusTexts).toContain('checks failed (transient) — retrying…');
+
+    // Push and openChangeRequest still called (PR opens)
+    expect(gitNodes.pushes).toHaveLength(1);
+    expect(gitNodes.changeRequests).toHaveLength(1);
+
+    // Terminal text contains PR url
+    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
+    expect(textEvents).toHaveLength(1);
+    expect(textEvents[0]?.text).toContain('Opened PR:');
+    expect(textEvents[0]?.text).toContain('https://example.test/pr/retry');
+
+    // No error events
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
+  });
+});
+
+describe('OneShotOrchestrator — permanent failure: no retry, PR still opens', () => {
+  it('implement runs once, permanent status appears, and PR opens', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/perm');
+
+    // Lint: fails with a permanent error
+    gitNodes.setCheckResult('lint', {
+      exitCode: 1,
+      output: 'Error: missing file foo.ts',
+      skipped: false,
+    });
+
+    // research(1) + plan(1) + implement×1(1) = 3 turns (no retry)
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl done' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-perm');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    // implement ran exactly once
+    expect(inner.sends).toHaveLength(3);
+
+    // The permanent status was emitted
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+    expect(statusTexts).toContain(
+      'checks failed (permanent) — opening PR with failing checks for review',
+    );
+
+    // No transient-retry status
+    expect(statusTexts).not.toContain('checks failed (transient) — retrying…');
+
+    // Push and openChangeRequest still called (PR opens despite failing checks)
+    expect(gitNodes.pushes).toHaveLength(1);
+    expect(gitNodes.changeRequests).toHaveLength(1);
+
+    // Terminal text contains PR url
+    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
+    expect(textEvents).toHaveLength(1);
+    expect(textEvents[0]?.text).toContain('Opened PR:');
+
+    // No error events
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
+  });
+});
+
+describe('OneShotOrchestrator — exhaustion: implement runs maxAttempts times, PR opens', () => {
+  it('transient failure every cycle exhausts attempts; PR still opens', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/exhaust');
+
+    // Lint: transient failure every cycle (never passes)
+    gitNodes.setCheckResult('lint', {
+      exitCode: 1,
+      output: 'Error: socket hang up',
+      skipped: false,
+    });
+
+    // research(1) + plan(1) + implement×2(maxAttempts=2) = 4 turns
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl cycle 1 done' }],
+      [{ type: 'text', text: 'impl cycle 2 done' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-exhaust');
+
+    const events = await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    // implement ran exactly maxAttempts (2) times
+    expect(inner.sends).toHaveLength(4);
+
+    // Push and openChangeRequest still called (PR opens even though checks still fail)
+    expect(gitNodes.pushes).toHaveLength(1);
+    expect(gitNodes.changeRequests).toHaveLength(1);
+
+    // Terminal text contains PR url
+    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
+    expect(textEvents).toHaveLength(1);
+    expect(textEvents[0]?.text).toContain('Opened PR:');
+
+    // No error events
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
+  });
+});
+
+describe('OneShotOrchestrator — retry feeds failure output back to implement', () => {
+  it('the second implement prompt contains the failing check output and a fix instruction; first does not', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/feedback');
+
+    // Lint: ETIMEDOUT on cycle 1 → transient retry; passes on cycle 2
+    gitNodes.queueCheckResults('lint', [
+      { exitCode: 1, output: 'ETIMEDOUT connecting to npm registry', skipped: false },
+      { exitCode: 0, output: '', skipped: false },
+    ]);
+
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl cycle 1 done' }],
+      [{ type: 'text', text: 'impl cycle 2 done' }],
+    ]);
+    const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-feedback');
+
+    await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+
+    // 4 sends: research(0), plan(1), impl-cycle1(2), impl-cycle2(3)
+    expect(inner.sends).toHaveLength(4);
+
+    const implCycle1Prompt = inner.sends[2] ?? '';
+    const implCycle2Prompt = inner.sends[3] ?? '';
+
+    // First implement prompt does NOT contain the failure output
+    expect(implCycle1Prompt).not.toContain('ETIMEDOUT');
+
+    // Second implement prompt DOES contain the failure output and fix instruction
+    expect(implCycle2Prompt).toContain('ETIMEDOUT');
+    expect(implCycle2Prompt.toLowerCase()).toContain('fix these issues');
+  });
+});
+
 // ── DispatchingRunnerFactory ──────────────────────────────────────────────────
 
 describe('DispatchingRunnerFactory', () => {

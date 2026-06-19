@@ -14,6 +14,7 @@ import { describe, it, expect } from 'vitest';
 import type { BlueprintNode, Blueprint } from '../src/blueprints/types.js';
 import type { RunnerEvent } from '../src/runner/types.js';
 import { runBlueprint } from '../src/blueprints/executor.js';
+import { boundedRetry } from '../src/blueprints/combinators.js';
 import { blueprintFor } from '../src/oneshot/registry.js';
 import { repoOneshot } from '../src/oneshot/repo-oneshot.js';
 
@@ -27,7 +28,7 @@ interface TestDeps {}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-async function drain(gen: AsyncGenerator<RunnerEvent>): Promise<RunnerEvent[]> {
+async function drain(gen: AsyncIterable<RunnerEvent>): Promise<RunnerEvent[]> {
   const events: RunnerEvent[] = [];
   for await (const ev of gen) {
     events.push(ev);
@@ -41,6 +42,21 @@ function makeCtx(): TestCtx {
 
 function makeDeps(): TestDeps {
   return {};
+}
+
+/** Makes a simple counter node that records how many times it ran. */
+function makeCounterNode(
+  name: string,
+  runCounts: number[],
+): BlueprintNode<TestCtx, TestDeps> {
+  return {
+    name,
+    kind: 'deterministic',
+    async *run(): AsyncGenerator<RunnerEvent> {
+      runCounts.push(1);
+      yield { type: 'status', text: `${name} ran` };
+    },
+  };
 }
 
 // ── runBlueprint — node ordering ─────────────────────────────────────────────
@@ -184,13 +200,215 @@ describe('runBlueprint — context threading', () => {
   });
 });
 
+// ── boundedRetry combinator ───────────────────────────────────────────────────
+
+describe('boundedRetry — no retry (decide returns false)', () => {
+  it('runs the body exactly once when decide returns retry=false', async () => {
+    const runCounts: number[] = [];
+    const body = [makeCounterNode('body', runCounts)];
+
+    const node = boundedRetry<TestCtx, TestDeps>(body, {
+      name: 'test-loop',
+      maxAttempts: 3,
+      decide: async () => ({ retry: false }),
+    });
+
+    const events = await drain(node.run(makeCtx(), makeDeps()));
+
+    expect(runCounts).toHaveLength(1);
+    // Status from the single run
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+    expect(statusTexts).toContain('body ran');
+  });
+});
+
+describe('boundedRetry — always retry', () => {
+  it('runs the body maxAttempts times when decide always returns retry=true', async () => {
+    const runCounts: number[] = [];
+    const body = [makeCounterNode('body', runCounts)];
+
+    const node = boundedRetry<TestCtx, TestDeps>(body, {
+      name: 'test-loop',
+      maxAttempts: 3,
+      decide: async () => ({ retry: true }),
+    });
+
+    await drain(node.run(makeCtx(), makeDeps()));
+
+    expect(runCounts).toHaveLength(3);
+  });
+});
+
+describe('boundedRetry — intermediate stop', () => {
+  it('stops after attempt 0 (2 body runs total) when decide returns false on first call', async () => {
+    const runCounts: number[] = [];
+    const body = [makeCounterNode('body', runCounts)];
+    let decideCalls = 0;
+
+    const node = boundedRetry<TestCtx, TestDeps>(body, {
+      name: 'test-loop',
+      maxAttempts: 4,
+      decide: async (_ctx, _deps, attempt) => {
+        decideCalls++;
+        // Retry once (after attempt 0), stop after attempt 1
+        return { retry: attempt === 0 };
+      },
+    });
+
+    await drain(node.run(makeCtx(), makeDeps()));
+
+    // Body ran twice: attempt 0 (decide=retry) and attempt 1 (decide=stop)
+    expect(runCounts).toHaveLength(2);
+    expect(decideCalls).toBe(2);
+  });
+});
+
+describe('boundedRetry — events forwarded every cycle', () => {
+  it('forwards all body node events for every attempt', async () => {
+    const body: BlueprintNode<TestCtx, TestDeps>[] = [
+      {
+        name: 'multi-event',
+        kind: 'deterministic',
+        async *run(): AsyncGenerator<RunnerEvent> {
+          yield { type: 'status', text: 'first' };
+          yield { type: 'status', text: 'second' };
+        },
+      },
+    ];
+
+    const node = boundedRetry<TestCtx, TestDeps>(body, {
+      name: 'test-loop',
+      maxAttempts: 2,
+      decide: async () => ({ retry: true }),
+    });
+
+    const events = await drain(node.run(makeCtx(), makeDeps()));
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+
+    // Two cycles × two events each = four status events
+    expect(statusTexts).toEqual(['first', 'second', 'first', 'second']);
+  });
+});
+
+describe('boundedRetry — decide status is yielded', () => {
+  it('yields the decide status between cycles', async () => {
+    const body = [makeCounterNode('body', [])];
+
+    const node = boundedRetry<TestCtx, TestDeps>(body, {
+      name: 'test-loop',
+      maxAttempts: 2,
+      decide: async () => ({ retry: true, status: 'retrying now…' }),
+    });
+
+    const events = await drain(node.run(makeCtx(), makeDeps()));
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+
+    expect(statusTexts).toContain('retrying now…');
+  });
+
+  it('does not yield a status event when decide status is absent', async () => {
+    const body = [makeCounterNode('body', [])];
+
+    const node = boundedRetry<TestCtx, TestDeps>(body, {
+      name: 'test-loop',
+      maxAttempts: 2,
+      decide: async () => ({ retry: false }),
+    });
+
+    const events = await drain(node.run(makeCtx(), makeDeps()));
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+
+    // Only the body node's status; no extra decide status
+    expect(statusTexts).toEqual(['body ran']);
+  });
+});
+
+describe('boundedRetry — throwing body node propagates', () => {
+  it('does not catch a body node throw; the error propagates to the caller', async () => {
+    const throwingBody: BlueprintNode<TestCtx, TestDeps>[] = [
+      {
+        name: 'thrower',
+        kind: 'deterministic',
+        async *run(): AsyncGenerator<RunnerEvent> {
+          yield { type: 'status', text: 'before throw' };
+          throw new Error('body exploded');
+        },
+      },
+    ];
+
+    const node = boundedRetry<TestCtx, TestDeps>(throwingBody, {
+      name: 'test-loop',
+      maxAttempts: 3,
+      decide: async () => ({ retry: true }),
+    });
+
+    let threw = false;
+    let thrownMessage = '';
+    try {
+      await drain(node.run(makeCtx(), makeDeps()));
+    } catch (err: unknown) {
+      threw = true;
+      thrownMessage = err instanceof Error ? err.message : String(err);
+    }
+
+    expect(threw).toBe(true);
+    expect(thrownMessage).toBe('body exploded');
+  });
+});
+
+describe('boundedRetry — kind inference', () => {
+  it('is agentic if any body node is agentic', () => {
+    const body: BlueprintNode<TestCtx, TestDeps>[] = [
+      { name: 'det', kind: 'deterministic', async *run() { /* empty */ } },
+      { name: 'ag', kind: 'agentic', async *run() { /* empty */ } },
+    ];
+    const node = boundedRetry(body, {
+      name: 'mixed-loop',
+      maxAttempts: 1,
+      decide: async () => ({ retry: false }),
+    });
+    expect(node.kind).toBe('agentic');
+  });
+
+  it('is deterministic if all body nodes are deterministic', () => {
+    const body: BlueprintNode<TestCtx, TestDeps>[] = [
+      { name: 'det', kind: 'deterministic', async *run() { /* empty */ } },
+    ];
+    const node = boundedRetry(body, {
+      name: 'det-loop',
+      maxAttempts: 1,
+      decide: async () => ({ retry: false }),
+    });
+    expect(node.kind).toBe('deterministic');
+  });
+});
+
+describe('boundedRetry — maxAttempts guard', () => {
+  it('throws a RangeError when maxAttempts < 1 (catches misconfiguration early)', () => {
+    const body: BlueprintNode<TestCtx, TestDeps>[] = [
+      { name: 'det', kind: 'deterministic', async *run() { /* empty */ } },
+    ];
+    expect(() =>
+      boundedRetry(body, { name: 'bad', maxAttempts: 0, decide: async () => ({ retry: false }) }),
+    ).toThrow(RangeError);
+  });
+});
+
 // ── blueprintFor registry ─────────────────────────────────────────────────────
 
 describe('blueprintFor registry', () => {
-  it('returns a blueprint with the nine expected node names in order', () => {
+  it('returns a blueprint with the seven expected node names in order', () => {
     const bp = blueprintFor('repo-oneshot');
     const names = bp.nodes.map((n) => n.name);
-    expect(names).toEqual(['clone', 'research', 'plan', 'branch', 'implement', 'lint', 'test', 'push', 'open-pr']);
+    expect(names).toEqual(['clone', 'research', 'plan', 'branch', 'implement-check-loop', 'push', 'open-pr']);
   });
 
   it('throws for an unknown blueprint id', () => {
@@ -205,7 +423,7 @@ describe('blueprintFor registry', () => {
 // ── repoOneshot node kinds ────────────────────────────────────────────────────
 
 describe('repoOneshot node kinds', () => {
-  it('research, plan, implement are agentic; all others are deterministic', () => {
+  it('research, plan, implement-check-loop are agentic; all others are deterministic', () => {
     const kindsByName = Object.fromEntries(
       repoOneshot.nodes.map((n) => [n.name, n.kind]),
     );
@@ -213,9 +431,7 @@ describe('repoOneshot node kinds', () => {
     expect(kindsByName['research']).toBe('agentic');
     expect(kindsByName['plan']).toBe('agentic');
     expect(kindsByName['branch']).toBe('deterministic');
-    expect(kindsByName['implement']).toBe('agentic');
-    expect(kindsByName['lint']).toBe('deterministic');
-    expect(kindsByName['test']).toBe('deterministic');
+    expect(kindsByName['implement-check-loop']).toBe('agentic');
     expect(kindsByName['push']).toBe('deterministic');
     expect(kindsByName['open-pr']).toBe('deterministic');
   });
