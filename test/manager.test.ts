@@ -2,8 +2,42 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { SessionManager } from '../src/sessions/manager.js';
 import { FakeRunnerFactory, FakeRunner } from '../src/runner/fake.js';
 import type { TurnScript } from '../src/runner/fake.js';
-import type { RunnerEvent } from '../src/runner/types.js';
+import type {
+  RunnerEvent,
+  RunnerStream,
+  SessionRunner,
+  RunnerFactory,
+  GateResume,
+} from '../src/runner/types.js';
+import type { Profile } from '../src/profiles/registry.js';
 import { FakeSlackClient } from './responder.test.js';
+
+/**
+ * A two-way runner that parks at an `await_approval` gate and records the resume
+ * value it gets back, so a test can assert the manager routed the reply/timeout in.
+ */
+class GateRunner implements SessionRunner {
+  public received: GateResume | undefined;
+  public sendCount = 0;
+  constructor(readonly sessionKey: string) {}
+  async *send(_message: string): RunnerStream {
+    this.sendCount++;
+    yield { type: 'status', text: 'planning…' };
+    const resume = yield { type: 'await_approval', prompt: 'PLAN: do the thing' };
+    this.received = resume;
+    const tail = resume?.kind === 'reply' ? `:${resume.text}` : '';
+    yield { type: 'text', text: `resumed:${resume?.kind ?? 'none'}${tail}` };
+  }
+  async dispose(): Promise<void> {}
+}
+
+class GateRunnerFactory implements RunnerFactory {
+  public runner: GateRunner | null = null;
+  async create(sessionKey: string, _profile: Profile): Promise<SessionRunner> {
+    this.runner = new GateRunner(sessionKey);
+    return this.runner;
+  }
+}
 
 function makeManager(idleTimeoutMs = 60_000, script: TurnScript[] = []) {
   const slack = new FakeSlackClient();
@@ -299,5 +333,117 @@ describe('SessionManager — file upload', () => {
 
     // Turn still completes — the final text update appears
     expect(updateTexts.some((t) => t === 'done anyway')).toBe(true);
+  });
+});
+
+describe('SessionManager — approval gate (await_approval)', () => {
+  it('parks at the gate, posts the prompt, and a reply resumes the run (not a new turn)', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new GateRunnerFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 60_000, // long, so the timeout never fires in this test
+      factory,
+      slack,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'task github:a/b do x',
+      channel: 'C',
+      threadTs: 'T',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Parked: the plan prompt is posted and the run has not resumed yet.
+    expect(slack.updates.some((u) => u.text.includes('PLAN: do the thing'))).toBe(true);
+    expect(factory.runner?.received).toBeUndefined();
+    expect(manager.has('TEAM:C:T')).toBe(true);
+
+    // A thread reply resolves the gate — routed to the parked run, not enqueued.
+    const accepted = await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+    });
+    expect(accepted).toBe(true);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(factory.runner?.received).toEqual({ kind: 'reply', text: 'approve' });
+    // The reply did NOT start a second send() — it resumed the first.
+    expect(factory.runner?.sendCount).toBe(1);
+    expect(slack.updates.some((u) => u.text === 'resumed:reply:approve')).toBe(true);
+  });
+
+  it('routes a reply that lands while the prompt is still being posted (no race)', async () => {
+    // update() is slow, so the prompt post is still in flight when the reply arrives.
+    // The fix registers pendingApproval synchronously (before the post), so the reply
+    // still routes to the gate; the old ordering would misroute it and the run would hang.
+    class SlowSlack extends FakeSlackClient {
+      override async update(params: { channel: string; ts: string; text: string }): Promise<void> {
+        await new Promise((r) => setTimeout(r, 100));
+        await super.update(params);
+      }
+    }
+    // Yields the gate first (no status), so the gate is reached before any slow update().
+    class GateFirstRunner implements SessionRunner {
+      public received: GateResume | undefined;
+      constructor(readonly sessionKey: string) {}
+      async *send(_m: string): RunnerStream {
+        const resume = yield { type: 'await_approval', prompt: 'PLAN' };
+        this.received = resume;
+        yield { type: 'text', text: `resumed:${resume?.kind ?? 'none'}` };
+      }
+      async dispose(): Promise<void> {}
+    }
+    let runner: GateFirstRunner | null = null;
+    const factory: RunnerFactory = {
+      create: async (key) => {
+        runner = new GateFirstRunner(key);
+        return runner;
+      },
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack: new SlowSlack(),
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'task github:a/b x',
+      channel: 'C',
+      threadTs: 'T',
+    });
+    await new Promise((r) => setTimeout(r, 10)); // gate parked; the slow prompt post is in flight
+    const accepted = await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+    });
+    expect(accepted).toBe(true);
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(runner?.received).toEqual({ kind: 'reply', text: 'approve' });
+  });
+
+  it('resumes with a timeout when no reply arrives within gateTimeoutMs', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new GateRunnerFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 20,
+      factory,
+      slack,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'task github:a/b do x',
+      channel: 'C',
+      threadTs: 'T',
+    });
+    await new Promise((r) => setTimeout(r, 60)); // > gateTimeoutMs
+
+    expect(factory.runner?.received).toEqual({ kind: 'timeout' });
+    expect(slack.updates.some((u) => u.text === 'resumed:timeout')).toBe(true);
   });
 });

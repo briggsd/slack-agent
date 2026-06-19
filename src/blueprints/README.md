@@ -12,7 +12,7 @@ A `Blueprint<Ctx, Deps>` is an ordered list of `BlueprintNode<Ctx, Deps>` values
 interface BlueprintNode<Ctx, Deps> {
   readonly name: string;
   readonly kind: NodeKind;           // 'deterministic' | 'agentic'
-  run(ctx: Ctx, deps: Deps): AsyncIterable<RunnerEvent>;
+  run(ctx: Ctx, deps: Deps): RunnerStream;
 }
 
 interface Blueprint<Ctx, Deps> {
@@ -22,6 +22,8 @@ interface Blueprint<Ctx, Deps> {
 ```
 
 Nodes read and write a shared `ctx` object. A node that throws stops the run: the executor catches the error, yields a single `{ type: 'error', message }` event, and returns without re-throwing. Later nodes do not run.
+
+`RunnerStream` (`AsyncGenerator<RunnerEvent, void, GateResume | undefined>`) is **two-way**: a node may `yield` an `await_approval` event and read back a resume value (the user's reply, or a timeout) — `const resume = yield { type: 'await_approval', prompt }`. The executor delegates with `yield*`, so the value the gateway feeds in via `next()` reaches the node that yielded. A node that never yields `await_approval` simply ignores the resume value. The gateway posts the prompt and routes the reply; the engine knows nothing about the gate beyond forwarding.
 
 ## `deterministic` vs `agentic` (`NodeKind`)
 
