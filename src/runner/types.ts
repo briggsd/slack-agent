@@ -10,6 +10,10 @@ export type RunnerEvent =
   // run's `finally` blocks (e.g. the orchestrator's lease revoke). It is the terminal counterpart
   // to `await_approval`: that one requires a resume back, this one requires a `.return()`.
   | { type: 'abandoned'; reason: string }
+  // gateway-internal: a pull request was successfully opened. The gateway posts the URL to Slack
+  // AND records an audit event. NOT a protocol/wire change — this event never crosses the
+  // container boundary; it is synthesised by the open-pr node and handled in the drain loop.
+  | { type: 'pr_opened'; url: string }
   | { type: 'error'; message: string };
 
 /**

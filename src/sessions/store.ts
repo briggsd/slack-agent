@@ -5,7 +5,8 @@
  * (sdk_session_id, harness_version, volume_name) are left nullable and
  * unset in this slice — they're wired up in later milestones.
  *
- * The audit_events table is created here (M6 will write rows to it).
+ * The audit_events table records the gateway-observable action/lifecycle trail
+ * (M6 audit layer, S05). Metadata only — never raw message content.
  */
 import Database from 'better-sqlite3';
 
@@ -43,6 +44,26 @@ export type NewSessionRow = Pick<
   | 'status'
 >;
 
+/**
+ * A single row in the audit_events table.
+ *
+ * All fields are required-with-null (never optional) so the positional bind is
+ * total and exactOptionalPropertyTypes stays happy. Audit is metadata only —
+ * never raw message content (no reply text, plan text, feedback, prompts).
+ */
+export interface AuditEvent {
+  session_key: string;
+  team_id: string | null;
+  user_id: string | null;
+  ts: number;
+  kind: 'action' | 'approval' | 'correction' | 'cost' | 'lifecycle';
+  tool: string | null;
+  summary: string | null;
+  reasoning: string | null;
+  result: string | null;
+  cost_tokens: number | null;
+}
+
 export interface SessionStore {
   /** Insert or replace the row when a session is created. */
   recordSession(row: NewSessionRow): void;
@@ -52,6 +73,14 @@ export interface SessionStore {
   setStatus(key: string, status: SessionStatus): void;
   /** Fetch a row by session key (undefined when not found). */
   get(key: string): SessionRow | undefined;
+  /** Append an audit event row (best-effort — callers must catch). */
+  recordAudit(event: AuditEvent): void;
+  /**
+   * Read back audit rows for a session key. Test/diagnostic helper only — it is NOT
+   * tenancy-scoped (no team_id filter). Add a mandatory team scope (WHERE session_key =
+   * ? AND team_id = ?) before any user-facing query path consumes this.
+   */
+  getAuditEvents(sessionKey: string): AuditEvent[];
   /** Close the underlying database handle. */
   close(): void;
 }
@@ -74,6 +103,19 @@ export class SqliteSessionStore implements SessionStore {
   private readonly stmtTouch: Database.Statement<[number, string]>;
   private readonly stmtSetStatus: Database.Statement<[string, string]>;
   private readonly stmtGet: Database.Statement<[string], SessionRow>;
+  private readonly stmtRecordAudit: Database.Statement<[
+    string,
+    string | null,
+    string | null,
+    number,
+    string,
+    string | null,
+    string | null,
+    string | null,
+    string | null,
+    number | null,
+  ]>;
+  private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
@@ -112,6 +154,27 @@ export class SqliteSessionStore implements SessionStore {
     this.stmtGet = this.db.prepare<[string], SessionRow>(
       'SELECT * FROM sessions WHERE session_key = ?',
     );
+
+    this.stmtRecordAudit = this.db.prepare<[
+      string,
+      string | null,
+      string | null,
+      number,
+      string,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      number | null,
+    ]>(`
+      INSERT INTO audit_events
+        (session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    this.stmtGetAudit = this.db.prepare<[string], AuditEvent>(
+      'SELECT session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens FROM audit_events WHERE session_key = ? ORDER BY id',
+    );
   }
 
   private createSchema(): void {
@@ -137,13 +200,28 @@ export class SqliteSessionStore implements SessionStore {
       CREATE INDEX IF NOT EXISTS sessions_last_active_at
         ON sessions (last_active_at);
 
+      -- M6 S05 replaced an earlier placeholder audit_events shape (event_type/payload).
+      -- A bare CREATE TABLE IF NOT EXISTS would leave that stale table in place on a dev
+      -- DB created before this slice, so recordAudit's 10-column INSERT would fail at
+      -- runtime. The placeholder was never written to (the gateway only started emitting
+      -- audit rows in this slice), so dropping it loses nothing. sessions is untouched.
+      DROP TABLE IF EXISTS audit_events;
       CREATE TABLE IF NOT EXISTS audit_events (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
         session_key  TEXT    NOT NULL,
-        event_type   TEXT    NOT NULL,
-        payload      TEXT,
-        created_at   INTEGER NOT NULL
+        team_id      TEXT,
+        user_id      TEXT,
+        ts           INTEGER NOT NULL,
+        kind         TEXT    NOT NULL,
+        tool         TEXT,
+        summary      TEXT,
+        reasoning    TEXT,
+        result       TEXT,
+        cost_tokens  INTEGER
       );
+
+      CREATE INDEX IF NOT EXISTS audit_by_session ON audit_events (session_key);
+      CREATE INDEX IF NOT EXISTS audit_by_team    ON audit_events (team_id);
     `);
   }
 
@@ -173,6 +251,25 @@ export class SqliteSessionStore implements SessionStore {
     return this.stmtGet.get(key);
   }
 
+  recordAudit(event: AuditEvent): void {
+    this.stmtRecordAudit.run(
+      event.session_key,
+      event.team_id,
+      event.user_id,
+      event.ts,
+      event.kind,
+      event.tool,
+      event.summary,
+      event.reasoning,
+      event.result,
+      event.cost_tokens,
+    );
+  }
+
+  getAuditEvents(sessionKey: string): AuditEvent[] {
+    return this.stmtGetAudit.all(sessionKey);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -186,5 +283,7 @@ export class NoopSessionStore implements SessionStore {
   touch(_key: string, _atMs: number): void { /* no-op */ }
   setStatus(_key: string, _status: SessionStatus): void { /* no-op */ }
   get(_key: string): SessionRow | undefined { return undefined; }
+  recordAudit(_event: AuditEvent): void { /* no-op */ }
+  getAuditEvents(_sessionKey: string): AuditEvent[] { return []; }
   close(): void { /* no-op */ }
 }

@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { SqliteSessionStore } from '../src/sessions/store.js';
-import type { SessionStore } from '../src/sessions/store.js';
+import type { SessionStore, AuditEvent } from '../src/sessions/store.js';
 import { SessionManager } from '../src/sessions/manager.js';
 import { FakeRunnerFactory } from '../src/runner/fake.js';
 import { FakeSlackClient } from './responder.test.js';
@@ -136,6 +136,152 @@ describe('SqliteSessionStore', () => {
 
   it('setStatus is a no-op for unknown keys (does not throw)', () => {
     expect(() => store.setStatus('GHOST', 'reaped')).not.toThrow();
+  });
+});
+
+// ─── SqliteSessionStore — audit_events round-trip ────────────────────────────
+
+describe('SqliteSessionStore — audit_events', () => {
+  let store: SqliteSessionStore;
+
+  beforeEach(() => {
+    store = new SqliteSessionStore(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it('recordAudit + getAuditEvents round-trip stores all fields correctly', () => {
+    const event: AuditEvent = {
+      session_key: 'T:C:TS',
+      team_id: 'TEAM1',
+      user_id: 'U1',
+      ts: 1_700_000_000_000,
+      kind: 'lifecycle',
+      tool: 'session',
+      summary: null,
+      reasoning: null,
+      result: 'created',
+      cost_tokens: null,
+    };
+    store.recordAudit(event);
+
+    const rows = store.getAuditEvents('T:C:TS');
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row?.session_key).toBe('T:C:TS');
+    expect(row?.team_id).toBe('TEAM1');
+    expect(row?.user_id).toBe('U1');
+    expect(row?.ts).toBe(1_700_000_000_000);
+    expect(row?.kind).toBe('lifecycle');
+    expect(row?.tool).toBe('session');
+    expect(row?.summary).toBeNull();
+    expect(row?.reasoning).toBeNull();
+    expect(row?.result).toBe('created');
+    expect(row?.cost_tokens).toBeNull();
+  });
+
+  it('getAuditEvents returns empty array for unknown session key', () => {
+    expect(store.getAuditEvents('NO:SUCH:KEY')).toHaveLength(0);
+  });
+
+  it('getAuditEvents returns only rows for the requested session_key', () => {
+    store.recordAudit({
+      session_key: 'K1',
+      team_id: null,
+      user_id: null,
+      ts: 1000,
+      kind: 'lifecycle',
+      tool: 'session',
+      summary: null,
+      reasoning: null,
+      result: 'created',
+      cost_tokens: null,
+    });
+    store.recordAudit({
+      session_key: 'K2',
+      team_id: null,
+      user_id: null,
+      ts: 2000,
+      kind: 'lifecycle',
+      tool: 'session',
+      summary: null,
+      reasoning: null,
+      result: 'created',
+      cost_tokens: null,
+    });
+
+    expect(store.getAuditEvents('K1')).toHaveLength(1);
+    expect(store.getAuditEvents('K2')).toHaveLength(1);
+    expect(store.getAuditEvents('K1')[0]?.ts).toBe(1000);
+  });
+
+  it('multiple events for the same session are returned in insertion order', () => {
+    const base = {
+      session_key: 'SEQ',
+      team_id: null,
+      user_id: null,
+      summary: null,
+      reasoning: null,
+      cost_tokens: null,
+    };
+    store.recordAudit({ ...base, ts: 100, kind: 'lifecycle', tool: 'session', result: 'created' });
+    store.recordAudit({ ...base, ts: 200, kind: 'approval', tool: 'plan-gate', result: 'requested' });
+    store.recordAudit({ ...base, ts: 300, kind: 'lifecycle', tool: 'session', result: 'reaped' });
+
+    const rows = store.getAuditEvents('SEQ');
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.result).toBe('created');
+    expect(rows[1]?.result).toBe('requested');
+    expect(rows[2]?.result).toBe('reaped');
+  });
+
+  it('stores a pr_opened event with summary = url (URL is metadata, not message content)', () => {
+    const url = 'https://github.com/acme/widgets/pull/42';
+    store.recordAudit({
+      session_key: 'S:C:T',
+      team_id: 'T1',
+      user_id: 'U1',
+      ts: 9000,
+      kind: 'action',
+      tool: 'open-pr',
+      summary: url,
+      reasoning: null,
+      result: 'opened',
+      cost_tokens: null,
+    });
+
+    const rows = store.getAuditEvents('S:C:T');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe('action');
+    expect(rows[0]?.tool).toBe('open-pr');
+    expect(rows[0]?.summary).toBe(url);
+    expect(rows[0]?.result).toBe('opened');
+  });
+
+  it('nullable fields are stored and retrieved as null', () => {
+    store.recordAudit({
+      session_key: 'NULL:TEST',
+      team_id: null,
+      user_id: null,
+      ts: 1,
+      kind: 'approval',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+    });
+
+    const rows = store.getAuditEvents('NULL:TEST');
+    expect(rows[0]?.team_id).toBeNull();
+    expect(rows[0]?.user_id).toBeNull();
+    expect(rows[0]?.tool).toBeNull();
+    expect(rows[0]?.summary).toBeNull();
+    expect(rows[0]?.reasoning).toBeNull();
+    expect(rows[0]?.result).toBeNull();
+    expect(rows[0]?.cost_tokens).toBeNull();
   });
 });
 
