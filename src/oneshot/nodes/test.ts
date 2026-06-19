@@ -6,7 +6,7 @@ export const testNode: OneShotNode = {
   kind: 'deterministic',
   async *run(ctx: OneShotContext, deps: OneShotDeps): AsyncGenerator<RunnerEvent> {
     yield { type: 'status', text: 'testing…' };
-    const result = await deps.gitNodes.runCheck({ kind: 'test', workdir: ctx.workdir, volume: ctx.volume });
+    const result = await deps.gitNodes.runCheck({ kind: 'test', repo: ctx.repo, workdir: ctx.workdir, volume: ctx.volume });
     ctx.testResult = result;
     if (result.skipped) {
       yield { type: 'status', text: 'tests skipped (no command)' };

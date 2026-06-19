@@ -67,6 +67,8 @@ export interface CheckResult {
  */
 export interface CheckRequest {
   kind: 'lint' | 'test';
+  /** Repository slug (e.g. "acme/widgets") — used for per-repo command lookup. */
+  repo: string;
   workdir: string;
   /** Docker volume name to mount at /workspace (e.g. slackbot-ws-<sanitized-key>). */
   volume: string;

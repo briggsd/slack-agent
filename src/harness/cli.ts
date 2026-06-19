@@ -21,6 +21,7 @@ import { BotAccountBroker } from '../broker/bot-account.js';
 import { FakeBroker } from '../broker/fake.js';
 import type { GitHost } from '../broker/types.js';
 import { DockerGitNodeExecutor } from '../oneshot/docker-git-node.js';
+import { parseCheckCmds } from '../config.js';
 import { FakeGitNodeExecutor } from '../oneshot/fake-git-node.js';
 import { DispatchingRunnerFactory } from '../oneshot/dispatching-factory.js';
 
@@ -68,10 +69,12 @@ if (RUNNER_BACKEND === 'docker') {
   const broker = new BotAccountBroker(botTokens);
   const lintCmdRaw = process.env['ONESHOT_LINT_CMD'];
   const testCmdRaw = process.env['ONESHOT_TEST_CMD'];
+  const checkCmds = parseCheckCmds(process.env['ONESHOT_CHECK_CMDS']);
   const gitNodes = new DockerGitNodeExecutor({
     image: envString('GIT_IMAGE', 'slackbot-runner:latest'),
     ...(lintCmdRaw !== undefined && lintCmdRaw !== '' ? { lintCmd: lintCmdRaw } : {}),
     ...(testCmdRaw !== undefined && testCmdRaw !== '' ? { testCmd: testCmdRaw } : {}),
+    ...(checkCmds.size > 0 ? { checkCmds } : {}),
   });
   dispatchingFactory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);
   console.log(`[harness] one-shot mode: docker (hosts=[${[...botTokens.keys()].join(',')}])`);

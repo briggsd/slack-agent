@@ -162,6 +162,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
   private readonly fetchFn: FetchFn;
   private readonly lintCmd: string | undefined;
   private readonly testCmd: string | undefined;
+  private readonly checkCmds: ReadonlyMap<string, { lint?: string; test?: string }>;
 
   constructor(opts: {
     image: string;
@@ -169,12 +170,14 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     fetchFn?: FetchFn;
     lintCmd?: string;
     testCmd?: string;
+    checkCmds?: ReadonlyMap<string, { lint?: string; test?: string }>;
   }) {
     this.image = opts.image;
     this.spawnFn = opts.spawn ?? nodeSpawn;
     this.fetchFn = opts.fetchFn ?? fetch;
     this.lintCmd = opts.lintCmd;
     this.testCmd = opts.testCmd;
+    this.checkCmds = opts.checkCmds ?? new Map();
   }
 
   /**
@@ -281,7 +284,17 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
   }
 
   async runCheck(req: CheckRequest): Promise<CheckResult> {
-    const override = req.kind === 'lint' ? this.lintCmd : this.testCmd;
+    // Resolution precedence:
+    // 1. Per-repo override — checkCmds[repo][kind] if present and non-empty.
+    // 2. Global override — lintCmd / testCmd (unchanged behavior).
+    // 3. npm auto-detect (the only tier that can produce skipped: true).
+    const perRepo = this.checkCmds.get(req.repo);
+    const perRepoCmd = perRepo !== undefined
+      ? (req.kind === 'lint' ? perRepo.lint : perRepo.test)
+      : undefined;
+    const globalCmd = req.kind === 'lint' ? this.lintCmd : this.testCmd;
+    const override = perRepoCmd !== undefined ? perRepoCmd : globalCmd;
+
     // Auto-detect default: exit with the reserved skip code when there is nothing to
     // run (no package.json, or no matching npm script) so a skip is distinguishable
     // from a pass. `req.kind` is the closed 'lint' | 'test' union — safe to interpolate.

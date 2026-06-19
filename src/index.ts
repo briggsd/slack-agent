@@ -109,6 +109,7 @@ async function main(): Promise<void> {
       image: oc.GIT_IMAGE,
       ...(oc.lintCommand !== undefined ? { lintCmd: oc.lintCommand } : {}),
       ...(oc.testCommand !== undefined ? { testCmd: oc.testCommand } : {}),
+      ...(oc.checkCmds.size > 0 ? { checkCmds: oc.checkCmds } : {}),
     });
     console.log(
       `[gateway] one-shot enabled (git image=${oc.GIT_IMAGE}, hosts=[${[...botTokens.keys()].join(',')}])`,
