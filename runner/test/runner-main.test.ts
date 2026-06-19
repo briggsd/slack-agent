@@ -18,7 +18,7 @@ type TurnResult = SDKMessage[];
 class FakeAgentSdk {
   private turns: TurnResult[];
   private turnIndex = 0;
-  public calls: Array<{ prompt: string; resume?: string }> = [];
+  public calls: Array<{ prompt: string; resume?: string; disallowedTools?: string[] }> = [];
 
   constructor(turns: TurnResult[] = []) {
     this.turns = turns;
@@ -30,6 +30,7 @@ class FakeAgentSdk {
       self.calls.push({
         prompt: params.prompt,
         resume: params.options?.resume,
+        disallowedTools: params.options?.disallowedTools,
       });
       const idx = self.turnIndex++;
       const messages: SDKMessage[] = self.turns[idx] ?? [
@@ -260,6 +261,19 @@ describe('runner main — basic flow', () => {
     expect(textEvent).toBeDefined();
     expect(textEvent?.text).toBe('hello back');
     expect(textEvent?.id).toBe('msg-1');
+  });
+
+  it('disallows AskUserQuestion — it has no answer channel from the sandbox', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
+    ]);
+    await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'msg-1', text: 'hello' })],
+      sdk,
+    );
+
+    expect(sdk.calls).toHaveLength(1);
+    expect(sdk.calls[0]?.disallowedTools).toContain('AskUserQuestion');
   });
 
   it('persists session-id from init message', async () => {

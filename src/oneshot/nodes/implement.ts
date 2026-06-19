@@ -32,7 +32,9 @@ export const implementNode: OneShotAgenticNode = {
       feedbackSection +
       `The repository is cloned at ${ctx.workdir} on branch ${ctx.branch}. ` +
       `Make all file changes inside that directory and commit them there with git before finishing. ` +
-      `Implement the plan you produced.\n\n` +
+      `Implement the plan you produced. ` +
+      `In your final summary, note any assumptions you made or any way the result deviates from the plan, ` +
+      `so the pull-request reviewer can see it.\n\n` +
       ctx.instruction;
 
     yield* runAgenticTurn(deps, directive, (text) => {

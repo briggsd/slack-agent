@@ -48,6 +48,12 @@ export type SdkQueryFn = (params: {
     cwd?: string;
     permissionMode?: 'bypassPermissions';
     allowDangerouslySkipPermissions?: boolean;
+    /**
+     * Tools the SDK must refuse to run (see {@link DISALLOWED_TOOLS}). A custom
+     * implementation of this seam must forward this list to the underlying query —
+     * dropping it silently re-enables the no-op `AskUserQuestion` guardrail.
+     */
+    disallowedTools?: string[];
     systemPrompt?: string | string[] | {
       type: 'preset';
       preset: 'claude_code';
@@ -68,6 +74,16 @@ const MAX_FILES_PER_TURN = 5;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 /** Maximum total bytes forwarded per turn (16 MiB). */
 const MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Tools the agent must never use inside the container. `AskUserQuestion` blocks
+ * for a structured answer, but there is no channel back to Slack from the sandbox
+ * in either mode — the protocol carries only text/status/file/error out. So the
+ * tool is a no-op that strands the turn on a phantom answer. Disabling it forces
+ * the agent to ask in prose instead (a thread reply continues a conversational
+ * session; in one-shot the question surfaces as a stated assumption in the PR).
+ */
+const DISALLOWED_TOOLS = ['AskUserQuestion'];
 
 const WORKSPACE_SYSTEM_PROMPT_ADDITION =
   'Files you save under /workspace are automatically delivered to the user at the ' +
@@ -152,6 +168,7 @@ export async function runLoop(opts: {
           cwd: WORKSPACE_DIR,
           permissionMode: 'bypassPermissions',
           allowDangerouslySkipPermissions: true,
+          disallowedTools: DISALLOWED_TOOLS,
           // Verified against runner/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts
           // Options.systemPrompt supports { type: 'preset', preset: 'claude_code', append?: string }
           systemPrompt: {
@@ -441,6 +458,7 @@ function realSdkQuery(params: {
     cwd?: string;
     permissionMode?: 'bypassPermissions';
     allowDangerouslySkipPermissions?: boolean;
+    disallowedTools?: string[];
     systemPrompt?: string | string[] | {
       type: 'preset';
       preset: 'claude_code';
@@ -460,6 +478,7 @@ function realSdkQuery(params: {
         ...(opts.allowDangerouslySkipPermissions !== undefined
           ? { allowDangerouslySkipPermissions: opts.allowDangerouslySkipPermissions }
           : {}),
+        ...(opts.disallowedTools !== undefined ? { disallowedTools: opts.disallowedTools } : {}),
         ...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
       },
     });
