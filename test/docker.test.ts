@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PassThrough } from 'stream';
 import { EventEmitter } from 'events';
 import type { ChildProcess } from 'child_process';
-import { DockerRunner, DockerRunnerFactory, sanitizeKey } from '../src/runner/docker.js';
+import { DockerRunner, DockerRunnerFactory, sanitizeKey, volumeNameFor } from '../src/runner/docker.js';
 import type { DockerRunnerConfig, SpawnFn } from '../src/runner/docker.js';
 
 // ── FakeChildProcess ──────────────────────────────────────────────────────────
@@ -540,5 +540,61 @@ describe('DockerRunnerFactory', () => {
 
     const factory = new DockerRunnerFactory(DEFAULT_CONFIG, fakeSpawn);
     await expect(factory.create('key')).rejects.toThrow();
+  });
+});
+
+// ── DockerRunnerFactory.removeVolumeForSession ────────────────────────────────
+
+describe('DockerRunnerFactory — removeVolumeForSession', () => {
+  it('spawns docker volume rm with the correct args and resolves true on exit 0', async () => {
+    const sessionKey = 'T:C:TH';
+    const expectedVolumeArg = volumeNameFor(sessionKey); // 'slackbot-ws-t-c-th'
+
+    const spawnCalls: { command: string; args: string[] }[] = [];
+    const fakeSpawn: SpawnFn = (command, args) => {
+      spawnCalls.push({ command, args });
+      const fake = new FakeChildProcess();
+      // Simulate immediate successful exit
+      setTimeout(() => fake.simulateExit(0), 5);
+      return fake.asChildProcess();
+    };
+
+    const factory = new DockerRunnerFactory(DEFAULT_CONFIG, fakeSpawn);
+    const result = await factory.removeVolumeForSession(sessionKey);
+
+    expect(result).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.command).toBe('docker');
+    expect(spawnCalls[0]?.args).toEqual(['volume', 'rm', expectedVolumeArg]);
+  });
+
+  it('resolves true on "No such volume" stderr (already absent)', async () => {
+    const fakeSpawn: SpawnFn = (_command, _args) => {
+      const fake = new FakeChildProcess();
+      setTimeout(() => {
+        fake.writeErr('Error response from daemon: No such volume: slackbot-ws-t-c-th');
+        fake.simulateExit(1);
+      }, 5);
+      return fake.asChildProcess();
+    };
+
+    const factory = new DockerRunnerFactory(DEFAULT_CONFIG, fakeSpawn);
+    const result = await factory.removeVolumeForSession('T:C:TH');
+    expect(result).toBe(true);
+  });
+
+  it('resolves false on other failure (non-zero exit, no "No such volume")', async () => {
+    const fakeSpawn: SpawnFn = (_command, _args) => {
+      const fake = new FakeChildProcess();
+      setTimeout(() => {
+        fake.writeErr('volume is in use - slackbot-ws-t-c-th');
+        fake.simulateExit(1);
+      }, 5);
+      return fake.asChildProcess();
+    };
+
+    const factory = new DockerRunnerFactory(DEFAULT_CONFIG, fakeSpawn);
+    const result = await factory.removeVolumeForSession('T:C:TH');
+    expect(result).toBe(false);
   });
 });

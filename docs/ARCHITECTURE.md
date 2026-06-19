@@ -116,9 +116,14 @@ The session key is sanitized (`[^a-z0-9-]` → `-`, lowercased, 64-char cap) int
    placeholder with the final answer text.
 10. After `IDLE_TIMEOUT_MS` (default 10 min) without activity, the reaper disposes the
     runner: stdin is closed, SIGTERM sent, and after a grace period the container is
-    force-killed by name (`docker kill`). The volume remains.
+    force-killed by name (`docker kill`). The volume remains, so the next message can
+    resume the workspace — until volume GC removes it (step 12).
 11. The next message in that thread repeats from step 3 — the new container resumes the
     SDK session from the volume, so conversational memory is intact.
+12. A periodic in-process sweep (`VOLUME_GC_INTERVAL_MS`, default 1 h) removes the volume
+    and deletes the session row once a session has been idle past `VOLUME_TTL_MS`
+    (default 7 days); a session still live in memory is always skipped, so an in-use
+    volume is never removed.
 
 ### Failure paths
 
@@ -229,6 +234,8 @@ container is ever executed on the host.
 | `RUNNER_BACKEND` | `fake` | `fake` = echo bot (no Docker); `docker` = real sandboxes |
 | `RUNNER_IMAGE` | `slackbot-runner:latest` | Built from `runner/Dockerfile` |
 | `IDLE_TIMEOUT_MS` | 600000 (10 min) | Reap idle sessions after this |
+| `VOLUME_TTL_MS` | 604800000 (7 days) | Volume GC: a session idle longer than this has its volume and session row removed |
+| `VOLUME_GC_INTERVAL_MS` | 3600000 (1 h) | How often the volume-GC sweep runs |
 | `RUNNER_READY_TIMEOUT_MS` | 30000 | Container boot handshake deadline |
 | `RUNNER_TURN_TIMEOUT_MS` | 300000 (5 min) | Per-message deadline |
 | `RUNNER_KILL_GRACE_MS` | 5000 | SIGTERM → force-kill grace |
@@ -247,7 +254,7 @@ container is ever executed on the host.
 | **Parked gates are in-memory** | A run paused at the plan gate lives in the gateway's memory. A gateway restart mid-park loses the parked run (the workspace volume is still safe); durable park is deferred. |
 | **Streaming** | The thread shows `_thinking…_` → tool-status edits → one final text. Partial answer text is not streamed. (Planned M3.) |
 | **Long answers** | Final text goes through `chat.update`; Slack caps messages at ~40k chars (practically ~4k rendered well). Very long answers should be chunked or uploaded as a file — not yet handled. |
-| **Volume GC** | Volumes (`slackbot-ws-*`) accumulate forever. There is no TTL/cleanup yet; `docker volume ls | grep slackbot-ws-` and prune manually. |
+| **Volume GC** | A periodic in-process sweep removes a session's volume (`slackbot-ws-*`) and its session row once idle past `VOLUME_TTL_MS` (default 7 days); live in-memory sessions are skipped. Tune the cadence with `VOLUME_GC_INTERVAL_MS` (default 1 h). |
 | **Gateway restart amnesia** | In-memory session map is lost; old threads need a fresh @mention to resume (state itself is safe on the volume). A persisted thread→session index would fix this. |
 | **Capacity** | One host. Each active thread is a container; ~dozens of concurrent threads on a typical box. Scaling past one machine means a scheduler or Anthropic Managed Agents. |
 | **Turn deadline vs long agent runs** | A single turn exceeding `RUNNER_TURN_TIMEOUT_MS` (5 min) is reported as an error even though the agent may still finish internally; the result is then lost from Slack's view. |

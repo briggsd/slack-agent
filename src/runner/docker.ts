@@ -11,7 +11,7 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess, SpawnOptions } from 'child_process';
-import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory } from './types.js';
+import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory, VolumeReaper } from './types.js';
 import type { Profile } from '../profiles/registry.js';
 import type {
   RunnerToGatewayMessage,
@@ -56,6 +56,9 @@ export function sanitizeKey(key: string): string {
 export function volumeNameFor(sessionKey: string): string {
   return `slackbot-ws-${sanitizeKey(sessionKey)}`;
 }
+
+/** Hard cap on a single `docker volume rm` so a wedged daemon can't stall the GC sweep. */
+const VOLUME_RM_TIMEOUT_MS = 30_000;
 
 // ── DockerRunner ──────────────────────────────────────────────────────────────
 
@@ -395,13 +398,82 @@ export class DockerRunner implements SessionRunner {
 
 // ── DockerRunnerFactory ───────────────────────────────────────────────────────
 
-export class DockerRunnerFactory implements RunnerFactory {
+export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
   private readonly config: DockerRunnerConfig;
   private readonly spawnFn: SpawnFn;
 
   constructor(config: DockerRunnerConfig, spawnFn: SpawnFn = nodeSpawn) {
     this.config = config;
     this.spawnFn = spawnFn;
+  }
+
+  /** Remove the Docker volume backing `sessionKey`. Resolves true when the volume is
+   *  gone (removed or already absent); false on any real failure. Never throws. */
+  async removeVolumeForSession(sessionKey: string): Promise<boolean> {
+    const volumeName = volumeNameFor(sessionKey);
+    return new Promise<boolean>((resolve) => {
+      let stderr = '';
+      let settled = false;
+
+      let child: ReturnType<SpawnFn>;
+      try {
+        child = this.spawnFn('docker', ['volume', 'rm', volumeName], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+        });
+      } catch {
+        console.log(`[session] gc volume rm spawn error for ${volumeName}: spawn failed`);
+        resolve(false);
+        return;
+      }
+
+      child.stderr?.on('data', (chunk: Buffer | string) => {
+        stderr += typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+      });
+
+      // Bound the call so a wedged `docker` can't hang the whole GC sweep (which awaits
+      // each removal serially). On timeout, SIGKILL the child and resolve false — the row
+      // is left for the next sweep.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (ok: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(ok);
+      };
+      timer = setTimeout(() => {
+        console.log(`[session] gc volume rm timed out for ${volumeName}`);
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* best-effort — the process may already be gone */
+        }
+        settle(false);
+      }, VOLUME_RM_TIMEOUT_MS);
+      if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+        (timer as { unref(): void }).unref();
+      }
+
+      // `close` (not `exit`) fires after stdio is fully drained, so `stderr` is complete
+      // when we inspect it for "No such volume" — `exit` can race that read.
+      child.once('close', (code) => {
+        if (code === 0) {
+          console.log(`[session] gc volume removed: ${volumeName}`);
+          settle(true);
+        } else if (stderr.includes('No such volume')) {
+          // Already gone — treat as success
+          console.log(`[session] gc volume already absent: ${volumeName}`);
+          settle(true);
+        } else {
+          console.log(`[session] gc volume rm failed for ${volumeName}: exit ${String(code)}`);
+          settle(false);
+        }
+      });
+
+      child.once('error', (err: Error) => {
+        console.log(`[session] gc volume rm error for ${volumeName}: ${err.message}`);
+        settle(false);
+      });
+    });
   }
 
   // profile is threaded through for future facets; currently ignored (M4 S02 seam only)

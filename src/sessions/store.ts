@@ -81,6 +81,11 @@ export interface SessionStore {
    * ? AND team_id = ?) before any user-facing query path consumes this.
    */
   getAuditEvents(sessionKey: string): AuditEvent[];
+  /** Rows whose last_active_at is strictly older than `cutoffMs` (uses the
+   *  sessions_last_active_at index). For the volume-GC sweep. */
+  listExpired(cutoffMs: number): SessionRow[];
+  /** Delete a session row by key (volume-GC removes the row once its volume is gone). */
+  deleteSession(key: string): void;
   /** Close the underlying database handle. */
   close(): void;
 }
@@ -116,6 +121,8 @@ export class SqliteSessionStore implements SessionStore {
     number | null,
   ]>;
   private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
+  private readonly stmtListExpired: Database.Statement<[number], SessionRow>;
+  private readonly stmtDeleteSession: Database.Statement<[string]>;
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
@@ -174,6 +181,16 @@ export class SqliteSessionStore implements SessionStore {
 
     this.stmtGetAudit = this.db.prepare<[string], AuditEvent>(
       'SELECT session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens FROM audit_events WHERE session_key = ? ORDER BY id',
+    );
+
+    this.stmtListExpired = this.db.prepare<[number], SessionRow>(
+      // Bounded so one sweep can't materialize an unbounded backlog; the remainder is
+      // drained by subsequent sweeps (oldest first).
+      'SELECT * FROM sessions WHERE last_active_at < ? ORDER BY last_active_at LIMIT 500',
+    );
+
+    this.stmtDeleteSession = this.db.prepare<[string]>(
+      'DELETE FROM sessions WHERE session_key = ?',
     );
   }
 
@@ -270,6 +287,14 @@ export class SqliteSessionStore implements SessionStore {
     return this.stmtGetAudit.all(sessionKey);
   }
 
+  listExpired(cutoffMs: number): SessionRow[] {
+    return this.stmtListExpired.all(cutoffMs);
+  }
+
+  deleteSession(key: string): void {
+    this.stmtDeleteSession.run(key);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -285,5 +310,7 @@ export class NoopSessionStore implements SessionStore {
   get(_key: string): SessionRow | undefined { return undefined; }
   recordAudit(_event: AuditEvent): void { /* no-op */ }
   getAuditEvents(_sessionKey: string): AuditEvent[] { return []; }
+  listExpired(_cutoffMs: number): SessionRow[] { return []; }
+  deleteSession(_key: string): void { /* no-op */ }
   close(): void { /* no-op */ }
 }
