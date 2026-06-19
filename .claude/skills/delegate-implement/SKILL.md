@@ -25,6 +25,11 @@ context and never type the slice yourself** — research, spec, hand off, verify
    directly testable; **cite the invariants the slice touches** (below). Write it ONLY in the
    worktree — never in the main checkout's `planning/`, or the stray untracked copy collides with
    the post-merge ff-sync of local main.
+   - **Spell out subprocess/lifecycle correctness when the slice spawns a process.** `docker`,
+     git, any child process — name the event to wait on (`close`, not `exit`, when you read
+     drained stdout/stderr), the per-call timeout + kill-on-timeout, and the "already-gone vs
+     real-failure" distinction. The S06 volume-GC factory review surfaced exactly these (an
+     `exit`-vs-`close` stderr race, a missing `rm` timeout) — they are specable, not discoverable.
 4. **Hand off to the implementer subagent** — Sonnet by default, Haiku for mechanical/trivial
    slices — giving it the worktree path, the spec path, and the gate command. It implements, adds
    tests, runs `npm run gate`, and reports with the gate output (the implementer must NOT touch the
@@ -100,10 +105,24 @@ bun ~/workspace/ai-code-review-factory/src/cli.ts run --git-diff --base main \
 # API key (macOS keychain): export ANTHROPIC_API_KEY="$(security find-generic-password -s ANTHROPIC_API_KEY -w)"
 ```
 
+This command ships the private diff + API key to an external service, so the auto-mode
+classifier may block it. **A hard block is not clearable by in-conversation authorization** —
+retrying after the user says "yes" just hard-blocks again. Go straight to a user-side path: a
+project-local `.claude/settings.local.json` `permissions.allow` rule for the `bun …factory…run`
+command (gitignore it), or have the user run the command via the `!` prefix. Don't burn turns
+re-asking. (A soft deny, by contrast, *is* clearable once the user authorizes.)
+
 The factory's flags can change — its `review:local` script and `delegate-implement` SKILL.md are
 the source of truth; verify the invocation there if it errors. Running it in the worktree drops a
 `.ai-review/` working dir in cwd — it's gitignored, so it won't trip teardown; the grounded findings
 are in `<output-dir>/runs/<id>/summary.json` (`.findings`), with raw/withheld ones in the trace.
+
+**The factory is a second opinion, not the discovery pass.** Correctness is owned by
+coordinator-verify (step 5): read the diff against the contracts yourself before you run the
+factory. Leaning on it to *find* bugs is a smell — it's non-deterministic, costs minutes/tokens,
+and you won't re-run it after fixes (one-round rule), so anything it alone catches ships on a
+single pass. If a slice spawns processes, touches a hot path, or has a race, do the close-read
+first; let the factory confirm.
 
 **Triage discipline** (from the factory's hard-won rules):
 - **Don't trust the headline.** A reviewer can fail (timeout/`schema_invalid`) and still read
