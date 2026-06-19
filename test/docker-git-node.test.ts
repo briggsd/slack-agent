@@ -557,7 +557,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
-    await exec.runCheck({ kind: 'lint', workdir, volume });
+    await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
 
     expect(calls).toHaveLength(1);
     const { command, args } = calls[0]!;
@@ -606,7 +606,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
-    await exec.runCheck({ kind: 'test', workdir, volume });
+    await exec.runCheck({ kind: 'test', repo: 'acme/widgets', workdir, volume });
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
@@ -619,7 +619,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint' });
 
-    await exec.runCheck({ kind: 'lint', workdir, volume });
+    await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
@@ -630,7 +630,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, testCmd: 'make test' });
 
-    await exec.runCheck({ kind: 'test', workdir, volume });
+    await exec.runCheck({ kind: 'test', repo: 'acme/widgets', workdir, volume });
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
@@ -641,7 +641,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn } = makeFakeSpawn(2);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
-    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    const result = await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
     expect(result.exitCode).toBe(2);
   });
 
@@ -649,7 +649,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn } = makeFakeSpawn({ exitCode: 1, stdout: 'lint error line\n', stderr: 'from stderr\n' });
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
-    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    const result = await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
     expect(result.exitCode).toBe(1);
     expect(result.output).toContain('lint error line');
     expect(result.output).toContain('from stderr');
@@ -659,7 +659,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
-    await exec.runCheck({ kind: 'lint', workdir, volume });
+    await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
 
     const env = calls[0]!.options.env as Record<string, string | undefined>;
     expect(env['GIT_TOKEN']).toBeUndefined();
@@ -669,7 +669,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint' });
 
-    await exec.runCheck({ kind: 'test', workdir, volume });
+    await exec.runCheck({ kind: 'test', repo: 'acme/widgets', workdir, volume });
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
@@ -684,7 +684,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn } = makeFakeSpawn(97);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
-    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    const result = await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
     expect(result.skipped).toBe(true);
     expect(result.exitCode).toBe(0);
   });
@@ -693,7 +693,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
-    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    const result = await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
     expect(result.skipped).toBe(false);
     expect(result.exitCode).toBe(0);
   });
@@ -703,7 +703,97 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { spawnFn } = makeFakeSpawn(97);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint' });
 
-    const result = await exec.runCheck({ kind: 'lint', workdir, volume });
+    const result = await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
+    expect(result.skipped).toBe(false);
+    expect(result.exitCode).toBe(97);
+  });
+
+  // ── Per-repo override tests ───────────────────────────────────────────────
+
+  it('per-repo lint override runs that exact command with skipped:false', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const checkCmds = new Map([['acme/widgets', { lint: 'ruff check .' }]]);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, checkCmds });
+
+    const result = await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    expect(args[cIdx + 1]).toBe('ruff check .');
+    expect(result.skipped).toBe(false);
+  });
+
+  it('per-repo test override runs that exact command with skipped:false', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const checkCmds = new Map([['acme/api', { test: 'pytest' }]]);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, checkCmds });
+
+    const result = await exec.runCheck({ kind: 'test', repo: 'acme/api', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    expect(args[cIdx + 1]).toBe('pytest');
+    expect(result.skipped).toBe(false);
+  });
+
+  it('per-repo override takes precedence over a configured global lintCmd', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const checkCmds = new Map([['acme/widgets', { lint: 'ruff check .' }]]);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint', checkCmds });
+
+    await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    // per-repo wins over global
+    expect(args[cIdx + 1]).toBe('ruff check .');
+  });
+
+  it('repo NOT in the map falls back to the global lintCmd override', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const checkCmds = new Map([['other/repo', { lint: 'ruff check .' }]]);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint', checkCmds });
+
+    await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    expect(args[cIdx + 1]).toBe('make lint');
+  });
+
+  it('repo NOT in the map falls back to npm auto-detect shellCmd when no global override', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const checkCmds = new Map([['other/repo', { lint: 'ruff check .' }]]);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, checkCmds });
+
+    await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    const shellCmd = args[cIdx + 1] ?? '';
+    expect(shellCmd).toContain('npm run lint');
+    expect(shellCmd).toContain('package.json');
+  });
+
+  it('per-repo entry with only test leaves lint for that repo on the fallback path', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const checkCmds = new Map([['acme/widgets', { test: 'pytest' }]]);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint', checkCmds });
+
+    // lint kind: per-repo has only test, so lint falls through to global lintCmd
+    await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    expect(args[cIdx + 1]).toBe('make lint');
+  });
+
+  it('per-repo override is never marked skipped even if it exits with reserved code 97', async () => {
+    const { spawnFn } = makeFakeSpawn(97);
+    const checkCmds = new Map([['acme/widgets', { lint: 'ruff check .' }]]);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, checkCmds });
+
+    const result = await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
     expect(result.skipped).toBe(false);
     expect(result.exitCode).toBe(97);
   });

@@ -6,7 +6,7 @@ export const lintNode: OneShotNode = {
   kind: 'deterministic',
   async *run(ctx: OneShotContext, deps: OneShotDeps): AsyncGenerator<RunnerEvent> {
     yield { type: 'status', text: 'linting…' };
-    const result = await deps.gitNodes.runCheck({ kind: 'lint', workdir: ctx.workdir, volume: ctx.volume });
+    const result = await deps.gitNodes.runCheck({ kind: 'lint', repo: ctx.repo, workdir: ctx.workdir, volume: ctx.volume });
     ctx.lintResult = result;
     if (result.skipped) {
       yield { type: 'status', text: 'lint skipped (no command)' };

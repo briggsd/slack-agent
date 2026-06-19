@@ -171,7 +171,7 @@ describe('OneShotOrchestrator — happy path', () => {
     expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
   });
 
-  it('records two runCheck calls (lint then test) with correct workdir and volume', async () => {
+  it('records two runCheck calls (lint then test) with correct workdir, volume, and repo', async () => {
     await drain(orch.send('github:acme/widgets add a CHANGELOG'));
 
     expect(gitNodes.checks).toHaveLength(2);
@@ -184,6 +184,10 @@ describe('OneShotOrchestrator — happy path', () => {
     const expectedVolume = (await import('../src/runner/docker.js')).volumeNameFor(TEST_SESSION_KEY);
     expect(gitNodes.checks[0]?.volume).toBe(expectedVolume);
     expect(gitNodes.checks[1]?.volume).toBe(expectedVolume);
+
+    // Both checks must carry ctx.repo so per-repo overrides can be applied
+    expect(gitNodes.checks[0]?.repo).toBe('acme/widgets');
+    expect(gitNodes.checks[1]?.repo).toBe('acme/widgets');
   });
 
   it('leases once and revokes once', async () => {

@@ -45,6 +45,12 @@ export interface DockerConfig {
   RUNNER_PIDS_LIMIT: number;
 }
 
+/** Per-kind commands for a single repo. A missing kind falls through to the global override. */
+export interface RepoCheckCmds {
+  lint?: string;
+  test?: string;
+}
+
 export interface OneShotConfig {
   /** Docker image used for the ephemeral credentialed git nodes (clone/push). */
   GIT_IMAGE: string;
@@ -55,6 +61,49 @@ export interface OneShotConfig {
   lintCommand: string | undefined;
   /** Override shell command for the test check (default: auto-detect via package.json). */
   testCommand: string | undefined;
+  /**
+   * Per-repo command overrides parsed from ONESHOT_CHECK_CMDS (JSON). Takes precedence over
+   * the global lintCommand/testCommand overrides. Empty map = no per-repo overrides.
+   */
+  checkCmds: ReadonlyMap<string, RepoCheckCmds>;
+}
+
+/**
+ * Parse the ONESHOT_CHECK_CMDS environment variable into a typed map.
+ *
+ * Expected format: JSON object mapping repo slug → { lint?: string; test?: string }.
+ * Any malformed input (undefined, empty string, invalid JSON, wrong shape) falls back to an
+ * empty map — never throws, never crashes startup.
+ *
+ * Exported as a pure function so it can be unit-tested without mutating process.env.
+ */
+export function parseCheckCmds(raw: string | undefined): ReadonlyMap<string, RepoCheckCmds> {
+  if (raw === undefined || raw === '') return new Map();
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return new Map();
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return new Map();
+  }
+
+  const result = new Map<string, RepoCheckCmds>();
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue;
+    const entry: RepoCheckCmds = {};
+    const rec = value as Record<string, unknown>;
+    if (typeof rec['lint'] === 'string' && rec['lint'] !== '') entry.lint = rec['lint'];
+    if (typeof rec['test'] === 'string' && rec['test'] !== '') entry.test = rec['test'];
+    // Skip entries with no effective command so `checkCmds.size > 0` stays a faithful
+    // "has overrides" signal — the wiring sites gate on it. An all-invalid entry would
+    // resolve identically (fall through to global/auto-detect), just with a misleading size.
+    if (entry.lint !== undefined || entry.test !== undefined) result.set(key, entry);
+  }
+  return result;
 }
 
 export interface Config {
@@ -97,6 +146,7 @@ export function loadConfig(): Config {
       gitlabToken: optionalEnvMaybe('GITLAB_BOT_TOKEN'),
       lintCommand: optionalEnvMaybe('ONESHOT_LINT_CMD'),
       testCommand: optionalEnvMaybe('ONESHOT_TEST_CMD'),
+      checkCmds: parseCheckCmds(process.env['ONESHOT_CHECK_CMDS']),
     },
   };
 }
