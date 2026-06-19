@@ -26,7 +26,14 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   private branchError: Error | null = null;
   private pushError: Error | null = null;
   private openChangeError: Error | null = null;
+
+  /** Fixed fallback result when no queue entry is available. */
   private checkResults: Map<'lint' | 'test', CheckResult> = new Map();
+  /**
+   * Queue of results per kind. Each call to runCheck pops the first entry;
+   * once the queue is empty the last entry (or the fixed fallback) is used.
+   */
+  private checkQueues: Map<'lint' | 'test', CheckResult[]> = new Map();
 
   constructor(prUrl = 'https://example.test/pr/1') {
     this.prUrl = prUrl;
@@ -47,9 +54,19 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
     this.openChangeError = err;
   }
 
-  /** Script runCheck() to return a specific result for the given kind. */
+  /** Script runCheck() to always return a specific result for the given kind. */
   setCheckResult(kind: 'lint' | 'test', result: CheckResult): void {
     this.checkResults.set(kind, result);
+  }
+
+  /**
+   * Script runCheck() to return successive results for the given kind across
+   * multiple calls. Once the queue is drained the last entry sticks (it is
+   * repeated for all subsequent calls). Use this when a check should fail on
+   * the first cycle and pass on a retry cycle.
+   */
+  queueCheckResults(kind: 'lint' | 'test', results: CheckResult[]): void {
+    this.checkQueues.set(kind, [...results]);
   }
 
   async clone(req: CloneRequest): Promise<void> {
@@ -86,6 +103,17 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
 
   async runCheck(req: CheckRequest): Promise<CheckResult> {
     this.checks.push(req);
+
+    // Try to pop from the queue first
+    const queue = this.checkQueues.get(req.kind);
+    if (queue !== undefined && queue.length > 0) {
+      // Shift the first entry; if it's the last one, leave it so it sticks
+      if (queue.length === 1) {
+        return queue[0] as CheckResult;
+      }
+      return queue.shift() as CheckResult;
+    }
+
     return this.checkResults.get(req.kind) ?? { exitCode: 0, output: '', skipped: false };
   }
 }
