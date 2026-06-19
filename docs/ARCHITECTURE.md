@@ -243,7 +243,7 @@ container is ever executed on the host.
 | Area | Current state |
 |---|---|
 | **Access control** | None yet. Anyone in the workspace who can mention the bot spends your API budget — and can start a credentialed `task`/`exec` repo run against any repo the bot token covers. No per-user allowlist, rate limits, or spend caps. (M6, in progress.) |
-| **Plan gate is supervision, not authorization** | A `task` run pauses for a human to approve the plan, but *any* thread participant can approve, cancel, or revise it — the gate does not check who replied. It reduces blast radius (a human sees the plan before code is written) without being an authz boundary. Requestor-only / allow-list resolution is part of the M6 authz work. **Don't point a real `GITHUB_BOT_TOKEN` at a broadly-accessible workspace until that lands.** |
+| **Plan gate is supervision, not an invocation gate** | A `task` run pauses for a human to approve the plan. Resolution is **requestor-only**: only the user who started the thread may approve, cancel, or revise it — a reply from anyone else is rejected with a notice, and it fails closed (no one resolves) when the requestor is unknown. It is supervision, not an *invocation* boundary: anyone who can mention the bot can still start a run. The real control is downstream — every run ends at *open a PR*, which a human reviews and merges on GitHub (the bot never merges), so a real `GITHUB_BOT_TOKEN` is safe to the extent you trust branch-protection and review on the repos the token covers. A broader invocation allow-list is still M6 work. |
 | **Parked gates are in-memory** | A run paused at the plan gate lives in the gateway's memory. A gateway restart mid-park loses the parked run (the workspace volume is still safe); durable park is deferred. |
 | **Streaming** | The thread shows `_thinking…_` → tool-status edits → one final text. Partial answer text is not streamed. (Planned M3.) |
 | **Long answers** | Final text goes through `chat.update`; Slack caps messages at ~40k chars (practically ~4k rendered well). Very long answers should be chunked or uploaded as a file — not yet handled. |
@@ -297,6 +297,7 @@ The entire suite (300+ tests) runs offline in <2 s — no Slack, no Docker, no A
 
 *Status: M1 (gateway) + M2 (Docker runner) + file forwarding + M5 (one-shot repo tasks:
 broker, credentialed git nodes, blueprint engine) shipped and verified live. M6 in progress:
-the `task` plan-approval gate (supervised one-shot) is shipped and smoke-verified; per-user
-authorization and durable park are the remaining M6 work. Other open gaps: streaming, spend
+the `task` plan-approval gate (supervised one-shot) is shipped and smoke-verified, with
+requestor-only gate resolution; a broader invocation allow-list and durable park are the
+remaining M6 work. Other open gaps: streaming, spend
 limits, volume GC, restart-surviving session index. See `planning/` for milestone specs.*

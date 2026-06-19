@@ -10,6 +10,12 @@ import type {
   GateResume,
 } from '../src/runner/types.js';
 import type { Profile } from '../src/profiles/registry.js';
+import type {
+  SessionStore,
+  SessionRow,
+  NewSessionRow,
+  SessionStatus,
+} from '../src/sessions/store.js';
 import { FakeSlackClient } from './responder.test.js';
 
 /**
@@ -37,6 +43,21 @@ class GateRunnerFactory implements RunnerFactory {
     this.runner = new GateRunner(sessionKey);
     return this.runner;
   }
+}
+
+/** A store you can seed with one row, for exercising the rehydrate path. */
+class SeededStore implements SessionStore {
+  private rows = new Map<string, SessionRow>();
+  seed(row: SessionRow): void {
+    this.rows.set(row.session_key, row);
+  }
+  recordSession(_row: NewSessionRow): void {}
+  touch(_key: string, _atMs: number): void {}
+  setStatus(_key: string, _status: SessionStatus): void {}
+  get(key: string): SessionRow | undefined {
+    return this.rows.get(key);
+  }
+  close(): void {}
 }
 
 function makeManager(idleTimeoutMs = 60_000, script: TurnScript[] = []) {
@@ -351,6 +372,7 @@ describe('SessionManager — approval gate (await_approval)', () => {
       message: 'task github:a/b do x',
       channel: 'C',
       threadTs: 'T',
+      userId: 'U-REQ',
     });
     await new Promise((r) => setTimeout(r, 10));
 
@@ -359,11 +381,12 @@ describe('SessionManager — approval gate (await_approval)', () => {
     expect(factory.runner?.received).toBeUndefined();
     expect(manager.has('TEAM:C:T')).toBe(true);
 
-    // A thread reply resolves the gate — routed to the parked run, not enqueued.
+    // The requestor's reply resolves the gate — routed to the parked run, not enqueued.
     const accepted = await manager.enqueueExisting('TEAM:C:T', {
       message: 'approve',
       channel: 'C',
       threadTs: 'T',
+      userId: 'U-REQ',
     });
     expect(accepted).toBe(true);
     await new Promise((r) => setTimeout(r, 10));
@@ -413,12 +436,14 @@ describe('SessionManager — approval gate (await_approval)', () => {
       message: 'task github:a/b x',
       channel: 'C',
       threadTs: 'T',
+      userId: 'U-REQ',
     });
     await new Promise((r) => setTimeout(r, 10)); // gate parked; the slow prompt post is in flight
     const accepted = await manager.enqueueExisting('TEAM:C:T', {
       message: 'approve',
       channel: 'C',
       threadTs: 'T',
+      userId: 'U-REQ',
     });
     expect(accepted).toBe(true);
     await new Promise((r) => setTimeout(r, 150));
@@ -445,6 +470,150 @@ describe('SessionManager — approval gate (await_approval)', () => {
 
     expect(factory.runner?.received).toEqual({ kind: 'timeout' });
     expect(slack.updates.some((u) => u.text === 'resumed:timeout')).toBe(true);
+  });
+});
+
+describe('SessionManager — gate authorization (requestor-only, M6 #22)', () => {
+  it('rejects a non-requestor reply (no resume, no new turn, posts a notice); the requestor still resolves', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new GateRunnerFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'task github:a/b do x',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // A bystander replies — must NOT resolve the gate and must NOT start a new turn.
+    const accepted = await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-OTHER',
+    });
+    expect(accepted).toBe(true); // swallowed (handled), just not as a resolve
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(factory.runner?.received).toBeUndefined(); // still parked
+    expect(factory.runner?.sendCount).toBe(1); // the bystander reply did not enqueue a turn
+    // The notice is a NEW message (posts), never an update to the gate placeholder.
+    expect(
+      slack.posts.some((p) => p.text === 'Only <@U-REQ> can approve or cancel this plan.'),
+    ).toBe(true);
+
+    // The original requestor can still resolve it.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(factory.runner?.received).toEqual({ kind: 'reply', text: 'approve' });
+  });
+
+  it('fail-closed: a gate with no recorded requestor rejects every reply', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new GateRunnerFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack,
+    });
+
+    // No userId on the creating mention → requestorUserId is undefined.
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'task github:a/b do x',
+      channel: 'C',
+      threadTs: 'T',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // A reply that DOES carry a userId still cannot match an undefined requestor.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-ANYONE',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(factory.runner?.received).toBeUndefined();
+    expect(
+      slack.posts.some(
+        (p) =>
+          p.text === 'Only the person who started this task can approve or cancel this plan.',
+      ),
+    ).toBe(true);
+  });
+
+  it('rehydrate sources the requestor from the stored row, not the replying message', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new GateRunnerFactory();
+    const store = new SeededStore();
+    store.seed({
+      session_key: 'TEAM:C:T',
+      team_id: 'TEAM',
+      user_id: 'U-ORIG',
+      channel_id: 'C',
+      thread_ts: 'T',
+      profile_id: 'supervised-repo-oneshot',
+      harness_version: null,
+      sdk_session_id: null,
+      volume_name: null,
+      created_at: 0,
+      last_active_at: 0,
+      status: 'active',
+    });
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+    });
+
+    // No in-memory session: this reply rehydrates from the store. It is from U-OTHER,
+    // but the requestor must be sourced from the row (U-ORIG), not this message.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'task github:a/b do x',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-OTHER',
+    });
+    await new Promise((r) => setTimeout(r, 10)); // the rehydrated run parks at the gate
+
+    // U-OTHER (who triggered the rehydrate) is NOT the requestor → rejected.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-OTHER',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(factory.runner?.received).toBeUndefined();
+    expect(
+      slack.posts.some((p) => p.text === 'Only <@U-ORIG> can approve or cancel this plan.'),
+    ).toBe(true);
+
+    // U-ORIG (the stored requestor) CAN resolve it.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-ORIG',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(factory.runner?.received).toEqual({ kind: 'reply', text: 'approve' });
   });
 });
 
@@ -481,9 +650,9 @@ describe('SessionManager — abandoned event', () => {
     };
     const manager = new SessionManager({ idleTimeoutMs: 60_000, gateTimeoutMs: 60_000, factory, slack });
 
-    await manager.enqueueNew('TEAM:C:T', { message: 'task github:a/b do x', channel: 'C', threadTs: 'T' });
+    await manager.enqueueNew('TEAM:C:T', { message: 'task github:a/b do x', channel: 'C', threadTs: 'T', userId: 'U-REQ' });
     await new Promise((r) => setTimeout(r, 10));
-    await manager.enqueueExisting('TEAM:C:T', { message: 'cancel', channel: 'C', threadTs: 'T' });
+    await manager.enqueueExisting('TEAM:C:T', { message: 'cancel', channel: 'C', threadTs: 'T', userId: 'U-REQ' });
     await new Promise((r) => setTimeout(r, 10));
 
     expect(

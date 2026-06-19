@@ -22,6 +22,12 @@ interface Session {
   draining: boolean;
   idleTimer: ReturnType<typeof setTimeout> | null;
   /**
+   * Slack user id of the original requestor (the mention that created the session).
+   * Gate authz (M6 #22): only this user may resolve a parked plan gate. `undefined`
+   * when the creating event carried no user — fail-closed, so nobody can resolve it.
+   */
+  requestorUserId: string | undefined;
+  /**
    * Set while a run is parked at an `await_approval` gate. The next thread reply
    * resolves it (with the reply text) instead of being enqueued as a new turn; a
    * timer resolves it with a timeout if no reply arrives. Null when not parked.
@@ -81,6 +87,7 @@ export class SessionManager {
       queue: [],
       draining: false,
       idleTimer: null,
+      requestorUserId: item.userId,
       pendingApproval: null,
     };
     this.sessions.set(key, session);
@@ -126,16 +133,45 @@ export class SessionManager {
       // it to the waiting run instead of enqueuing it as a new turn.
       //
       // SECURITY (M6 #22):
-      // (1) Gate authorization — this routes ANY thread participant's reply to the gate.
-      //     That is an INTENTIONAL choice for S03: the plan gate is *supervision*, not an
-      //     authorization boundary. The per-user authz gate is still future M6 work, and the
-      //     "no real GITHUB_BOT_TOKEN in a broadly-accessible workspace until M6" caveat (PR
-      //     #12) still stands. The seam to tighten later (compare item.userId against the
-      //     session's original requestor, or a role/allow-list) lives here.
+      // (1) Gate authorization — resolution is REQUESTOR-ONLY (M6 S04). Only the user who
+      //     started the thread may approve/cancel/redirect a parked plan; this one check
+      //     gates all three paths. Fail-closed: an unknown requestor (undefined) matches
+      //     nobody, so the gate rides to its timeout-abandon rather than letting anyone in.
+      //     Invocation stays open by design — the real authority is downstream (every run
+      //     ends at "open a PR", which a human reviews and merges; the bot never merges).
       // (2) Reply text is untrusted — HANDLED: the plan node folds gate feedback into the
       //     revised plan delimited-as-data + length-capped (<reviewer-feedback>), the same
       //     way the implement node treats check output. It is never passed as instructions.
       if (session.pendingApproval !== null) {
+        const isRequestor =
+          session.requestorUserId !== undefined &&
+          item.userId === session.requestorUserId;
+        if (!isRequestor) {
+          // A bystander can't resolve someone else's run — and we don't enqueue it
+          // either (a parked supervised one-shot owns the thread until it resolves).
+          // Post a NEW threaded message (never an update() to the gate placeholder,
+          // which must keep showing the plan + prompt for the requestor); ping the
+          // requestor by name for accountability.
+          // TODO(M6 audit): emit an audit_events row for the rejected resolve attempt.
+          console.log(`[session] gate reply from non-requestor ignored: ${session.key}`);
+          const who =
+            session.requestorUserId !== undefined
+              ? `<@${session.requestorUserId}>`
+              : 'the person who started this task';
+          void this.slack
+            .postMessage({
+              channel: item.channel,
+              thread_ts: item.threadTs,
+              text: `Only ${who} can approve or cancel this plan.`,
+            })
+            .catch((err: unknown) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.error(
+                `[session] failed to post non-requestor notice for ${session.key}: ${msg}`,
+              );
+            });
+          return true;
+        }
         this.resetIdleTimer(session);
         session.pendingApproval.resolve({ kind: 'reply', text: item.message });
         return true;
@@ -158,9 +194,16 @@ export class SessionManager {
     // Rehydrate: recreate the runner from the stored profile_id.
     console.log(`[session] rehydrating evicted session: ${key}`);
     const rehydrated = await this.getOrCreate(key, {
-      ...item,
+      message: item.message,
+      channel: item.channel,
+      threadTs: item.threadTs,
       // Prefer stored profile so we honour what the session was originally created with.
       profileId: row.profile_id,
+      ...(item.teamId !== undefined && { teamId: item.teamId }),
+      // Source the requestor from the STORED row, not the replying message, so gate
+      // authz (M6 #22) stays bound to the original starter. Omitted when null →
+      // fail-closed (no one can resolve a rehydrated gate with no recorded requestor).
+      ...(row.user_id !== null && { userId: row.user_id }),
     });
     rehydrated.queue.push(item);
     void this.drain(rehydrated);
@@ -331,6 +374,13 @@ export class SessionManager {
     prompt: string,
   ): Promise<GateResume> {
     const minutes = Math.max(1, Math.round(this.gateTimeoutMs / 60000));
+    // Fail-closed diagnostic: with no recorded requestor, the gate-authz check in
+    // enqueueExisting rejects every reply, so only the timeout can ever resolve this.
+    if (session.requestorUserId === undefined) {
+      console.log(
+        `[session] gate parked with no requestor — only a timeout can resolve it: ${session.key}`,
+      );
+    }
     // Register the parked state SYNCHRONOUSLY (the Promise executor runs now), before
     // any await — so a reply that arrives while the prompt is still being posted is
     // routed to the gate by enqueueExisting, not enqueued as a brand-new turn.
