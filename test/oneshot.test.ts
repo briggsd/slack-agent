@@ -204,14 +204,18 @@ describe('OneShotOrchestrator — happy path', () => {
     expect(researchSent).toContain('/workspace/acme-widgets');
     expect(researchSent).toContain('add a CHANGELOG');
 
-    // plan prompt: the planning directive (no workdir needed — agent already has context)
+    // plan prompt: the planning directive (no workdir needed — agent already has context),
+    // and it tells the agent to record assumptions since it cannot ask.
     const planSent = innerRunner.sends[1] ?? '';
     expect(planSent.toLowerCase()).toContain('plan');
+    expect(planSent.toLowerCase()).toContain('assumption');
 
-    // implement prompt: contains workdir and commit instruction
+    // implement prompt: contains workdir and commit instruction, and asks the agent
+    // to surface assumptions/deviations in its final summary.
     const implSent = innerRunner.sends[2] ?? '';
     expect(implSent).toContain('/workspace/acme-widgets');
     expect(implSent.toLowerCase()).toContain('commit');
+    expect(implSent.toLowerCase()).toContain('assumption');
     // Positional indices above already pin both count and order (research, plan, implement).
   });
 
@@ -241,6 +245,35 @@ describe('OneShotOrchestrator — happy path', () => {
   it('the PR title is derived from the instruction (first 72 chars)', async () => {
     await drain(orch.send('github:acme/widgets add a CHANGELOG'));
     expect(gitNodes.changeRequests[0]?.title).toBe('add a CHANGELOG');
+  });
+
+  it('the PR body leads with the implementation summary and includes the plan (where assumptions surface)', async () => {
+    await drain(orch.send('github:acme/widgets add a CHANGELOG'));
+    const body = gitNodes.changeRequests[0]?.body ?? '';
+    // Implementation summary leads; plan follows under its own heading.
+    expect(body).toContain('impl done');
+    expect(body).toContain('## Plan & assumptions');
+    expect(body).toContain('plan done');
+    expect(body.indexOf('impl done')).toBeLessThan(body.indexOf('## Plan & assumptions'));
+  });
+
+  it('marks an over-cap plan summary as truncated so a cut assumptions block is visible', async () => {
+    // A plan summary longer than the 2000-char cap; the marker must follow the cut.
+    const longPlan = 'p'.repeat(2500);
+    const inner = new FakeRunner('test-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: longPlan }],
+      [{ type: 'text', text: 'impl done' }],
+    ]);
+    const localGit = new FakeGitNodeExecutor('https://example.test/pr/43');
+    const localOrch = new OneShotOrchestrator(inner, broker, localGit, TEST_SESSION_KEY, 'task-trunc');
+
+    await drain(localOrch.send('github:acme/widgets add a CHANGELOG'));
+
+    const body = localGit.changeRequests[0]?.body ?? '';
+    expect(body).toContain('_(truncated)_');
+    // The plan was cut to the cap — the full 2500-char blob must not survive.
+    expect(body).not.toContain(longPlan);
   });
 });
 
