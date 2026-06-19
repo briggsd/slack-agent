@@ -76,8 +76,8 @@ volume ⇒ one Agent SDK conversation.
 
 | Incoming event | Behavior |
 |---|---|
-| `app_mention` (anywhere) | Create **or reuse** the session for that thread; enqueue the text (mention stripped). This is the only way a session is born. A leading `task ` keyword (e.g. `task github:owner/repo <instruction>`) instead selects the `repo-oneshot` profile — the keyword is stripped and the rest is run as a one-shot repo task (clone → implement → push → open PR). |
-| `message` that is a thread reply | Route to the session for that thread **only if one exists**; otherwise ignored silently. |
+| `app_mention` (anywhere) | Create **or reuse** the session for that thread; enqueue the text (mention stripped). This is the only way a session is born. A leading `task `/`exec ` keyword + `host:owner/repo` target instead selects a one-shot repo profile (clone → research → plan → implement → push → open PR): `task` → `supervised-repo-oneshot` (pauses at a plan-approval gate); `exec` → `repo-oneshot` (fire-and-forget). The keyword is stripped and the rest is the instruction. |
+| `message` that is a thread reply | Route to the session for that thread **only if one exists**; otherwise ignored silently. If that run is parked at a plan-approval gate, the reply resolves the gate (approve / cancel / revise) instead of starting a new turn. |
 | `message` that mentions the bot | Ignored by the message handler — Slack also fires `app_mention` for it, and processing both would answer twice. |
 | Anything with `bot_id` or a `subtype` (edits, deletes, bot posts) | Ignored. Prevents the bot replying to itself / reacting to edits. |
 
@@ -242,7 +242,9 @@ container is ever executed on the host.
 
 | Area | Current state |
 |---|---|
-| **Access control** | None. Anyone in the workspace who can mention the bot spends your API budget. No per-user allowlist, rate limits, or spend caps. (Planned M3.) |
+| **Access control** | None yet. Anyone in the workspace who can mention the bot spends your API budget — and can start a credentialed `task`/`exec` repo run against any repo the bot token covers. No per-user allowlist, rate limits, or spend caps. (M6, in progress.) |
+| **Plan gate is supervision, not authorization** | A `task` run pauses for a human to approve the plan, but *any* thread participant can approve, cancel, or revise it — the gate does not check who replied. It reduces blast radius (a human sees the plan before code is written) without being an authz boundary. Requestor-only / allow-list resolution is part of the M6 authz work. **Don't point a real `GITHUB_BOT_TOKEN` at a broadly-accessible workspace until that lands.** |
+| **Parked gates are in-memory** | A run paused at the plan gate lives in the gateway's memory. A gateway restart mid-park loses the parked run (the workspace volume is still safe); durable park is deferred. |
 | **Streaming** | The thread shows `_thinking…_` → tool-status edits → one final text. Partial answer text is not streamed. (Planned M3.) |
 | **Long answers** | Final text goes through `chat.update`; Slack caps messages at ~40k chars (practically ~4k rendered well). Very long answers should be chunked or uploaded as a file — not yet handled. |
 | **Volume GC** | Volumes (`slackbot-ws-*`) accumulate forever. There is no TTL/cleanup yet; `docker volume ls | grep slackbot-ws-` and prune manually. |
@@ -278,7 +280,7 @@ container is ever executed on the host.
 
 ## 10. Testing strategy
 
-The entire suite (69 tests) runs offline in <1 s — no Slack, no Docker, no API:
+The entire suite (300+ tests) runs offline in <2 s — no Slack, no Docker, no API:
 
 - **Seams everywhere**: Bolt is only imported in `src/index.ts`; handlers take a minimal
   `SlackClientLike`; `DockerRunner` takes an injectable `spawn`; the runner's main loop
@@ -293,6 +295,8 @@ The entire suite (69 tests) runs offline in <1 s — no Slack, no Docker, no API
 
 ---
 
-*Status: M1 (gateway) + M2 (Docker runner) + file forwarding shipped and verified live.
-Remaining M3 scope: streaming, access control/limits, volume GC, restart-surviving session
-index. See `planning/` for milestone specs.*
+*Status: M1 (gateway) + M2 (Docker runner) + file forwarding + M5 (one-shot repo tasks:
+broker, credentialed git nodes, blueprint engine) shipped and verified live. M6 in progress:
+the `task` plan-approval gate (supervised one-shot) is shipped and smoke-verified; per-user
+authorization and durable park are the remaining M6 work. Other open gaps: streaming, spend
+limits, volume GC, restart-surviving session index. See `planning/` for milestone specs.*
