@@ -110,6 +110,8 @@ export interface Config {
   SLACK_BOT_TOKEN: string;
   SLACK_APP_TOKEN: string;
   IDLE_TIMEOUT_MS: number;
+  /** Maximum time (ms) to wait for a human to approve the plan gate. Default: 15 min. */
+  GATE_TIMEOUT_MS: number;
   RUNNER_BACKEND: RunnerBackend;
   /** Path to the SQLite session database. Parent dir is created on startup. */
   SESSION_DB_PATH: string;
@@ -129,6 +131,7 @@ export function loadConfig(): Config {
     SLACK_BOT_TOKEN: requireEnv('SLACK_BOT_TOKEN'),
     SLACK_APP_TOKEN: requireEnv('SLACK_APP_TOKEN'),
     IDLE_TIMEOUT_MS: optionalEnvNumber('IDLE_TIMEOUT_MS', 10 * 60 * 1000),
+    GATE_TIMEOUT_MS: optionalEnvNumber('GATE_TIMEOUT_MS', 15 * 60 * 1000),
     RUNNER_BACKEND: backend,
     SESSION_DB_PATH: optionalEnvString('SESSION_DB_PATH', '.data/sessions.db'),
     docker: {

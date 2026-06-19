@@ -20,12 +20,14 @@ export interface GatewayDeps {
   factory: RunnerFactory;
   store: SessionStore;
   idleTimeoutMs: number;
+  gateTimeoutMs?: number;
   botUserId: string;
 }
 
 export function buildGateway(deps: GatewayDeps): { sessions: SessionManager } {
   const sessions = new SessionManager({
     idleTimeoutMs: deps.idleTimeoutMs,
+    ...(deps.gateTimeoutMs !== undefined && { gateTimeoutMs: deps.gateTimeoutMs }),
     factory: deps.factory,
     slack: deps.slack,
     store: deps.store,

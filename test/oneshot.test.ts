@@ -943,4 +943,47 @@ describe('DispatchingRunnerFactory', () => {
     // All inner runners are conversational
     expect(baseFactory.profiles.every((p) => p.mode === 'conversational')).toBe(true);
   });
+
+  it('returns a OneShotOrchestrator for the supervised-repo-oneshot profile', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const baseFactory = new FakeRunnerFactory();
+    const dispatchFactory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);
+
+    const supervisedProfile = getProfile('supervised-repo-oneshot');
+    const runner = await dispatchFactory.create('TEAM:C:T', supervisedProfile);
+
+    expect(runner).toBeInstanceOf(OneShotOrchestrator);
+  });
+
+  it('supervised-repo-oneshot orchestrator runs the supervised blueprint (same nodes as unsupervised for S02)', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://example.test/pr/supervised');
+    // Script three agentic turns for the inner runner (research, plan, implement)
+    const innerRunner = new FakeRunner('supervised-session', [
+      [{ type: 'text', text: 'research done' }],
+      [{ type: 'text', text: 'plan done' }],
+      [{ type: 'text', text: 'impl done' }],
+    ]);
+    const orch = new OneShotOrchestrator(
+      innerRunner,
+      broker,
+      gitNodes,
+      'TEAM:C:T',
+      'task-supervised',
+      'supervised-repo-oneshot',
+    );
+
+    const events: RunnerEvent[] = [];
+    for await (const ev of orch.send('github:acme/widgets fix the bug')) {
+      events.push(ev);
+    }
+
+    // PR still opens (supervised blueprint is node-identical to unsupervised in S02)
+    expect(gitNodes.changeRequests).toHaveLength(1);
+    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
+    expect(textEvents).toHaveLength(1);
+    expect(textEvents[0]?.text).toContain('Opened PR:');
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
+  });
 });

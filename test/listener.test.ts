@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { handleMention, handleMessage, parseOneShotTrigger } from '../src/slack/listener.js';
-import type { HandlerDeps, MentionEventBody, MessageEventBody } from '../src/slack/listener.js';
+import type { HandlerDeps, MentionEventBody, MessageEventBody, OneShotTrigger } from '../src/slack/listener.js';
 import { FakeRunnerFactory } from '../src/runner/fake.js';
 import { SessionManager } from '../src/sessions/manager.js';
 import type { QueueItem } from '../src/sessions/manager.js';
@@ -255,25 +255,39 @@ describe('handleMention + handleMessage — teamId/userId on QueueItem', () => {
 });
 
 describe('parseOneShotTrigger — unit tests', () => {
-  it('returns the remainder when message starts with "task "', () => {
-    expect(parseOneShotTrigger('task github:acme/widgets fix the bug')).toBe(
-      'github:acme/widgets fix the bug',
-    );
+  it('task keyword → supervised-repo-oneshot profileId', () => {
+    const result: OneShotTrigger | null = parseOneShotTrigger('task github:acme/widgets fix the bug');
+    expect(result).not.toBeNull();
+    expect(result?.profileId).toBe('supervised-repo-oneshot');
+    expect(result?.text).toBe('github:acme/widgets fix the bug');
+  });
+
+  it('exec keyword → repo-oneshot profileId', () => {
+    const result: OneShotTrigger | null = parseOneShotTrigger('exec github:acme/widgets fix the bug');
+    expect(result).not.toBeNull();
+    expect(result?.profileId).toBe('repo-oneshot');
+    expect(result?.text).toBe('github:acme/widgets fix the bug');
   });
 
   it('is case-insensitive — "Task " prefix works', () => {
-    expect(parseOneShotTrigger('Task github:acme/widgets fix the bug')).toBe(
-      'github:acme/widgets fix the bug',
-    );
+    const result = parseOneShotTrigger('Task github:acme/widgets fix the bug');
+    expect(result?.profileId).toBe('supervised-repo-oneshot');
+    expect(result?.text).toBe('github:acme/widgets fix the bug');
   });
 
   it('is case-insensitive — "TASK " prefix works', () => {
-    expect(parseOneShotTrigger('TASK github:acme/widgets fix the bug')).toBe(
-      'github:acme/widgets fix the bug',
-    );
+    const result = parseOneShotTrigger('TASK github:acme/widgets fix the bug');
+    expect(result?.profileId).toBe('supervised-repo-oneshot');
+    expect(result?.text).toBe('github:acme/widgets fix the bug');
   });
 
-  it('returns null for a normal message (no task prefix)', () => {
+  it('is case-insensitive — "EXEC " prefix works', () => {
+    const result = parseOneShotTrigger('EXEC github:acme/widgets fix the bug');
+    expect(result?.profileId).toBe('repo-oneshot');
+    expect(result?.text).toBe('github:acme/widgets fix the bug');
+  });
+
+  it('returns null for a normal message (no task/exec prefix)', () => {
     expect(parseOneShotTrigger('hello there')).toBeNull();
   });
 
@@ -281,19 +295,23 @@ describe('parseOneShotTrigger — unit tests', () => {
     expect(parseOneShotTrigger('task')).toBeNull();
   });
 
+  it('returns null for bare "exec" with no remainder', () => {
+    expect(parseOneShotTrigger('exec')).toBeNull();
+  });
+
   it('returns null for "task" followed only by whitespace', () => {
     expect(parseOneShotTrigger('task   ')).toBeNull();
   });
 
   it('trims the captured remainder', () => {
-    expect(parseOneShotTrigger('task   github:acme/widgets do it')).toBe(
-      'github:acme/widgets do it',
-    );
+    const result = parseOneShotTrigger('task   github:acme/widgets do it');
+    expect(result?.profileId).toBe('supervised-repo-oneshot');
+    expect(result?.text).toBe('github:acme/widgets do it');
   });
 });
 
 describe('handleMention — one-shot trigger profile dispatch', () => {
-  it('task prefix → profileId=repo-oneshot, keyword stripped', async () => {
+  it('task prefix → profileId=supervised-repo-oneshot, keyword stripped', async () => {
     const slack = new FakeSlackClient();
     const factory = new FakeRunnerFactory();
     const sessions = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
@@ -313,11 +331,35 @@ describe('handleMention — one-shot trigger profile dispatch', () => {
     );
 
     expect(capturedItems).toHaveLength(1);
+    expect(capturedItems[0]?.profileId).toBe('supervised-repo-oneshot');
+    expect(capturedItems[0]?.message).toBe('github:acme/widgets fix the bug');
+  });
+
+  it('exec prefix → profileId=repo-oneshot, keyword stripped', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const sessions = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    const capturedItems: QueueItem[] = [];
+    const original = sessions.enqueueNew.bind(sessions);
+    sessions.enqueueNew = async (key: string, item: QueueItem): Promise<void> => {
+      capturedItems.push(item);
+      return original(key, item);
+    };
+
+    const deps: HandlerDeps = { sessions, slack, botUserId: 'U_BOT' };
+
+    await handleMention(
+      mentionBody({ text: '<@U_BOT> exec github:acme/widgets fix the bug' }),
+      deps,
+    );
+
+    expect(capturedItems).toHaveLength(1);
     expect(capturedItems[0]?.profileId).toBe('repo-oneshot');
     expect(capturedItems[0]?.message).toBe('github:acme/widgets fix the bug');
   });
 
-  it('Task prefix (mixed case) → profileId=repo-oneshot', async () => {
+  it('Task prefix (mixed case) → profileId=supervised-repo-oneshot', async () => {
     const slack = new FakeSlackClient();
     const factory = new FakeRunnerFactory();
     const sessions = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
@@ -336,11 +378,11 @@ describe('handleMention — one-shot trigger profile dispatch', () => {
       deps,
     );
 
-    expect(capturedItems[0]?.profileId).toBe('repo-oneshot');
+    expect(capturedItems[0]?.profileId).toBe('supervised-repo-oneshot');
     expect(capturedItems[0]?.message).toBe('github:acme/widgets fix the bug');
   });
 
-  it('TASK prefix (all caps) → profileId=repo-oneshot', async () => {
+  it('TASK prefix (all caps) → profileId=supervised-repo-oneshot', async () => {
     const slack = new FakeSlackClient();
     const factory = new FakeRunnerFactory();
     const sessions = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
@@ -359,7 +401,7 @@ describe('handleMention — one-shot trigger profile dispatch', () => {
       deps,
     );
 
-    expect(capturedItems[0]?.profileId).toBe('repo-oneshot');
+    expect(capturedItems[0]?.profileId).toBe('supervised-repo-oneshot');
     expect(capturedItems[0]?.message).toBe('github:acme/widgets fix the bug');
   });
 
