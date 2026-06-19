@@ -64,3 +64,55 @@ export function boundedRetry<Ctx, Deps>(
     },
   };
 }
+
+export interface LoopUntilOptions<Ctx, Deps> {
+  readonly name: string;
+  /** Checked after each full body pass; the loop stops once it returns true. */
+  done(ctx: Ctx, deps: Deps): boolean;
+  /**
+   * Optional safety cap on body passes. Omit for an unbounded loop (termination then
+   * comes entirely from `done` becoming true, or a body node throwing / the consumer
+   * calling `.return()` on the stream — e.g. an approval gate that abandons the run).
+   * Throws if set below 1.
+   */
+  readonly maxIterations?: number;
+}
+
+/**
+ * Wraps a sub-sequence of nodes in a loop that repeats until `done(ctx)` holds.
+ *
+ * - Runs the body nodes in order, then checks `done`; if true, returns.
+ * - Unbounded by default. With `maxIterations` set, throws once that many passes
+ *   complete without `done` — a body node that drives termination another way (throw,
+ *   or yielding an event the consumer reacts to with `.return()`) ends it first.
+ * - Body nodes run via `yield*`, so a node that yields `await_approval` and reads back a
+ *   resume value (a parked gate) threads correctly through the loop.
+ * - A body node that THROWS propagates out (fatal); only `done` ends the loop normally.
+ * - The combinator's kind is `'agentic'` if any body node is agentic, else `'deterministic'`.
+ */
+export function loopUntil<Ctx, Deps>(
+  body: readonly BlueprintNode<Ctx, Deps>[],
+  opts: LoopUntilOptions<Ctx, Deps>,
+): BlueprintNode<Ctx, Deps> {
+  if (opts.maxIterations !== undefined && opts.maxIterations < 1) {
+    throw new RangeError(
+      `loopUntil: maxIterations must be >= 1, got ${String(opts.maxIterations)}`,
+    );
+  }
+  const kind: NodeKind = body.some((n) => n.kind === 'agentic') ? 'agentic' : 'deterministic';
+
+  return {
+    name: opts.name,
+    kind,
+    async *run(ctx: Ctx, deps: Deps): AsyncGenerator<RunnerEvent> {
+      for (let i = 0; opts.maxIterations === undefined || i < opts.maxIterations; i++) {
+        for (const node of body) {
+          yield* node.run(ctx, deps);
+        }
+        if (opts.done(ctx, deps)) return;
+      }
+      // Only reachable when maxIterations is set and exhausted without `done`.
+      throw new Error(`${opts.name}: not done after ${String(opts.maxIterations)} iterations`);
+    },
+  };
+}

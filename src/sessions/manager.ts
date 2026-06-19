@@ -125,16 +125,16 @@ export class SessionManager {
       // A run parked at an approval gate: this reply IS the approval/redirect — hand
       // it to the waiting run instead of enqueuing it as a new turn.
       //
-      // SECURITY (deferred to the gate-node slice — design/0006 open questions, #22):
-      // this routes ANY thread participant's reply to the gate. Before a real run can
-      // park here (the gate node + supervised profile land in a later slice), two
-      // boundaries must be enforced: (1) only the authorized requestor may resolve the
-      // gate — compare item.userId against the session's original requestor (the
-      // approval-authz policy is an open design decision, tied to the broader M6
-      // per-user authorization gate); (2) the reply text is untrusted — the node that
-      // folds it into the agent directive must delimit-as-data + length-cap it, like the
-      // implement node already does with check output. No live exposure in this slice:
-      // nothing reachable yields await_approval yet.
+      // SECURITY (M6 #22):
+      // (1) Gate authorization — this routes ANY thread participant's reply to the gate.
+      //     That is an INTENTIONAL choice for S03: the plan gate is *supervision*, not an
+      //     authorization boundary. The per-user authz gate is still future M6 work, and the
+      //     "no real GITHUB_BOT_TOKEN in a broadly-accessible workspace until M6" caveat (PR
+      //     #12) still stands. The seam to tighten later (compare item.userId against the
+      //     session's original requestor, or a role/allow-list) lives here.
+      // (2) Reply text is untrusted — HANDLED: the plan node folds gate feedback into the
+      //     revised plan delimited-as-data + length-capped (<reviewer-feedback>), the same
+      //     way the implement node treats check output. It is never passed as instructions.
       if (session.pendingApproval !== null) {
         this.resetIdleTimer(session);
         session.pendingApproval.resolve({ kind: 'reply', text: item.message });
@@ -266,6 +266,17 @@ export class SessionManager {
               // Park: post the plan, wait for the next thread reply (or a timeout), and
               // feed the result back into the run on the next `next()`.
               resume = await this.awaitApproval(session, placeholder, event.prompt);
+            } else if (event.type === 'abandoned') {
+              // A gate deliberately ended the run (cancel/timeout). Post a clean, non-error
+              // line and stop driving — the `finally` below calls iterator.return(), which
+              // unwinds the run's own `finally` blocks (notably the orchestrator's lease
+              // revoke). No downstream nodes (branch/push/open-pr) run.
+              await updatePlaceholder(
+                this.slack,
+                placeholder,
+                `:no_entry_sign: Plan abandoned (${event.reason}) — nothing was pushed.`,
+              );
+              break;
             } else if (event.type === 'error') {
               await updatePlaceholder(
                 this.slack,
@@ -342,11 +353,12 @@ export class SessionManager {
     // aborts on timeout — design/0006). Fire-and-forget so a post failure can't strand
     // the parked run; the timeout still bounds it.
     if (placeholder !== null) {
+      // The gate node's `prompt` already carries the response vocabulary (approve/cancel/
+      // changes); the manager only adds the timeout note, since it owns the timer.
       void updatePlaceholder(
         this.slack,
         placeholder,
-        `${prompt}\n\n_Reply \`approve\` to proceed, or reply with changes. ` +
-          `No reply within ${minutes} min → the plan times out._`,
+        `${prompt}\n\n_No reply within ${minutes} min → the plan is abandoned._`,
       ).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[session] failed to post approval prompt for ${session.key}: ${msg}`);

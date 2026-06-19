@@ -447,3 +447,52 @@ describe('SessionManager — approval gate (await_approval)', () => {
     expect(slack.updates.some((u) => u.text === 'resumed:timeout')).toBe(true);
   });
 });
+
+describe('SessionManager — abandoned event', () => {
+  // Parks, then on a cancel reply yields `abandoned`; a finally proves the run was
+  // unwound (its cleanup ran) and the post-abandon tail never ran.
+  class AbandonRunner implements SessionRunner {
+    public finallyRan = false;
+    public tailRan = false;
+    constructor(readonly sessionKey: string) {}
+    async *send(_m: string): RunnerStream {
+      try {
+        const resume = yield { type: 'await_approval', prompt: 'PLAN' };
+        if (resume?.kind === 'reply' && resume.text === 'cancel') {
+          yield { type: 'abandoned', reason: 'cancelled' };
+        }
+        this.tailRan = true;
+        yield { type: 'text', text: 'should not run' };
+      } finally {
+        this.finallyRan = true;
+      }
+    }
+    async dispose(): Promise<void> {}
+  }
+
+  it('posts a clean abandon line and unwinds the run (finally runs, tail does not)', async () => {
+    const slack = new FakeSlackClient();
+    let runner: AbandonRunner | null = null;
+    const factory: RunnerFactory = {
+      create: async (key) => {
+        runner = new AbandonRunner(key);
+        return runner;
+      },
+    };
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, gateTimeoutMs: 60_000, factory, slack });
+
+    await manager.enqueueNew('TEAM:C:T', { message: 'task github:a/b do x', channel: 'C', threadTs: 'T' });
+    await new Promise((r) => setTimeout(r, 10));
+    await manager.enqueueExisting('TEAM:C:T', { message: 'cancel', channel: 'C', threadTs: 'T' });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(
+      slack.updates.some((u) => u.text === ':no_entry_sign: Plan abandoned (cancelled) — nothing was pushed.'),
+    ).toBe(true);
+    expect(slack.updates.some((u) => u.text === 'should not run')).toBe(false);
+    expect(runner).not.toBeNull();
+    const r = runner as unknown as AbandonRunner;
+    expect(r.finallyRan).toBe(true);
+    expect(r.tailRan).toBe(false);
+  });
+});

@@ -5,6 +5,11 @@ export type RunnerEvent =
   | { type: 'file'; name: string; data: Buffer }  // file produced during the turn
   | { type: 'text'; text: string }     // final assistant text for this turn
   | { type: 'await_approval'; prompt: string }  // gateway-side gate: pause, post `prompt`, await a reply
+  // gateway-side: a gate deliberately ended the run (cancel/timeout) — NOT an error. Contract:
+  // the consumer stops driving the stream on this event (calls `.return()`), which unwinds the
+  // run's `finally` blocks (e.g. the orchestrator's lease revoke). It is the terminal counterpart
+  // to `await_approval`: that one requires a resume back, this one requires a `.return()`.
+  | { type: 'abandoned'; reason: string }
   | { type: 'error'; message: string };
 
 /**
