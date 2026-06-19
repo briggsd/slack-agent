@@ -43,3 +43,11 @@ export interface SessionRunner {
 export interface RunnerFactory {
   create(sessionKey: string, profile: Profile): Promise<SessionRunner>;
 }
+
+/** Removes the Docker volume backing a session. Implemented by the docker factory;
+ *  injected into SessionManager for the volume-GC sweep. */
+export interface VolumeReaper {
+  /** Remove the volume for `sessionKey`. Resolves true when the volume is gone
+   *  (removed, or already absent); false on a real failure (e.g. still in use). */
+  removeVolumeForSession(sessionKey: string): Promise<boolean>;
+}

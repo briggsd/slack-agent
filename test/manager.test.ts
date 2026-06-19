@@ -8,6 +8,7 @@ import type {
   SessionRunner,
   RunnerFactory,
   GateResume,
+  VolumeReaper,
 } from '../src/runner/types.js';
 import type { Profile } from '../src/profiles/registry.js';
 import type {
@@ -61,6 +62,8 @@ class SeededStore implements SessionStore {
   }
   recordAudit(event: AuditEvent): void { this.audits.push(event); }
   getAuditEvents(_sessionKey: string): AuditEvent[] { return []; }
+  listExpired(_cutoffMs: number): SessionRow[] { return []; }
+  deleteSession(key: string): void { this.rows.delete(key); }
   close(): void {}
 }
 
@@ -678,6 +681,7 @@ describe('SessionManager — abandoned event', () => {
  */
 class CapturingStore implements SessionStore {
   public audits: AuditEvent[] = [];
+  public deletedKeys: string[] = [];
   private rows = new Map<string, SessionRow>();
 
   recordSession(row: NewSessionRow): void {
@@ -702,7 +706,31 @@ class CapturingStore implements SessionStore {
   getAuditEvents(sessionKey: string): AuditEvent[] {
     return this.audits.filter((a) => a.session_key === sessionKey);
   }
+  listExpired(cutoffMs: number): SessionRow[] {
+    return Array.from(this.rows.values()).filter(
+      (r) => r.last_active_at < cutoffMs,
+    );
+  }
+  deleteSession(key: string): void {
+    this.deletedKeys.push(key);
+    this.rows.delete(key);
+  }
   close(): void {}
+}
+
+/** A fake VolumeReaper that records which keys it was asked to remove. */
+class FakeVolumeReaper implements VolumeReaper {
+  public removedKeys: string[] = [];
+  public returnValue: boolean;
+
+  constructor(returnValue = true) {
+    this.returnValue = returnValue;
+  }
+
+  async removeVolumeForSession(sessionKey: string): Promise<boolean> {
+    this.removedKeys.push(sessionKey);
+    return this.returnValue;
+  }
 }
 
 /** A runner that yields a `pr_opened` event so the drain loop handles it. */
@@ -955,3 +983,224 @@ class AbandonRunnerForAudit implements SessionRunner {
   }
   async dispose(): Promise<void> {}
 }
+
+// ─── SessionManager — volume GC sweep ────────────────────────────────────────
+
+describe('SessionManager — volume GC sweep', () => {
+  it('sweep removes an expired row volume and deletes the row', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const store = new CapturingStore();
+    const reaper = new FakeVolumeReaper(true);
+
+    // Seed an expired session row directly (last_active_at far in the past).
+    store.recordSession({
+      session_key: 'TEAM:GC:EXPIRED',
+      team_id: 'TEAM',
+      user_id: 'U1',
+      channel_id: 'GC',
+      thread_ts: 'EXPIRED',
+      profile_id: 'conversational',
+      created_at: 1_000,
+      last_active_at: 1_000,
+      status: 'reaped',
+    });
+
+    // Default gcIntervalMs (1h) so the background interval never fires during the test;
+    // the sweep is invoked directly for determinism (no wall-clock waits).
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      volumeReaper: reaper,
+      volumeTtlMs: 1_000, // the seeded row (last_active_at=1000) is well past the cutoff
+    });
+
+    await manager.runVolumeGc();
+
+    // Reaper should have been called for the expired key.
+    expect(reaper.removedKeys).toContain('TEAM:GC:EXPIRED');
+    // Row should have been deleted from the store.
+    expect(store.get('TEAM:GC:EXPIRED')).toBeUndefined();
+
+    await manager.disposeAll();
+  });
+
+  it('sweep skips a live in-memory session (never rm a volume in use)', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const store = new CapturingStore();
+    const reaper = new FakeVolumeReaper(true);
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      volumeReaper: reaper,
+      volumeTtlMs: 1_000,
+    });
+
+    // Create a live session — getOrCreate registers it in the in-memory map before
+    // enqueueNew resolves, so it is live the moment this await returns.
+    await manager.enqueueNew('TEAM:GC:LIVE', {
+      message: 'hello',
+      channel: 'GC',
+      threadTs: 'LIVE',
+      teamId: 'TEAM',
+    });
+
+    // Back-date the store row so it looks expired.
+    const row = store.get('TEAM:GC:LIVE');
+    if (row !== undefined) {
+      // Update last_active_at to 1 (far in the past).
+      // We do this by re-inserting (CapturingStore's recordSession is an upsert-like).
+      store.recordSession({
+        session_key: row.session_key,
+        team_id: row.team_id,
+        user_id: row.user_id,
+        channel_id: row.channel_id,
+        thread_ts: row.thread_ts,
+        profile_id: row.profile_id,
+        created_at: 1,
+        last_active_at: 1,
+        status: row.status,
+      });
+    }
+
+    await manager.runVolumeGc();
+
+    // The session is still live in memory → reaper must NOT have been called for it.
+    expect(reaper.removedKeys).not.toContain('TEAM:GC:LIVE');
+    // Row is still in the store.
+    expect(store.get('TEAM:GC:LIVE')).toBeDefined();
+
+    await manager.disposeAll();
+  });
+
+  it('sweep leaves the row when reaper returns false (retried next sweep)', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const store = new CapturingStore();
+    const reaper = new FakeVolumeReaper(false); // always fails
+
+    store.recordSession({
+      session_key: 'TEAM:GC:FAIL',
+      team_id: null,
+      user_id: null,
+      channel_id: 'GC',
+      thread_ts: 'FAIL',
+      profile_id: 'conversational',
+      created_at: 1,
+      last_active_at: 1,
+      status: 'reaped',
+    });
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      volumeReaper: reaper,
+      volumeTtlMs: 1_000,
+    });
+
+    await manager.runVolumeGc();
+
+    // Reaper was called but returned false — row must remain.
+    expect(reaper.removedKeys).toContain('TEAM:GC:FAIL');
+    expect(store.deletedKeys).not.toContain('TEAM:GC:FAIL');
+    expect(store.get('TEAM:GC:FAIL')).toBeDefined();
+
+    await manager.disposeAll();
+  });
+
+  it('does not delete the row if the session is re-created while the rm is in flight (TOCTOU)', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const store = new CapturingStore();
+
+    store.recordSession({
+      session_key: 'TEAM:GC:RACE',
+      team_id: 'TEAM',
+      user_id: null,
+      channel_id: 'GC',
+      thread_ts: 'RACE',
+      profile_id: 'conversational',
+      created_at: 1,
+      last_active_at: 1,
+      status: 'reaped',
+    });
+
+    // A reaper that re-creates the session mid-removal — simulating a reply arriving
+    // while `docker volume rm` is in flight. The post-await liveness re-check must then
+    // leave the (now-live) row alone.
+    const ref: { mgr?: SessionManager } = {};
+    const reaper: VolumeReaper = {
+      async removeVolumeForSession(key: string): Promise<boolean> {
+        await ref.mgr?.enqueueNew(key, {
+          message: 'back',
+          channel: 'GC',
+          threadTs: 'RACE',
+          teamId: 'TEAM',
+        });
+        return true;
+      },
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      volumeReaper: reaper,
+      volumeTtlMs: 1_000,
+    });
+    ref.mgr = manager;
+
+    await manager.runVolumeGc();
+
+    // The session came back to life during the rm → its index row must survive.
+    expect(manager.has('TEAM:GC:RACE')).toBe(true);
+    expect(store.deletedKeys).not.toContain('TEAM:GC:RACE');
+
+    await manager.disposeAll();
+  });
+
+  it('GC is off when no volumeReaper is passed (no calls to store delete path)', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const store = new CapturingStore();
+
+    // Seed an expired row.
+    store.recordSession({
+      session_key: 'TEAM:GC:NOgc',
+      team_id: null,
+      user_id: null,
+      channel_id: 'GC',
+      thread_ts: 'NOgc',
+      profile_id: 'conversational',
+      created_at: 1,
+      last_active_at: 1,
+      status: 'reaped',
+    });
+
+    // No volumeReaper → GC interval is never started, and the sweep is a no-op even if
+    // invoked: with no reaper there is nothing to remove a volume, so no row is deleted.
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      // volumeReaper intentionally omitted
+    });
+
+    await manager.runVolumeGc();
+
+    // The expired row must survive — without a reaper, GC deletes nothing.
+    expect(store.deletedKeys).toHaveLength(0);
+    expect(store.get('TEAM:GC:NOgc')).toBeDefined();
+
+    await manager.disposeAll();
+  });
+});

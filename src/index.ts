@@ -8,7 +8,7 @@ import { loadConfig } from './config.js';
 import { SqliteSessionStore } from './sessions/store.js';
 import { FakeRunnerFactory } from './runner/fake.js';
 import { DockerRunnerFactory } from './runner/docker.js';
-import type { RunnerFactory } from './runner/types.js';
+import type { RunnerFactory, VolumeReaper } from './runner/types.js';
 import type { SlackClientLike } from './slack/responder.js';
 import { buildGateway } from './app.js';
 import { BotAccountBroker } from './broker/bot-account.js';
@@ -87,10 +87,13 @@ async function main(): Promise<void> {
   let baseFactory: RunnerFactory;
   let broker: CredentialBroker;
   let gitNodes: GitNodeExecutor;
+  // Hold the concrete docker factory in a separate reference so it can be used as a
+  // VolumeReaper (baseFactory is typed RunnerFactory which doesn't have that method).
+  let volumeReaper: VolumeReaper | undefined;
   const oc = config.oneshot;
   if (config.RUNNER_BACKEND === 'docker') {
     const dc = config.docker;
-    baseFactory = new DockerRunnerFactory({
+    const dockerFactory = new DockerRunnerFactory({
       image: dc.RUNNER_IMAGE,
       readyTimeoutMs: dc.RUNNER_READY_TIMEOUT_MS,
       turnTimeoutMs: dc.RUNNER_TURN_TIMEOUT_MS,
@@ -99,6 +102,8 @@ async function main(): Promise<void> {
       cpus: dc.RUNNER_CPUS,
       pidsLimit: dc.RUNNER_PIDS_LIMIT,
     });
+    baseFactory = dockerFactory;
+    volumeReaper = dockerFactory;
     console.log(`[gateway] using DockerRunnerFactory (image=${dc.RUNNER_IMAGE})`);
 
     const botTokens = new Map<GitHost, string>();
@@ -116,6 +121,7 @@ async function main(): Promise<void> {
     );
   } else {
     baseFactory = new FakeRunnerFactory();
+    // No volumeReaper for fake backend — GC stays off (no real volumes).
     console.log('[gateway] using FakeRunnerFactory');
 
     broker = new FakeBroker();
@@ -134,6 +140,9 @@ async function main(): Promise<void> {
     idleTimeoutMs: config.IDLE_TIMEOUT_MS,
     gateTimeoutMs: config.GATE_TIMEOUT_MS,
     botUserId,
+    ...(volumeReaper !== undefined && { volumeReaper }),
+    volumeTtlMs: config.VOLUME_TTL_MS,
+    gcIntervalMs: config.VOLUME_GC_INTERVAL_MS,
   });
 
   await app.start();

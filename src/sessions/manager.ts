@@ -1,4 +1,4 @@
-import type { RunnerFactory, SessionRunner, GateResume } from '../runner/types.js';
+import type { RunnerFactory, SessionRunner, GateResume, VolumeReaper } from '../runner/types.js';
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
 import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
 import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
@@ -51,6 +51,11 @@ export class SessionManager {
   private readonly factory: RunnerFactory;
   private readonly slack: SlackClientLike;
   private readonly store: SessionStore;
+  private readonly volumeReaper: VolumeReaper | undefined;
+  private readonly volumeTtlMs: number;
+  private readonly gcIntervalMs: number;
+  private gcTimer: ReturnType<typeof setInterval> | null = null;
+  private gcRunning = false;
 
   constructor(opts: {
     idleTimeoutMs: number;
@@ -60,12 +65,33 @@ export class SessionManager {
     factory: RunnerFactory;
     slack: SlackClientLike;
     store?: SessionStore;
+    /** When provided, starts an unref'd GC interval that reaps volumes for idle sessions. */
+    volumeReaper?: VolumeReaper;
+    /** TTL for volume GC eligibility in ms (default 7 days). */
+    volumeTtlMs?: number;
+    /** Interval for the GC sweep in ms (default 1 hour). */
+    gcIntervalMs?: number;
   }) {
     this.idleTimeoutMs = opts.idleTimeoutMs;
     this.gateTimeoutMs = opts.gateTimeoutMs ?? 15 * 60 * 1000;
     this.factory = opts.factory;
     this.slack = opts.slack;
     this.store = opts.store ?? new NoopSessionStore();
+    this.volumeReaper = opts.volumeReaper;
+    this.volumeTtlMs = opts.volumeTtlMs ?? 7 * 24 * 60 * 60 * 1000;
+    this.gcIntervalMs = opts.gcIntervalMs ?? 60 * 60 * 1000;
+
+    // Start the GC timer only when a reaper is provided.
+    if (this.volumeReaper !== undefined) {
+      const timer = setInterval(() => {
+        void this.runVolumeGc();
+      }, this.gcIntervalMs);
+      // Allow the process to exit even if this timer is pending
+      if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+        (timer as { unref(): void }).unref();
+      }
+      this.gcTimer = timer;
+    }
   }
 
   /**
@@ -551,6 +577,54 @@ export class SessionManager {
     }
   }
 
+  /** Sweep for volumes whose sessions have been idle past `volumeTtlMs`. Best-effort:
+   *  a single row's failure never aborts the loop. Skips live in-memory sessions.
+   *  The GC interval calls this; also invoked directly by tests for determinism. */
+  async runVolumeGc(): Promise<void> {
+    if (this.gcRunning) return;
+    this.gcRunning = true;
+    try {
+      const cutoff = Date.now() - this.volumeTtlMs;
+      const rows = this.store.listExpired(cutoff);
+      for (const row of rows) {
+        // Skip any session that still has a live in-memory entry (container in use).
+        if (this.sessions.has(row.session_key)) continue;
+        try {
+          // volumeReaper is always defined when runVolumeGc is called (the interval is
+          // only started when volumeReaper !== undefined), but the type is optional so
+          // we guard for the compiler.
+          const reaper = this.volumeReaper;
+          if (reaper === undefined) continue;
+          const ok = await reaper.removeVolumeForSession(row.session_key);
+          // Re-check liveness AFTER the await: a reply could have recreated the session
+          // (and a fresh container/volume) while the rm was in flight. If so, leave its
+          // row alone rather than deleting a now-live session's index entry (TOCTOU).
+          if (ok && !this.sessions.has(row.session_key)) {
+            this.store.deleteSession(row.session_key);
+            console.log(`[session] gc removed volume + row: ${row.session_key}`);
+          } else if (ok) {
+            console.log(`[session] gc skipped row delete — session re-created mid-sweep: ${row.session_key}`);
+          } else {
+            console.log(`[session] gc volume rm failed, will retry next sweep: ${row.session_key}`);
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[session] gc error for ${row.session_key}: ${msg}`);
+        }
+      }
+    } finally {
+      this.gcRunning = false;
+    }
+  }
+
+  /** Stop the GC interval (called from disposeAll on clean shutdown). */
+  stopVolumeGc(): void {
+    if (this.gcTimer !== null) {
+      clearInterval(this.gcTimer);
+      this.gcTimer = null;
+    }
+  }
+
   /** For testing: check if a session key exists */
   has(key: string): boolean {
     return this.sessions.has(key);
@@ -563,6 +637,7 @@ export class SessionManager {
 
   /** Dispose all sessions (cleanup) */
   async disposeAll(): Promise<void> {
+    this.stopVolumeGc();
     const keys = Array.from(this.sessions.keys());
     for (const key of keys) {
       await this.reapSession(key);

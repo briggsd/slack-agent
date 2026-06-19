@@ -137,6 +137,69 @@ describe('SqliteSessionStore', () => {
   it('setStatus is a no-op for unknown keys (does not throw)', () => {
     expect(() => store.setStatus('GHOST', 'reaped')).not.toThrow();
   });
+
+  it('listExpired returns only rows strictly older than the cutoff', () => {
+    // Insert three rows with explicit last_active_at values
+    const base = {
+      team_id: null,
+      user_id: null,
+      channel_id: 'C',
+      thread_ts: 'T',
+      profile_id: 'conversational',
+      created_at: 1_000,
+      status: 'active' as const,
+    };
+    store.recordSession({ ...base, session_key: 'OLD1', last_active_at: 1_000 });
+    store.recordSession({ ...base, session_key: 'OLD2', last_active_at: 2_000 });
+    store.recordSession({ ...base, session_key: 'FRESH', last_active_at: 5_000 });
+
+    // Cutoff = 3_000: rows with last_active_at < 3_000 → OLD1, OLD2
+    const expired = store.listExpired(3_000);
+    const keys = expired.map((r) => r.session_key);
+    expect(keys).toContain('OLD1');
+    expect(keys).toContain('OLD2');
+    expect(keys).not.toContain('FRESH');
+  });
+
+  it('listExpired boundary: row equal to cutoff is NOT returned (strictly older)', () => {
+    store.recordSession({
+      session_key: 'BOUNDARY',
+      team_id: null,
+      user_id: null,
+      channel_id: 'C',
+      thread_ts: 'T',
+      profile_id: 'conversational',
+      created_at: 3_000,
+      last_active_at: 3_000,
+      status: 'active',
+    });
+
+    // cutoff = 3_000: last_active_at = 3_000 is NOT strictly less than 3_000
+    const expired = store.listExpired(3_000);
+    expect(expired.map((r) => r.session_key)).not.toContain('BOUNDARY');
+  });
+
+  it('deleteSession removes the row (get returns undefined after)', () => {
+    store.recordSession({
+      session_key: 'TO_DEL',
+      team_id: null,
+      user_id: null,
+      channel_id: 'C',
+      thread_ts: 'T',
+      profile_id: 'conversational',
+      created_at: 1_000,
+      last_active_at: 1_000,
+      status: 'active',
+    });
+
+    expect(store.get('TO_DEL')).toBeDefined();
+    store.deleteSession('TO_DEL');
+    expect(store.get('TO_DEL')).toBeUndefined();
+  });
+
+  it('deleteSession is a no-op for unknown keys (does not throw)', () => {
+    expect(() => store.deleteSession('GHOST_DEL')).not.toThrow();
+  });
 });
 
 // ─── SqliteSessionStore — audit_events round-trip ────────────────────────────
