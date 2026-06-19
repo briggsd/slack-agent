@@ -1,14 +1,14 @@
-import type { OneShotNode, OneShotContext, OneShotDeps } from '../context.js';
+import type { OneShotAgenticNode, OneShotAgenticContext, OneShotDeps } from '../context.js';
 import type { RunnerEvent } from '../../runner/types.js';
 import { runAgenticTurn } from './agentic-turn.js';
 import { checkFailed } from '../classify.js';
 
 const MAX_FEEDBACK_CHARS = 1500;
 
-export const implementNode: OneShotNode = {
+export const implementNode: OneShotAgenticNode = {
   name: 'implement',
   kind: 'agentic',
-  async *run(ctx: OneShotContext, deps: OneShotDeps): AsyncGenerator<RunnerEvent> {
+  async *run(ctx: OneShotAgenticContext, deps: OneShotDeps): AsyncGenerator<RunnerEvent> {
     yield { type: 'status', text: 'implementing…' };
 
     // Gather results from a prior cycle's failing checks (undefined on first attempt)
