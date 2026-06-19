@@ -132,6 +132,7 @@ async function main(): Promise<void> {
     factory,
     store,
     idleTimeoutMs: config.IDLE_TIMEOUT_MS,
+    gateTimeoutMs: config.GATE_TIMEOUT_MS,
     botUserId,
   });
 

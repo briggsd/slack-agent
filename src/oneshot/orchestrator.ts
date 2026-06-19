@@ -22,6 +22,7 @@ export class OneShotOrchestrator implements SessionRunner {
   private readonly gitNodes: GitNodeExecutor;
   private readonly taskId: string;
   private readonly volume: string;
+  private readonly blueprintId: string;
 
   constructor(
     inner: SessionRunner,
@@ -29,6 +30,7 @@ export class OneShotOrchestrator implements SessionRunner {
     gitNodes: GitNodeExecutor,
     sessionKey: string,
     taskId?: string,
+    blueprintId: string = REPO_ONESHOT_PROFILE_ID,
   ) {
     this.inner = inner;
     this.broker = broker;
@@ -36,6 +38,7 @@ export class OneShotOrchestrator implements SessionRunner {
     this.volume = volumeNameFor(sessionKey);
     // Mirror docker.ts correlation id style
     this.taskId = taskId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    this.blueprintId = blueprintId;
   }
 
   async *send(message: string): RunnerStream {
@@ -108,7 +111,7 @@ export class OneShotOrchestrator implements SessionRunner {
       // unknown id). If you add cleanup/metrics to the catch, mirror it into the
       // node path too — it will not run for node failures.
       // `yield*` (not `for await`) forwards a gate resume value back into the blueprint.
-      yield* runBlueprint(blueprintFor(REPO_ONESHOT_PROFILE_ID), ctx, deps);
+      yield* runBlueprint(blueprintFor(this.blueprintId), ctx, deps);
       await revokeOnce();
     } catch (err: unknown) {
       await revokeOnce();

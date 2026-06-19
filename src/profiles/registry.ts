@@ -7,21 +7,33 @@
  *
  * M5 S02 adds `mode` to distinguish conversational sessions from one-shot
  * repo tasks.
+ *
+ * M6 S02 adds `planGate` to declare whether the profile's one-shot blueprint
+ * includes the plan-approval gate (the gate node itself lands in S03).
  */
 
 export interface Profile {
   id: string;
   label: string;
   mode: 'conversational' | 'one-shot';
+  /**
+   * Declares that the profile's one-shot blueprint is the supervised variant —
+   * it will pause after planning for human approval before implementing. The gate
+   * node that actually pauses is inserted in M6 S03; until then this is a marker
+   * only and no run parks on it.
+   */
+  planGate: boolean;
 }
 
 export const PROFILES: ReadonlyMap<string, Profile> = new Map([
-  ['conversational', { id: 'conversational', label: 'Conversational', mode: 'conversational' }],
-  ['repo-oneshot', { id: 'repo-oneshot', label: 'Repo (one-shot)', mode: 'one-shot' }],
+  ['conversational', { id: 'conversational', label: 'Conversational', mode: 'conversational', planGate: false }],
+  ['repo-oneshot', { id: 'repo-oneshot', label: 'Repo (one-shot)', mode: 'one-shot', planGate: false }],
+  ['supervised-repo-oneshot', { id: 'supervised-repo-oneshot', label: 'Repo (supervised one-shot)', mode: 'one-shot', planGate: true }],
 ]);
 
 export const DEFAULT_PROFILE_ID = 'conversational';
 export const REPO_ONESHOT_PROFILE_ID = 'repo-oneshot';
+export const SUPERVISED_REPO_ONESHOT_PROFILE_ID = 'supervised-repo-oneshot';
 
 /**
  * Resolve a profile by id.

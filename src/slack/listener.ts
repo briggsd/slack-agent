@@ -1,6 +1,6 @@
 import type { SessionManager } from '../sessions/manager.js';
 import type { SlackClientLike } from './responder.js';
-import { DEFAULT_PROFILE_ID, REPO_ONESHOT_PROFILE_ID } from '../profiles/registry.js';
+import { DEFAULT_PROFILE_ID, REPO_ONESHOT_PROFILE_ID, SUPERVISED_REPO_ONESHOT_PROFILE_ID } from '../profiles/registry.js';
 
 export interface HandlerDeps {
   sessions: SessionManager;
@@ -13,16 +13,28 @@ function stripMention(text: string, botUserId: string): string {
   return text.replace(new RegExp(`^<@${botUserId}>\\s*`, 'u'), '').trim();
 }
 
+export interface OneShotTrigger {
+  profileId: string;
+  text: string;
+}
+
 /**
- * Recognize the one-shot trigger: a leading `task` keyword (case-insensitive)
- * followed by the one-shot task text. Returns the task text with the keyword
- * removed, or null if the message is not a one-shot trigger.
+ * Recognize the one-shot trigger: a leading `task` or `exec` keyword
+ * (case-insensitive) followed by the one-shot task text.
+ * - `task` → supervised-repo-oneshot (gated, plan-approval required)
+ * - `exec` → repo-oneshot (fire-and-forget, today's default behaviour)
+ * Returns null if the message is not a one-shot trigger.
  */
-export function parseOneShotTrigger(stripped: string): string | null {
-  const match = /^task\s+(.+)$/is.exec(stripped);
+export function parseOneShotTrigger(stripped: string): OneShotTrigger | null {
+  const match = /^(task|exec)\s+(.+)$/is.exec(stripped);
   if (match === null) return null;
-  const remainder = match[1]?.trim() ?? '';
-  return remainder !== '' ? remainder : null;
+  const keyword = (match[1] ?? '').toLowerCase();
+  const text = match[2]?.trim() ?? '';
+  if (text === '') return null;
+  const profileId = keyword === 'task'
+    ? SUPERVISED_REPO_ONESHOT_PROFILE_ID
+    : REPO_ONESHOT_PROFILE_ID;
+  return { profileId, text };
 }
 
 /** Shape of the event body we care about for app_mention */
@@ -81,9 +93,9 @@ export async function handleMention(
   const threadTs = ev.thread_ts ?? ev.ts;
   const sessionKey = `${team}:${ev.channel}:${threadTs}`;
   const stripped = stripMention(ev.text, deps.botUserId);
-  const oneShot = parseOneShotTrigger(stripped);
-  const profileId = oneShot !== null ? REPO_ONESHOT_PROFILE_ID : DEFAULT_PROFILE_ID;
-  const message = oneShot ?? stripped;
+  const trigger = parseOneShotTrigger(stripped);
+  const profileId = trigger?.profileId ?? DEFAULT_PROFILE_ID;
+  const message = trigger?.text ?? stripped;
 
   console.log(`[listener] mention → session=${sessionKey}`);
 

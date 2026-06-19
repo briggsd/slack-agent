@@ -1,10 +1,10 @@
 /**
- * Unit tests for parseCheckCmds (src/config.ts).
+ * Unit tests for parseCheckCmds and GATE_TIMEOUT_MS (src/config.ts).
  *
  * Purely offline — no process.env mutation, no network, no Docker.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { parseCheckCmds } from '../src/config.js';
 
 describe('parseCheckCmds', () => {
@@ -126,5 +126,46 @@ describe('parseCheckCmds', () => {
     for (const input of weirdInputs) {
       expect(() => parseCheckCmds(input)).not.toThrow();
     }
+  });
+});
+
+describe('GATE_TIMEOUT_MS config', () => {
+  // loadConfig() reads process.env directly and requires the two Slack tokens.
+  // These tests stub the whole env (tokens + the var under test), call the real
+  // loadConfig(), then restore — so they exercise the actual config path rather
+  // than re-asserting arithmetic.
+  const TOUCHED = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'GATE_TIMEOUT_MS'] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of TOUCHED) saved[key] = process.env[key];
+    process.env['SLACK_BOT_TOKEN'] = 'xoxb-test';
+    process.env['SLACK_APP_TOKEN'] = 'xapp-test';
+  });
+
+  afterEach(() => {
+    for (const key of TOUCHED) {
+      const val = saved[key];
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  });
+
+  it('defaults GATE_TIMEOUT_MS to 15 minutes (900000 ms) when env var is absent', async () => {
+    delete process.env['GATE_TIMEOUT_MS'];
+    const { loadConfig } = await import('../src/config.js');
+    expect(loadConfig().GATE_TIMEOUT_MS).toBe(15 * 60 * 1000);
+  });
+
+  it('reads GATE_TIMEOUT_MS from the environment when set', async () => {
+    process.env['GATE_TIMEOUT_MS'] = '300000';
+    const { loadConfig } = await import('../src/config.js');
+    expect(loadConfig().GATE_TIMEOUT_MS).toBe(300_000);
+  });
+
+  it('rejects a non-numeric GATE_TIMEOUT_MS', async () => {
+    process.env['GATE_TIMEOUT_MS'] = 'not-a-number';
+    const { loadConfig } = await import('../src/config.js');
+    expect(() => loadConfig()).toThrow(/GATE_TIMEOUT_MS/);
   });
 });
