@@ -147,10 +147,14 @@ thread. Nothing is written until you respond in-thread:
 
 **`exec` — fire-and-forget.** No gate; the plan flows straight into implementation.
 
-> **Heads-up:** the gate is *supervision*, not authorization — any participant in
-> the thread can currently approve, cancel, or redirect a run, and any user who can
-> @mention the bot can start one. Per-user authorization is still in progress. Do
-> not configure a real `GITHUB_BOT_TOKEN` in a broadly-accessible workspace yet.
+> **Heads-up:** the gate is *supervision*, not an invocation gate. Only the user who
+> started the thread can approve, cancel, or redirect that run (requestor-only); a
+> reply from anyone else is rejected. But anyone who can @mention the bot can still
+> *start* a run — spending your API budget, with no per-user limits or spend caps yet.
+> The real control is downstream: every run ends at "open a PR", which
+> a human reviews and merges on GitHub — the bot never merges. So a real
+> `GITHUB_BOT_TOKEN` is safe to the extent you trust the branch-protection and review
+> settings on the repos the token covers.
 
 One-shot is fully faked under `RUNNER_BACKEND=fake` (a stub PR link, no real git),
 so it only touches real repos under `RUNNER_BACKEND=docker` with a
