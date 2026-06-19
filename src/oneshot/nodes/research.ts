@@ -1,11 +1,11 @@
-import type { OneShotNode, OneShotContext, OneShotDeps } from '../context.js';
+import type { OneShotAgenticNode, OneShotAgenticContext, OneShotDeps } from '../context.js';
 import type { RunnerEvent } from '../../runner/types.js';
 import { runAgenticTurn } from './agentic-turn.js';
 
-export const researchNode: OneShotNode = {
+export const researchNode: OneShotAgenticNode = {
   name: 'research',
   kind: 'agentic',
-  async *run(ctx: OneShotContext, deps: OneShotDeps): AsyncGenerator<RunnerEvent> {
+  async *run(ctx: OneShotAgenticContext, deps: OneShotDeps): AsyncGenerator<RunnerEvent> {
     yield { type: 'status', text: 'researching…' };
 
     const prompt =
