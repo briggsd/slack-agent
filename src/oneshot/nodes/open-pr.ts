@@ -60,6 +60,8 @@ export const openPrNode: OneShotNode = {
     });
 
     ctx.prUrl = url;
-    yield { type: 'text', text: `Opened PR: ${url}` };
+    // Yield the gateway-internal pr_opened event (not a protocol/wire event). The gateway's
+    // drain loop handles it: posts "Opened PR: <url>" to Slack AND records an audit action.
+    yield { type: 'pr_opened', url };
   },
 };

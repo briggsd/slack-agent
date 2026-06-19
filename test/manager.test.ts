@@ -15,6 +15,7 @@ import type {
   SessionRow,
   NewSessionRow,
   SessionStatus,
+  AuditEvent,
 } from '../src/sessions/store.js';
 import { FakeSlackClient } from './responder.test.js';
 
@@ -48,6 +49,7 @@ class GateRunnerFactory implements RunnerFactory {
 /** A store you can seed with one row, for exercising the rehydrate path. */
 class SeededStore implements SessionStore {
   private rows = new Map<string, SessionRow>();
+  public audits: AuditEvent[] = [];
   seed(row: SessionRow): void {
     this.rows.set(row.session_key, row);
   }
@@ -57,6 +59,8 @@ class SeededStore implements SessionStore {
   get(key: string): SessionRow | undefined {
     return this.rows.get(key);
   }
+  recordAudit(event: AuditEvent): void { this.audits.push(event); }
+  getAuditEvents(_sessionKey: string): AuditEvent[] { return []; }
   close(): void {}
 }
 
@@ -665,3 +669,289 @@ describe('SessionManager — abandoned event', () => {
     expect(r.tailRan).toBe(false);
   });
 });
+
+// ─── SessionManager — audit emission ─────────────────────────────────────────
+
+/**
+ * A SessionStore fake that captures audit events for assertion. Also captures
+ * recordSession calls (to verify the session was persisted).
+ */
+class CapturingStore implements SessionStore {
+  public audits: AuditEvent[] = [];
+  private rows = new Map<string, SessionRow>();
+
+  recordSession(row: NewSessionRow): void {
+    this.rows.set(row.session_key, {
+      ...row,
+      harness_version: null,
+      sdk_session_id: null,
+      volume_name: null,
+    });
+  }
+  touch(_key: string, _atMs: number): void {}
+  setStatus(key: string, status: SessionStatus): void {
+    const r = this.rows.get(key);
+    if (r !== undefined) r.status = status;
+  }
+  get(key: string): SessionRow | undefined {
+    return this.rows.get(key);
+  }
+  recordAudit(event: AuditEvent): void {
+    this.audits.push(event);
+  }
+  getAuditEvents(sessionKey: string): AuditEvent[] {
+    return this.audits.filter((a) => a.session_key === sessionKey);
+  }
+  close(): void {}
+}
+
+/** A runner that yields a `pr_opened` event so the drain loop handles it. */
+class PrOpenedRunner implements SessionRunner {
+  constructor(readonly sessionKey: string) {}
+  async *send(_m: string): RunnerStream {
+    yield { type: 'status', text: 'opening PR…' };
+    yield { type: 'pr_opened', url: 'http://x/pr/1' };
+  }
+  async dispose(): Promise<void> {}
+}
+
+describe('SessionManager — audit emission', () => {
+  it('emits a lifecycle/created event when a new session is created', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory();
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const created = store.audits.filter(
+      (a) => a.kind === 'lifecycle' && a.tool === 'session' && a.result === 'created',
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0]?.team_id).toBe('TEAM');
+    expect(created[0]?.user_id).toBe('U1');
+    expect(created[0]?.session_key).toBe('TEAM:C:T');
+    // Content must never leak into audit fields
+    expect(created[0]?.summary).toBeNull();
+    expect(created[0]?.reasoning).toBeNull();
+  });
+
+  it('emits approval/resolved (requestor) vs approval/rejected_non_requestor (bystander), no content leaked', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new GateRunnerFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'task github:a/b do x',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // A bystander tries to approve — must record rejected_non_requestor.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-OTHER',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const rejected = store.audits.filter((a) => a.result === 'rejected_non_requestor');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.kind).toBe('approval');
+    expect(rejected[0]?.tool).toBe('plan-gate');
+    expect(rejected[0]?.user_id).toBe('U-OTHER'); // the replier, not the requestor
+    // Content must not leak — reply text ('approve') must not appear in any field.
+    expect(rejected[0]?.summary).toBeNull();
+    expect(rejected[0]?.reasoning).toBeNull();
+    const auditJson = JSON.stringify(rejected[0]);
+    expect(auditJson).not.toContain('approve');
+
+    // Now the requestor resolves it — must record resolved.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const resolved = store.audits.filter((a) => a.result === 'resolved');
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]?.kind).toBe('approval');
+    expect(resolved[0]?.user_id).toBe('U-REQ');
+    // Content must not leak — reply text must not appear.
+    const resolvedJson = JSON.stringify(resolved[0]);
+    expect(resolvedJson).not.toContain('approve');
+  });
+
+  it('emits correction/cancelled when a cancel reply abandons the run', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    let runner: AbandonRunnerForAudit | null = null;
+    const factory: RunnerFactory = {
+      create: async (key) => {
+        runner = new AbandonRunnerForAudit(key);
+        return runner;
+      },
+    };
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, gateTimeoutMs: 60_000, factory, slack, store });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'task github:a/b do x',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'cancel',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const cancelled = store.audits.filter((a) => a.result === 'cancelled');
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0]?.kind).toBe('correction');
+    expect(cancelled[0]?.tool).toBe('plan-gate');
+    expect(cancelled[0]?.user_id).toBe('U-REQ');
+    // Content must not leak — raw reply text must not appear in free-text fields.
+    // ('cancelled' in result is a hardcoded status label, not user content.)
+    expect(cancelled[0]?.summary).toBeNull();
+    expect(cancelled[0]?.reasoning).toBeNull();
+    // The reply message text itself ('cancel') must not appear in summary or reasoning.
+    expect(cancelled[0]?.summary).not.toBe('cancel');
+    expect(cancelled[0]?.reasoning).not.toBe('cancel');
+
+    expect(runner).not.toBeNull();
+  });
+
+  it('emits action/open-pr when pr_opened flows, and placeholder shows "Opened PR:"', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory: RunnerFactory = {
+      create: async (key) => new PrOpenedRunner(key),
+    };
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'task github:a/b do x',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Audit event recorded for the PR.
+    const prAudits = store.audits.filter((a) => a.kind === 'action' && a.tool === 'open-pr');
+    expect(prAudits).toHaveLength(1);
+    expect(prAudits[0]?.result).toBe('opened');
+    expect(prAudits[0]?.summary).toBe('http://x/pr/1'); // URL is metadata, not message content
+    expect(prAudits[0]?.reasoning).toBeNull();
+    expect(prAudits[0]?.cost_tokens).toBeNull();
+
+    // Slack placeholder must show "Opened PR: <url>" (the smoke-harness contract).
+    expect(slack.updates.some((u) => u.text.includes('Opened PR:'))).toBe(true);
+    expect(slack.updates.some((u) => u.text.includes('http://x/pr/1'))).toBe(true);
+  });
+
+  it('emits a lifecycle/reaped event when a session is reaped', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory();
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20)); // let the turn drain so reap isn't skipped
+    await manager.disposeAll(); // reaps the (now idle) session deterministically
+
+    const reaped = store.audits.filter(
+      (a) => a.kind === 'lifecycle' && a.tool === 'session' && a.result === 'reaped',
+    );
+    expect(reaped).toHaveLength(1);
+    expect(reaped[0]?.team_id).toBe('TEAM');
+    expect(reaped[0]?.user_id).toBe('U1');
+    expect(reaped[0]?.summary).toBeNull();
+  });
+
+  it('rehydrate emits lifecycle/rehydrated (not a second created) with the stored identity', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory();
+    // Seed an evicted session's row; no in-memory session exists, so the reply rehydrates.
+    store.recordSession({
+      session_key: 'TEAM:C:T',
+      team_id: 'TEAM',
+      user_id: 'U-ORIG',
+      channel_id: 'C',
+      thread_ts: 'T',
+      profile_id: 'supervised-repo-oneshot',
+      created_at: 0,
+      last_active_at: 0,
+      status: 'active',
+    });
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    // The rehydrating reply is from U-OTHER, but identity must come from the stored row.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'continue',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-OTHER',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const lifecycle = store.audits.filter((a) => a.kind === 'lifecycle' && a.tool === 'session');
+    // Exactly one lifecycle event, and it is 'rehydrated' — a rehydration must NOT count as a create.
+    expect(lifecycle.map((a) => a.result)).toEqual(['rehydrated']);
+    expect(lifecycle[0]?.user_id).toBe('U-ORIG'); // stored requestor, not the replier
+    expect(lifecycle[0]?.team_id).toBe('TEAM');
+  });
+});
+
+/** Runner used by the cancel-audit test above (same shape as AbandonRunner). */
+class AbandonRunnerForAudit implements SessionRunner {
+  public finallyRan = false;
+  constructor(readonly sessionKey: string) {}
+  async *send(_m: string): RunnerStream {
+    try {
+      const resume = yield { type: 'await_approval', prompt: 'PLAN' };
+      if (resume?.kind === 'reply' && resume.text === 'cancel') {
+        yield { type: 'abandoned', reason: 'cancelled' };
+      }
+      yield { type: 'text', text: 'should not run' };
+    } finally {
+      this.finallyRan = true;
+    }
+  }
+  async dispose(): Promise<void> {}
+}

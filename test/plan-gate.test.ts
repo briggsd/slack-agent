@@ -230,7 +230,7 @@ describe('supervised one-shot orchestrator', () => {
     expect(gitNodes.branches).toHaveLength(1);
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.changeRequests).toHaveLength(1);
-    expect(events.some((e) => e.type === 'text' && e.text.includes('example.test/pr/9'))).toBe(true);
+    expect(events.some((e) => e.type === 'pr_opened' && e.url.includes('example.test/pr/9'))).toBe(true);
     expect(broker.revokes).toHaveLength(1);
   });
 

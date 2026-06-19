@@ -161,11 +161,13 @@ describe('OneShotOrchestrator — happy path', () => {
     expect(testIdx).toBeLessThan(pushIdx);
     expect(pushIdx).toBeLessThan(prIdx);
 
-    // Terminal text contains the PR url
-    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
-    expect(textEvents).toHaveLength(1);
-    expect(textEvents[0]?.text).toContain('https://example.test/pr/42');
-    expect(textEvents[0]?.text).toContain('Opened PR:');
+    // pr_opened event carries the PR url (the node no longer yields a text event)
+    const prEvents = events.filter((e): e is { type: 'pr_opened'; url: string } => e.type === 'pr_opened');
+    expect(prEvents).toHaveLength(1);
+    expect(prEvents[0]?.url).toBe('https://example.test/pr/42');
+
+    // No text events from open-pr (it now yields pr_opened)
+    expect(events.filter((e) => e.type === 'text')).toHaveLength(0);
 
     // No error events
     expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
@@ -303,11 +305,10 @@ describe('OneShotOrchestrator — non-gating checks', () => {
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.changeRequests).toHaveLength(1);
 
-    // Terminal text contains PR url
-    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
-    expect(textEvents).toHaveLength(1);
-    expect(textEvents[0]?.text).toContain('Opened PR:');
-    expect(textEvents[0]?.text).toContain('https://example.test/pr/99');
+    // pr_opened event carries the PR url (the node no longer yields a text event)
+    const prEvents = events.filter((e): e is { type: 'pr_opened'; url: string } => e.type === 'pr_opened');
+    expect(prEvents).toHaveLength(1);
+    expect(prEvents[0]?.url).toBe('https://example.test/pr/99');
 
     // No error events (the failed lint is surfaced as a status, not an error)
     expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
@@ -648,9 +649,9 @@ describe('OneShotOrchestrator — revoke resilience', () => {
     const events = await drain(orch.send('github:acme/widgets add x'));
 
     // Success still surfaces despite the revoke throwing…
-    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
-    expect(textEvents).toHaveLength(1);
-    expect(textEvents[0]?.text).toContain('https://example.test/pr/7');
+    const prEvents = events.filter((e): e is { type: 'pr_opened'; url: string } => e.type === 'pr_opened');
+    expect(prEvents).toHaveLength(1);
+    expect(prEvents[0]?.url).toContain('https://example.test/pr/7');
     expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
     // …and revoke was attempted exactly once (the guard prevents a double call).
     expect(broker.revokeCalls).toBe(1);
@@ -739,11 +740,10 @@ describe('OneShotOrchestrator — transient retry then success', () => {
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.changeRequests).toHaveLength(1);
 
-    // Terminal text contains PR url
-    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
-    expect(textEvents).toHaveLength(1);
-    expect(textEvents[0]?.text).toContain('Opened PR:');
-    expect(textEvents[0]?.text).toContain('https://example.test/pr/retry');
+    // pr_opened event carries the PR url (the node no longer yields a text event)
+    const prEvents = events.filter((e): e is { type: 'pr_opened'; url: string } => e.type === 'pr_opened');
+    expect(prEvents).toHaveLength(1);
+    expect(prEvents[0]?.url).toBe('https://example.test/pr/retry');
 
     // No error events
     expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
@@ -790,10 +790,10 @@ describe('OneShotOrchestrator — permanent failure: no retry, PR still opens', 
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.changeRequests).toHaveLength(1);
 
-    // Terminal text contains PR url
-    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
-    expect(textEvents).toHaveLength(1);
-    expect(textEvents[0]?.text).toContain('Opened PR:');
+    // pr_opened event carries the PR url (the node no longer yields a text event)
+    const prEvents = events.filter((e): e is { type: 'pr_opened'; url: string } => e.type === 'pr_opened');
+    expect(prEvents).toHaveLength(1);
+    expect(prEvents[0]?.url).toBeDefined();
 
     // No error events
     expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
@@ -830,10 +830,10 @@ describe('OneShotOrchestrator — exhaustion: implement runs maxAttempts times, 
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.changeRequests).toHaveLength(1);
 
-    // Terminal text contains PR url
-    const textEvents = events.filter((e): e is { type: 'text'; text: string } => e.type === 'text');
-    expect(textEvents).toHaveLength(1);
-    expect(textEvents[0]?.text).toContain('Opened PR:');
+    // pr_opened event carries the PR url (the node no longer yields a text event)
+    const prEvents = events.filter((e): e is { type: 'pr_opened'; url: string } => e.type === 'pr_opened');
+    expect(prEvents).toHaveLength(1);
+    expect(prEvents[0]?.url).toBeDefined();
 
     // No error events
     expect(events.filter((e) => e.type === 'error')).toHaveLength(0);

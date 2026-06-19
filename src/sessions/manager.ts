@@ -2,8 +2,11 @@ import type { RunnerFactory, SessionRunner, GateResume } from '../runner/types.j
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
 import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
 import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
-import type { SessionStore } from './store.js';
+import type { SessionStore, AuditEvent } from './store.js';
 import { NoopSessionStore } from './store.js';
+
+/** Cap on an audit `summary` — metadata only, never a transcript (see {@link SessionManager.audit}). */
+const AUDIT_SUMMARY_MAX_CHARS = 512;
 
 export interface QueueItem {
   message: string;
@@ -27,6 +30,12 @@ interface Session {
    * when the creating event carried no user — fail-closed, so nobody can resolve it.
    */
   requestorUserId: string | undefined;
+  /**
+   * Slack team id sourced from the creating mention (or from the stored row on the
+   * rehydrate path). Carried on the session so audit events can tag the team without
+   * needing the original QueueItem. `undefined` when the creating event had no team.
+   */
+  teamId: string | undefined;
   /**
    * Set while a run is parked at an `await_approval` gate. The next thread reply
    * resolves it (with the reply text) instead of being enqueued as a new turn; a
@@ -70,8 +79,16 @@ export class SessionManager {
   /**
    * Returns an existing session or creates a new one (for app_mention).
    * profileId defaults to DEFAULT_PROFILE_ID when absent or unknown.
+   *
+   * `origin` tags the lifecycle audit event: a fresh mention is `'created'`, while the
+   * rehydrate path (an evicted session being rebuilt from the store) is `'rehydrated'`,
+   * so a rehydration does not inflate session-creation counts.
    */
-  private async getOrCreate(key: string, item: QueueItem): Promise<Session> {
+  private async getOrCreate(
+    key: string,
+    item: QueueItem,
+    origin: 'created' | 'rehydrated' = 'created',
+  ): Promise<Session> {
     const existing = this.sessions.get(key);
     if (existing !== undefined) {
       this.resetIdleTimer(existing);
@@ -88,6 +105,7 @@ export class SessionManager {
       draining: false,
       idleTimer: null,
       requestorUserId: item.userId,
+      teamId: item.teamId,
       pendingApproval: null,
     };
     this.sessions.set(key, session);
@@ -104,6 +122,16 @@ export class SessionManager {
       created_at: now,
       last_active_at: now,
       status: 'active',
+    });
+
+    // Audit: session created / rehydrated (lifecycle event, metadata only).
+    this.audit({
+      session_key: key,
+      team_id: item.teamId ?? null,
+      user_id: item.userId ?? null,
+      kind: 'lifecycle',
+      tool: 'session',
+      result: origin,
     });
 
     return session;
@@ -152,8 +180,18 @@ export class SessionManager {
           // Post a NEW threaded message (never an update() to the gate placeholder,
           // which must keep showing the plan + prompt for the requestor); ping the
           // requestor by name for accountability.
-          // TODO(M6 audit): emit an audit_events row for the rejected resolve attempt.
           console.log(`[session] gate reply from non-requestor ignored: ${session.key}`);
+
+          // Audit: non-requestor tried to resolve the gate (metadata only — no reply text).
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: item.userId ?? null,
+            kind: 'approval',
+            tool: 'plan-gate',
+            result: 'rejected_non_requestor',
+          });
+
           const who =
             session.requestorUserId !== undefined
               ? `<@${session.requestorUserId}>`
@@ -173,6 +211,17 @@ export class SessionManager {
           return true;
         }
         this.resetIdleTimer(session);
+
+        // Audit: requestor resolved the gate (metadata only — no reply text).
+        this.audit({
+          session_key: session.key,
+          team_id: session.teamId ?? null,
+          user_id: session.requestorUserId ?? null,
+          kind: 'approval',
+          tool: 'plan-gate',
+          result: 'resolved',
+        });
+
         session.pendingApproval.resolve({ kind: 'reply', text: item.message });
         return true;
       }
@@ -199,12 +248,13 @@ export class SessionManager {
       threadTs: item.threadTs,
       // Prefer stored profile so we honour what the session was originally created with.
       profileId: row.profile_id,
-      ...(item.teamId !== undefined && { teamId: item.teamId }),
+      // Source team_id from the stored row so audit events carry the correct team.
+      ...(row.team_id !== null && { teamId: row.team_id }),
       // Source the requestor from the STORED row, not the replying message, so gate
       // authz (M6 #22) stays bound to the original starter. Omitted when null →
       // fail-closed (no one can resolve a rehydrated gate with no recorded requestor).
       ...(row.user_id !== null && { userId: row.user_id }),
-    });
+    }, 'rehydrated');
     rehydrated.queue.push(item);
     void this.drain(rehydrated);
     return true;
@@ -239,6 +289,17 @@ export class SessionManager {
     }
     console.log(`[session] reaping idle session: ${key}`);
     this.store.setStatus(key, 'reaped');
+
+    // Audit: session reaped (lifecycle event, metadata only).
+    this.audit({
+      session_key: key,
+      team_id: session.teamId ?? null,
+      user_id: session.requestorUserId ?? null,
+      kind: 'lifecycle',
+      tool: 'session',
+      result: 'reaped',
+    });
+
     await session.runner.dispose();
   }
 
@@ -319,7 +380,36 @@ export class SessionManager {
                 placeholder,
                 `:no_entry_sign: Plan abandoned (${event.reason}) — nothing was pushed.`,
               );
+
+              // Audit: abandoned (metadata only — reason is 'cancelled' or 'timed out').
+              this.audit({
+                session_key: session.key,
+                team_id: session.teamId ?? null,
+                user_id: session.requestorUserId ?? null,
+                kind: event.reason === 'cancelled' ? 'correction' : 'approval',
+                tool: 'plan-gate',
+                result: event.reason === 'cancelled' ? 'cancelled' : 'timeout',
+              });
+
               break;
+            } else if (event.type === 'pr_opened') {
+              // Post the PR URL to Slack (same user-facing text as before the refactor).
+              await updatePlaceholder(
+                this.slack,
+                placeholder,
+                `Opened PR: ${event.url}`,
+              );
+
+              // Audit: PR opened (action event; PR URL is metadata, not message content).
+              this.audit({
+                session_key: session.key,
+                team_id: session.teamId ?? null,
+                user_id: session.requestorUserId ?? null,
+                kind: 'action',
+                tool: 'open-pr',
+                summary: event.url,
+                result: 'opened',
+              });
             } else if (event.type === 'error') {
               await updatePlaceholder(
                 this.slack,
@@ -381,6 +471,16 @@ export class SessionManager {
         `[session] gate parked with no requestor — only a timeout can resolve it: ${session.key}`,
       );
     }
+    // Audit: gate parked (approval requested, metadata only — no plan text).
+    this.audit({
+      session_key: session.key,
+      team_id: session.teamId ?? null,
+      user_id: session.requestorUserId ?? null,
+      kind: 'approval',
+      tool: 'plan-gate',
+      result: 'requested',
+    });
+
     // Register the parked state SYNCHRONOUSLY (the Promise executor runs now), before
     // any await — so a reply that arrives while the prompt is still being posted is
     // routed to the gate by enqueueExisting, not enqueued as a brand-new turn.
@@ -415,6 +515,40 @@ export class SessionManager {
       });
     }
     return result;
+  }
+
+  /**
+   * Best-effort audit write. Fills `ts` = Date.now() and wraps in a try/catch so a
+   * store error is logged and swallowed — never aborts the turn. Fields not supplied
+   * default to null (summary, reasoning, cost_tokens are a later slice).
+   *
+   * `summary` is length-capped as defense-in-depth: this is an action/cost trail, never
+   * a transcript, and the only value ever passed today is a PR URL (gateway-controlled).
+   * The cap bounds blast radius if a future caller is careless — it does not license
+   * putting message content here.
+   */
+  private audit(partial: Omit<AuditEvent, 'ts' | 'summary' | 'reasoning' | 'cost_tokens'> & {
+    summary?: string | null;
+    reasoning?: string | null;
+    cost_tokens?: number | null;
+  }): void {
+    const summary =
+      typeof partial.summary === 'string'
+        ? partial.summary.slice(0, AUDIT_SUMMARY_MAX_CHARS)
+        : partial.summary ?? null;
+    const event: AuditEvent = {
+      ...partial,
+      ts: Date.now(),
+      summary,
+      reasoning: partial.reasoning ?? null,
+      cost_tokens: partial.cost_tokens ?? null,
+    };
+    try {
+      this.store.recordAudit(event);
+    } catch (auditErr: unknown) {
+      const msg = auditErr instanceof Error ? auditErr.message : String(auditErr);
+      console.error(`[session] store.recordAudit failed for ${partial.session_key}: ${msg}`);
+    }
   }
 
   /** For testing: check if a session key exists */
