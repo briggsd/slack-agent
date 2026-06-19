@@ -147,14 +147,18 @@ thread. Nothing is written until you respond in-thread:
 
 **`exec` — fire-and-forget.** No gate; the plan flows straight into implementation.
 
-> **Heads-up:** the gate is *supervision*, not an invocation gate. Only the user who
-> started the thread can approve, cancel, or redirect that run (requestor-only); a
-> reply from anyone else is rejected. But anyone who can @mention the bot can still
-> *start* a run — spending your API budget, with no per-user limits or spend caps yet.
-> The real control is downstream: every run ends at "open a PR", which
-> a human reviews and merges on GitHub — the bot never merges. So a real
-> `GITHUB_BOT_TOKEN` is safe to the extent you trust the branch-protection and review
-> settings on the repos the token covers.
+> **Heads-up — who can start a credentialed run.** The gate is *supervision*, not an
+> invocation gate: only the thread's originator can approve/cancel/redirect a run
+> (requestor-only), but the gateway does **not** gate *who may start* one per-user.
+> Invocation is controlled **operationally, at Slack**: the bot only receives events
+> from channels it's a member of, so keep it in channels whose membership you trust
+> (ideally private) and out of `#general`. Anyone in a bot-occupied channel can start a
+> run — spending API budget (no spend caps yet) and opening a PR. That's an accepted
+> trade-off because the real control is downstream: every run ends at "open a PR", which
+> a human reviews and merges on GitHub — **the bot never merges**, and agent code only
+> ever runs inside the sandbox container, never on the host. So an unwanted PR is a
+> `gh pr close`, not an incident. A gateway channel/user allow-list is a possible future
+> tightening if channel trust isn't enough.
 
 One-shot is fully faked under `RUNNER_BACKEND=fake` (a stub PR link, no real git),
 so it only touches real repos under `RUNNER_BACKEND=docker` with a

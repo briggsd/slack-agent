@@ -249,8 +249,8 @@ container is ever executed on the host.
 
 | Area | Current state |
 |---|---|
-| **Access control** | None yet. Anyone in the workspace who can mention the bot spends your API budget — and can start a credentialed `task`/`exec` repo run against any repo the bot token covers. No per-user allowlist, rate limits, or spend caps. (M6, in progress.) |
-| **Plan gate is supervision, not an invocation gate** | A `task` run pauses for a human to approve the plan. Resolution is **requestor-only**: only the user who started the thread may approve, cancel, or revise it — a reply from anyone else is rejected with a notice, and it fails closed (no one resolves) when the requestor is unknown. It is supervision, not an *invocation* boundary: anyone who can mention the bot can still start a run. The real control is downstream — every run ends at *open a PR*, which a human reviews and merges on GitHub (the bot never merges), so a real `GITHUB_BOT_TOKEN` is safe to the extent you trust branch-protection and review on the repos the token covers. A broader invocation allow-list is still M6 work. |
+| **Access control (invocation)** | Gated **operationally, at Slack** — the bot only receives events from channels it is a member of, so channel membership is the invocation boundary: keep the bot in trusted (ideally private) channels and out of `#general`. The gateway intentionally does **not** add a per-user invocation allow-list (decided M6: the bot only opens PRs — never merges — and agent code runs only in the sandbox, so an unwanted PR is reversible; a gateway channel/user allow-list is a documented future tightening). **Spend caps / rate limits are still absent** (separate M6 work) — channel-scoping only coarsely limits who can burn API budget. |
+| **Plan gate is supervision, not an invocation gate** | A `task` run pauses for a human to approve the plan. Resolution is **requestor-only**: only the user who started the thread may approve, cancel, or revise it — a reply from anyone else is rejected with a notice, and it fails closed (no one resolves) when the requestor is unknown. It is supervision, not an *invocation* boundary: anyone who can mention the bot can still start a run. The real control is downstream — every run ends at *open a PR*, which a human reviews and merges on GitHub (the bot never merges), so a real `GITHUB_BOT_TOKEN` is safe to the extent you trust branch-protection and review on the repos the token covers. Who may *invoke* is gated operationally via Slack channel membership (see Access control above), not by a gateway allow-list. |
 | **Parked gates are in-memory** | A run paused at the plan gate lives in the gateway's memory. A gateway restart mid-park loses the parked run (the workspace volume is still safe); durable park is deferred. |
 | **Streaming** | The thread shows `_thinking…_` → tool-status edits → one final text. Partial answer text is not streamed. (Planned M3.) |
 | **Long answers** | Final text goes through `chat.update`; Slack caps messages at ~40k chars (practically ~4k rendered well). Very long answers should be chunked or uploaded as a file — not yet handled. |
@@ -305,6 +305,7 @@ The entire suite (300+ tests) runs offline in <2 s — no Slack, no Docker, no A
 *Status: M1 (gateway) + M2 (Docker runner) + file forwarding + M5 (one-shot repo tasks:
 broker, credentialed git nodes, blueprint engine) shipped and verified live. M6 in progress:
 the `task` plan-approval gate (supervised one-shot) is shipped and smoke-verified, with
-requestor-only gate resolution; a broader invocation allow-list and durable park are the
-remaining M6 work. Other open gaps: streaming, spend
-limits, volume GC, restart-surviving session index. See `planning/` for milestone specs.*
+requestor-only gate resolution, the audit-events layer, and volume GC. Invocation authz is
+handled operationally (Slack channel-scoping), not in the gateway. Remaining M6 work: spend
+caps / rate limits, egress-lock, and durable park across restart. Other open gaps: streaming,
+restart-surviving session index. See `planning/` for milestone specs.*
