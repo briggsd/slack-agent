@@ -11,7 +11,7 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess, SpawnOptions } from 'child_process';
-import type { RunnerEvent, SessionRunner, RunnerFactory } from './types.js';
+import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory } from './types.js';
 import type { Profile } from '../profiles/registry.js';
 import type {
   RunnerToGatewayMessage,
@@ -242,11 +242,10 @@ export class DockerRunner implements SessionRunner {
     });
   }
 
-  send(message: string): AsyncIterable<RunnerEvent> {
+  send(message: string): RunnerStream {
     const self = this;
 
-    return {
-      [Symbol.asyncIterator]: async function* () {
+    async function* gen(): RunnerStream {
         if (self.disposed) {
           yield { type: 'error', message: 'runner is disposed' } as RunnerEvent;
           return;
@@ -332,8 +331,8 @@ export class DockerRunner implements SessionRunner {
           }
           // Messages with different IDs ignored (shouldn't happen since turns are serial)
         }
-      },
-    };
+    }
+    return gen();
   }
 
   async dispose(): Promise<void> {

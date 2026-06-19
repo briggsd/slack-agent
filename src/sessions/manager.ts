@@ -1,4 +1,4 @@
-import type { RunnerFactory, SessionRunner } from '../runner/types.js';
+import type { RunnerFactory, SessionRunner, GateResume } from '../runner/types.js';
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
 import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
 import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
@@ -21,22 +21,33 @@ interface Session {
   /** true while the drain loop is processing a message */
   draining: boolean;
   idleTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * Set while a run is parked at an `await_approval` gate. The next thread reply
+   * resolves it (with the reply text) instead of being enqueued as a new turn; a
+   * timer resolves it with a timeout if no reply arrives. Null when not parked.
+   */
+  pendingApproval: { resolve: (resume: GateResume) => void } | null;
 }
 
 export class SessionManager {
   private sessions = new Map<string, Session>();
   private readonly idleTimeoutMs: number;
+  private readonly gateTimeoutMs: number;
   private readonly factory: RunnerFactory;
   private readonly slack: SlackClientLike;
   private readonly store: SessionStore;
 
   constructor(opts: {
     idleTimeoutMs: number;
+    /** How long a run parked at an approval gate waits for a reply before the
+     *  fallback fires (the run resumes with a `timeout` resume). Default 15 min. */
+    gateTimeoutMs?: number;
     factory: RunnerFactory;
     slack: SlackClientLike;
     store?: SessionStore;
   }) {
     this.idleTimeoutMs = opts.idleTimeoutMs;
+    this.gateTimeoutMs = opts.gateTimeoutMs ?? 15 * 60 * 1000;
     this.factory = opts.factory;
     this.slack = opts.slack;
     this.store = opts.store ?? new NoopSessionStore();
@@ -70,6 +81,7 @@ export class SessionManager {
       queue: [],
       draining: false,
       idleTimer: null,
+      pendingApproval: null,
     };
     this.sessions.set(key, session);
     this.resetIdleTimer(session);
@@ -110,6 +122,24 @@ export class SessionManager {
   async enqueueExisting(key: string, item: QueueItem): Promise<boolean> {
     const session = this.sessions.get(key);
     if (session !== undefined) {
+      // A run parked at an approval gate: this reply IS the approval/redirect — hand
+      // it to the waiting run instead of enqueuing it as a new turn.
+      //
+      // SECURITY (deferred to the gate-node slice — design/0006 open questions, #22):
+      // this routes ANY thread participant's reply to the gate. Before a real run can
+      // park here (the gate node + supervised profile land in a later slice), two
+      // boundaries must be enforced: (1) only the authorized requestor may resolve the
+      // gate — compare item.userId against the session's original requestor (the
+      // approval-authz policy is an open design decision, tied to the broader M6
+      // per-user authorization gate); (2) the reply text is untrusted — the node that
+      // folds it into the agent directive must delimit-as-data + length-cap it, like the
+      // implement node already does with check output. No live exposure in this slice:
+      // nothing reachable yields await_approval yet.
+      if (session.pendingApproval !== null) {
+        this.resetIdleTimer(session);
+        session.pendingApproval.resolve({ kind: 'reply', text: item.message });
+        return true;
+      }
       // Normal in-memory hit — unchanged behaviour.
       this.resetIdleTimer(session);
       session.queue.push(item);
@@ -195,37 +225,64 @@ export class SessionManager {
           item.threadTs,
         );
 
-        for await (const event of session.runner.send(item.message)) {
-          if (event.type === 'status') {
-            await updatePlaceholder(this.slack, placeholder, `_${event.text}_`);
-          } else if (event.type === 'file') {
-            try {
-              await this.slack.uploadFile({
-                channel: item.channel,
-                thread_ts: item.threadTs,
-                filename: event.name,
-                data: event.data,
-              });
-            } catch (uploadErr: unknown) {
-              const uploadMsg =
-                uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
-              console.error(
-                `[session] file upload failed in ${session.key} (${event.name}): ${uploadMsg}`,
-              );
+        // Drive the run manually (not `for await`) so a gate's reply can be fed back
+        // via `next(resume)`. `resume` is undefined for every event except resuming a
+        // parked `await_approval`; conversational runs never yield one, so this is
+        // behaviourally identical to the old loop for them. A RunnerStream is its own
+        // async iterator, so no `[Symbol.asyncIterator]()` is needed.
+        const iterator = session.runner.send(item.message);
+        let resume: GateResume | undefined;
+        try {
+          while (true) {
+            const result = await iterator.next(resume);
+            resume = undefined;
+            if (result.done === true) break;
+            const event = result.value;
+            if (event.type === 'status') {
+              await updatePlaceholder(this.slack, placeholder, `_${event.text}_`);
+            } else if (event.type === 'file') {
+              try {
+                await this.slack.uploadFile({
+                  channel: item.channel,
+                  thread_ts: item.threadTs,
+                  filename: event.name,
+                  data: event.data,
+                });
+              } catch (uploadErr: unknown) {
+                const uploadMsg =
+                  uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+                console.error(
+                  `[session] file upload failed in ${session.key} (${event.name}): ${uploadMsg}`,
+                );
+                await updatePlaceholder(
+                  this.slack,
+                  placeholder,
+                  `:x: Failed to upload file ${event.name}: ${uploadMsg}`,
+                );
+              }
+            } else if (event.type === 'text') {
+              await updatePlaceholder(this.slack, placeholder, event.text);
+            } else if (event.type === 'await_approval') {
+              // Park: post the plan, wait for the next thread reply (or a timeout), and
+              // feed the result back into the run on the next `next()`.
+              resume = await this.awaitApproval(session, placeholder, event.prompt);
+            } else if (event.type === 'error') {
               await updatePlaceholder(
                 this.slack,
                 placeholder,
-                `:x: Failed to upload file ${event.name}: ${uploadMsg}`,
+                `:x: Error: ${event.message}`,
               );
             }
-          } else if (event.type === 'text') {
-            await updatePlaceholder(this.slack, placeholder, event.text);
-          } else if (event.type === 'error') {
-            await updatePlaceholder(
-              this.slack,
-              placeholder,
-              `:x: Error: ${event.message}`,
-            );
+          }
+        } finally {
+          // The manual drive loop doesn't auto-close the generator the way `for await`
+          // does. Call return() on every exit (normal, error, abandonment) so the run's
+          // own `finally` blocks run — notably the orchestrator revoking its credential
+          // lease. A no-op on an already-completed generator.
+          try {
+            await iterator.return();
+          } catch {
+            // best-effort cleanup — must not mask the turn's real outcome
           }
         }
       } catch (err: unknown) {
@@ -248,6 +305,54 @@ export class SessionManager {
     session.draining = false;
     // Reset idle timer after drain completes (session went idle)
     this.resetIdleTimer(session);
+  }
+
+  /**
+   * Park a run at an approval gate: post the plan, then resolve with the next thread
+   * reply (routed here by {@link enqueueExisting}) or a `timeout` after `gateTimeoutMs`.
+   * Exactly one of reply/timeout settles it; the other is cancelled. The session stays
+   * `draining` throughout, so the idle-reaper backs off and the run holds its container
+   * until resolved (in-memory only — a gateway restart mid-park loses the parked run).
+   */
+  private awaitApproval(
+    session: Session,
+    placeholder: Placeholder | null,
+    prompt: string,
+  ): Promise<GateResume> {
+    const minutes = Math.max(1, Math.round(this.gateTimeoutMs / 60000));
+    // Register the parked state SYNCHRONOUSLY (the Promise executor runs now), before
+    // any await — so a reply that arrives while the prompt is still being posted is
+    // routed to the gate by enqueueExisting, not enqueued as a brand-new turn.
+    const result = new Promise<GateResume>((resolve) => {
+      const settle = (resume: GateResume): void => {
+        if (session.pendingApproval === null) return; // already settled by the other path
+        clearTimeout(timer);
+        session.pendingApproval = null;
+        resolve(resume);
+      };
+      const timer = setTimeout(() => settle({ kind: 'timeout' }), this.gateTimeoutMs);
+      if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+        (timer as { unref(): void }).unref();
+      }
+      session.pendingApproval = { resolve: settle };
+    });
+    // Post the plan + how to respond AFTER parking is registered. Wording is neutral
+    // about the outcome: the framework only feeds a `timeout` resume back into the run;
+    // whether that abandons is the gate node's decision (the supervised one-shot node
+    // aborts on timeout — design/0006). Fire-and-forget so a post failure can't strand
+    // the parked run; the timeout still bounds it.
+    if (placeholder !== null) {
+      void updatePlaceholder(
+        this.slack,
+        placeholder,
+        `${prompt}\n\n_Reply \`approve\` to proceed, or reply with changes. ` +
+          `No reply within ${minutes} min → the plan times out._`,
+      ).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[session] failed to post approval prompt for ${session.key}: ${msg}`);
+      });
+    }
+    return result;
   }
 
   /** For testing: check if a session key exists */

@@ -1,4 +1,4 @@
-import type { RunnerEvent, SessionRunner, RunnerFactory } from './types.js';
+import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory } from './types.js';
 import type { Profile } from '../profiles/registry.js';
 
 export type ScriptedEvent = RunnerEvent;
@@ -23,7 +23,7 @@ export class FakeRunner implements SessionRunner {
     this.script = script;
   }
 
-  send(message: string): AsyncIterable<RunnerEvent> {
+  send(message: string): RunnerStream {
     this.sends.push(message);
     const idx = this.turnIndex++;
     const turn = this.script[idx];
@@ -34,19 +34,18 @@ export class FakeRunner implements SessionRunner {
       { type: 'text', text: `Echo: ${message}` },
     ];
 
-    return {
-      [Symbol.asyncIterator]: async function* () {
-        const events: RunnerEvent[] =
-          turn === undefined
-            ? defaultEvents
-            : Array.isArray(turn)
-              ? turn
-              : await turn();
-        for (const e of events) {
-          yield e;
-        }
-      },
-    };
+    async function* gen(): RunnerStream {
+      const events: RunnerEvent[] =
+        turn === undefined
+          ? defaultEvents
+          : Array.isArray(turn)
+            ? turn
+            : await turn();
+      for (const e of events) {
+        yield e;
+      }
+    }
+    return gen();
   }
 
   async dispose(): Promise<void> {

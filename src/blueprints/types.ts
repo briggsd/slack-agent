@@ -1,4 +1,4 @@
-import type { RunnerEvent } from '../runner/types.js';
+import type { RunnerStream } from '../runner/types.js';
 
 /** A node either runs trusted-side deterministic work, or delegates to a sandbox
  *  agent runner. Only 'agentic' nodes touch the agent — the engine itself runs no
@@ -7,11 +7,13 @@ export type NodeKind = 'deterministic' | 'agentic';
 
 /** A unit of work in a blueprint, generic over the workflow's context and deps.
  *  Yields RunnerEvents; reads/writes ctx. Throwing aborts the blueprint (the
- *  executor turns it into a single error event). */
+ *  executor turns it into a single error event). A node may `yield` an
+ *  `await_approval` event and read back a {@link RunnerStream} resume value (the
+ *  reply), which the executor forwards via `yield*`. */
 export interface BlueprintNode<Ctx, Deps> {
   readonly name: string;
   readonly kind: NodeKind;
-  run(ctx: Ctx, deps: Deps): AsyncIterable<RunnerEvent>;
+  run(ctx: Ctx, deps: Deps): RunnerStream;
 }
 
 /** An ordered list of nodes that share one Ctx/Deps. */
