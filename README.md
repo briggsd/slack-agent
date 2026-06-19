@@ -116,26 +116,45 @@ and includes `git`, `curl`, and `ripgrep` as agent tools.
 | `ANTHROPIC_API_KEY` | yes | Passed to each container via `-e ANTHROPIC_API_KEY` (value never appears in `docker` argv) |
 | `RUNNER_IMAGE` | no (default `slackbot-runner:latest`) | Docker image to run |
 | `RUNNER_BACKEND` | no (default `fake`) | Set to `docker` to enable real containers |
-| `GITHUB_BOT_TOKEN` | no | Bot-account token for one-shot GitHub repo tasks. Stays gateway-side; never enters the agent sandbox. Without it, a `task github:…` reply errors. |
+| `GITHUB_BOT_TOKEN` | no | Bot-account token for one-shot GitHub repo tasks. Stays gateway-side; never enters the agent sandbox. Without it, a `task`/`exec github:…` mention errors. |
+| `GATE_TIMEOUT_MS` | no (default 15 min) | How long a supervised (`task`) run waits at the plan-approval gate for a reply before abandoning. |
 | `GITLAB_BOT_TOKEN` | no | Same, for GitLab (provider not yet implemented). |
 | `GIT_IMAGE` | no (default `slackbot-runner:latest`) | Image for the ephemeral credentialed git nodes (clone/push) |
 
 ## One-shot repo tasks
 
-Start a one-shot repo task by mentioning the bot with a leading `task` keyword:
+Mention the bot with a leading keyword and a `host:owner/repo` target to run a
+one-shot repo task. Two keywords, differing only in whether a human signs off on
+the plan:
 
 ```
-@slackbot task github:owner/repo fix the flaky login test in auth.spec.ts
+@slackbot task github:owner/repo fix the flaky login test in auth.spec.ts   # supervised
+@slackbot exec github:owner/repo bump the changelog for the 1.4 release      # fire-and-forget
 ```
 
-The bot clones the repo, runs the agent to implement the change, pushes a branch,
-and replies with a pull-request link. The git credential never enters the agent
-sandbox — only the gateway-side deterministic git nodes carry it (see
-`docs/ARCHITECTURE.md`). One-shot is fully faked under `RUNNER_BACKEND=fake` (a
-`task …` mention returns a stub PR link, no real git), so it only touches real
-repos under `RUNNER_BACKEND=docker` with a `GITHUB_BOT_TOKEN` configured.
+Either way the bot clones the repo, researches it, and writes an implementation
+plan; then it implements the change, pushes a branch, and replies with a
+pull-request link. The git credential never enters the agent sandbox — only the
+gateway-side deterministic git nodes carry it (see `docs/ARCHITECTURE.md`).
 
-See `.env.example` for the full list of tunable settings.
+**`task` — supervised.** The run pauses after planning and posts the plan to the
+thread. Nothing is written until you respond in-thread:
+
+- `approve` (or `approved`) — proceed: implement → push → open a PR.
+- `cancel` / `abort` / `reject` — abandon now; nothing is pushed.
+- anything else — treated as feedback; the bot revises the plan and asks again.
+- no reply within `GATE_TIMEOUT_MS` (default 15 min) — abandon.
+
+**`exec` — fire-and-forget.** No gate; the plan flows straight into implementation.
+
+> **Heads-up:** the gate is *supervision*, not authorization — any participant in
+> the thread can currently approve, cancel, or redirect a run, and any user who can
+> @mention the bot can start one. Per-user authorization is still in progress. Do
+> not configure a real `GITHUB_BOT_TOKEN` in a broadly-accessible workspace yet.
+
+One-shot is fully faked under `RUNNER_BACKEND=fake` (a stub PR link, no real git),
+so it only touches real repos under `RUNNER_BACKEND=docker` with a
+`GITHUB_BOT_TOKEN` configured. See `.env.example` for the full list of settings.
 
 ### Resume-after-reap
 
