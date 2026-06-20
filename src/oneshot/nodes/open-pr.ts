@@ -28,7 +28,6 @@ export function titleFromInstruction(instruction: string): string {
 
 export function composePrBodyFromParts(input: {
   title: string;
-  instruction: string;
   implementSummary?: string;
   planSummary?: string;
 }): string {
@@ -52,7 +51,6 @@ export function composePrBodyFromParts(input: {
 function composePrBody(ctx: OneShotContext, title: string): string {
   return composePrBodyFromParts({
     title,
-    instruction: ctx.instruction,
     ...(ctx.implementSummary !== undefined ? { implementSummary: ctx.implementSummary } : {}),
     ...(ctx.planSummary !== undefined ? { planSummary: ctx.planSummary } : {}),
   });

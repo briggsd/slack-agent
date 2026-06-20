@@ -84,12 +84,12 @@ describe('RealPublishService', () => {
   it('push failure returns ok:false and revokes without opening a PR', async () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
-    gitNodes.failNextPush(new Error('push failed'));
+    gitNodes.failNextPush(new Error('https://x-access-token:secret@example.test/owner/repo push failed'));
     const svc = new RealPublishService(broker, gitNodes);
 
     const outcome = await svc.publish({ repo: 'owner/repo', volume: 'vol' });
 
-    expect(outcome).toEqual({ ok: false, reason: 'push failed' });
+    expect(outcome).toEqual({ ok: false, reason: 'git push failed' });
     expect(broker.revokes).toHaveLength(1);
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.changeRequests).toHaveLength(0);
@@ -98,12 +98,12 @@ describe('RealPublishService', () => {
   it('open PR failure returns ok:false and revokes after push', async () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
-    gitNodes.failNextOpenChange(new Error('open failed'));
+    gitNodes.failNextOpenChange(new Error('https://x-access-token:secret@example.test/owner/repo open failed'));
     const svc = new RealPublishService(broker, gitNodes);
 
     const outcome = await svc.publish({ repo: 'owner/repo', volume: 'vol' });
 
-    expect(outcome).toEqual({ ok: false, reason: 'open failed' });
+    expect(outcome).toEqual({ ok: false, reason: 'open PR failed' });
     expect(broker.revokes).toHaveLength(1);
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.changeRequests).toHaveLength(1);
@@ -111,13 +111,13 @@ describe('RealPublishService', () => {
 
   it('broker failure returns ok:false and does not push', async () => {
     const broker = new FakeBroker();
-    broker.lease = async () => { throw new Error('no token'); };
+    broker.lease = async () => { throw new Error('secret broker detail'); };
     const gitNodes = new FakeGitNodeExecutor();
     const svc = new RealPublishService(broker, gitNodes);
 
     const outcome = await svc.publish({ repo: 'owner/repo', volume: 'vol' });
 
-    expect(outcome).toEqual({ ok: false, reason: 'no token' });
+    expect(outcome).toEqual({ ok: false, reason: 'credential lease failed' });
     expect(gitNodes.pushes).toHaveLength(0);
     expect(gitNodes.changeRequests).toHaveLength(0);
   });

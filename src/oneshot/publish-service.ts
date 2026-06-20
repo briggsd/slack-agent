@@ -46,14 +46,13 @@ export class RealPublishService implements PublishService {
       cleanOptionalText(req.body) ??
       composePrBodyFromParts({
         title,
-        instruction: FALLBACK_TITLE_SOURCE,
       });
 
     let lease: CredentialLease;
     try {
       lease = await this.broker.lease({ host: 'github', repo: req.repo, taskId });
-    } catch (err: unknown) {
-      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    } catch {
+      return { ok: false, reason: 'credential lease failed' };
     }
 
     let leaseRevoked = false;
@@ -64,24 +63,31 @@ export class RealPublishService implements PublishService {
     };
 
     try {
-      await this.gitNodes.push({
-        lease,
-        repo: req.repo,
-        branch,
-        workdir,
-        volume: req.volume,
-      });
-      const { url } = await this.gitNodes.openChangeRequest({
-        lease,
-        repo: req.repo,
-        head: branch,
-        base: 'main',
-        title,
-        body,
-      });
-      return { ok: true, prUrl: url };
-    } catch (err: unknown) {
-      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      try {
+        await this.gitNodes.push({
+          lease,
+          repo: req.repo,
+          branch,
+          workdir,
+          volume: req.volume,
+        });
+      } catch {
+        return { ok: false, reason: 'git push failed' };
+      }
+
+      try {
+        const { url } = await this.gitNodes.openChangeRequest({
+          lease,
+          repo: req.repo,
+          head: branch,
+          base: 'main',
+          title,
+          body,
+        });
+        return { ok: true, prUrl: url };
+      } catch {
+        return { ok: false, reason: 'open PR failed' };
+      }
     } finally {
       await revokeOnce();
     }
