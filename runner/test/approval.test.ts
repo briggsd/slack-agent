@@ -64,6 +64,17 @@ describe('ApprovalCoordinator', () => {
     await expect(p1).resolves.toEqual({ approved: false });
     await expect(p2).resolves.toEqual({ approved: false });
   });
+
+  it('after draining, a new requestApproval resolves immediately and emits nothing (no hang)', async () => {
+    const emitted: string[] = [];
+    const c = new ApprovalCoordinator((_s, id) => emitted.push(id));
+    c.failAllPending(); // stdin closed
+
+    // An agent that re-calls submit_spec after a not-approved verdict must not park forever.
+    const p = c.requestApproval('post-drain spec');
+    await expect(p).resolves.toEqual({ approved: false });
+    expect(emitted).toHaveLength(0); // no request_approval emitted that nobody could answer
+  });
 });
 
 describe('parseInbound', () => {

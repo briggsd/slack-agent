@@ -21,6 +21,8 @@ export class ApprovalCoordinator {
   /** id → resolver for each gate awaiting a verdict. At most a handful in flight (turns serial). */
   private readonly pending = new Map<string, (v: Verdict) => void>();
   private seq = 0;
+  /** Set once stdin closes: no verdict can arrive after this, so new gates resolve immediately. */
+  private drained = false;
 
   constructor(private readonly emitRequest: EmitRequestApprovalFn) {}
 
@@ -28,8 +30,16 @@ export class ApprovalCoordinator {
    * Raise a commit gate: emit `request_approval` and resolve when the matching verdict arrives.
    * The id is the runner's own approval-correlation id (distinct from the turn id), echoed back
    * on the verdict.
+   *
+   * Once {@link failAllPending} has drained (stdin closed), resolve immediately as not-approved
+   * instead of parking — otherwise an agent that calls `submit_spec` AGAIN after a not-approved
+   * verdict (the tool result tells it to "revise and resubmit") would emit a `request_approval`
+   * no one can answer and hang the turn forever.
    */
   requestApproval(specRef: string): Promise<Verdict> {
+    if (this.drained) {
+      return Promise.resolve({ approved: false });
+    }
     const id = `appr-${++this.seq}`;
     return new Promise<Verdict>((resolve) => {
       this.pending.set(id, resolve);
@@ -59,6 +69,7 @@ export class ApprovalCoordinator {
    * on a verdict that will never come can't wedge the process at shutdown.
    */
   failAllPending(): void {
+    this.drained = true;
     for (const [id, resolve] of this.pending) {
       this.pending.delete(id);
       resolve({ approved: false });
