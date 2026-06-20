@@ -11,7 +11,7 @@ import { EventEmitter } from 'events';
 import type { ChildProcess } from 'child_process';
 import { DockerRunner, DockerRunnerFactory, sanitizeKey, volumeNameFor } from '../src/runner/docker.js';
 import type { DockerRunnerConfig, SpawnFn } from '../src/runner/docker.js';
-import type { GateResume, RunnerFactory } from '../src/runner/types.js';
+import type { RunnerFactory } from '../src/runner/types.js';
 import { SessionManager } from '../src/sessions/manager.js';
 import { FakeSlackClient } from './responder.test.js';
 
@@ -784,166 +784,103 @@ describe('DockerRunner — commit gate translation', () => {
 
   /** Capture the turn id the runner wrote as its user_message. */
   function turnId(fake: FakeChildProcess): string {
-    return (JSON.parse(fake.stdinLines[0] ?? '{}') as { id: string }).id;
+    const line = fake.stdinLines.find((entry) => JSON.parse(entry).type === 'user_message') ?? '{}';
+    return (JSON.parse(line) as { id: string }).id;
   }
 
-  it('surfaces a request_approval line as an await_approval event carrying specRef', async () => {
+  it('surfaces request_approval as a non-blocking approval_requested event and the turn continues', async () => {
     const { runner, fake } = await makeReadyRunner();
     const iter = runner.send('build a thing')[Symbol.asyncIterator]();
 
     const e1Promise = iter.next();
     await tick();
 
-    // The container raises the gate with its OWN approval-correlation id (≠ the turn id).
+    const firstTurnId = turnId(fake);
     fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-1', specRef: 'SPEC: do X' }));
+    fake.writeOut(JSON.stringify({ type: 'text', id: firstTurnId, text: 'approval requested' }));
 
     const e1 = await e1Promise;
-    expect(e1.value).toEqual({ type: 'await_approval', prompt: 'SPEC: do X' });
-    // Parking does not end the turn — no verdict written until the gateway resumes.
-    expect(fake.stdinLines.some((l) => l.includes('approval_verdict'))).toBe(false);
-  });
-
-  it('an approve resume writes approval_verdict{approved:true} (correlating id) and the turn continues', async () => {
-    const { runner, fake } = await makeReadyRunner();
-    const iter = runner.send('build a thing')[Symbol.asyncIterator]();
-
-    const e1Promise = iter.next();
-    await tick();
-    fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-1', specRef: 'SPEC: do X' }));
-    const e1 = await e1Promise;
-    expect(e1.value).toEqual({ type: 'await_approval', prompt: 'SPEC: do X' });
-
-    // Gateway approves — feed the resume back the way the manager's drive loop does.
-    const e2Promise = iter.next({ kind: 'reply', text: 'approve' } satisfies GateResume);
-    await tick();
-
-    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
-    expect(verdictLine).toBeDefined();
-    expect(JSON.parse(verdictLine ?? '{}')).toEqual({
-      type: 'approval_verdict',
-      id: 'appr-1',
-      approved: true,
+    expect(e1.value).toEqual({
+      type: 'approval_requested',
+      approvalId: 'appr-1',
+      prompt: 'SPEC: do X',
+      specRef: 'SPEC: do X',
     });
-
-    // The container resumes the same turn to completion.
-    fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'shipped' }));
-    const e2 = await e2Promise;
-    expect(e2.value).toEqual({ type: 'text', text: 'shipped' });
+    expect(fake.stdinLines.some((l) => l.includes('approval_verdict'))).toBe(false);
+    const e2 = await iter.next();
+    expect(e2.value).toEqual({ type: 'text', text: 'approval requested' });
     expect((await iter.next()).done).toBe(true);
   });
 
-  it('a non-keyword resume writes approval_verdict{approved:false, feedback:<raw reply>} and the turn continues', async () => {
+  it('send(..., { approval }) writes approval_verdict before the next user_message', async () => {
     const { runner, fake } = await makeReadyRunner();
-    const iter = runner.send('build a thing')[Symbol.asyncIterator]();
-
+    const iter = runner
+      .send('build a thing', {
+        approval: { id: 'appr-2', specRef: 'SPEC: do X', approved: false, feedback: 'make it faster please' },
+      })
+      [Symbol.asyncIterator]();
     const e1Promise = iter.next();
     await tick();
-    fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-2', specRef: 'SPEC' }));
-    await e1Promise;
 
-    const e2Promise = iter.next({ kind: 'reply', text: 'make it faster please' } satisfies GateResume);
-    await tick();
-
-    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
-    expect(JSON.parse(verdictLine ?? '{}')).toEqual({
+    expect(JSON.parse(fake.stdinLines[0] ?? '{}')).toEqual({
       type: 'approval_verdict',
       id: 'appr-2',
+      specRef: 'SPEC: do X',
       approved: false,
       feedback: 'make it faster please',
     });
+    expect(JSON.parse(fake.stdinLines[1] ?? '{}')).toMatchObject({
+      type: 'user_message',
+      text: 'build a thing',
+    });
 
     fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'revised' }));
-    const e2 = await e2Promise;
-    expect(e2.value).toEqual({ type: 'text', text: 'revised' });
+    const e1 = await e1Promise;
+    expect(e1.value).toEqual({ type: 'text', text: 'revised' });
   });
 
-  it('a cancel resume writes approval_verdict{approved:false, feedback:"cancel"}; the router never abandons', async () => {
+  it('send(..., { approval }) supports approval without feedback too', async () => {
     const { runner, fake } = await makeReadyRunner();
-    const iter = runner.send('build a thing')[Symbol.asyncIterator]();
-
+    const iter = runner
+      .send('build a thing', { approval: { id: 'appr-3', specRef: 'SPEC: do X', approved: true } })
+      [Symbol.asyncIterator]();
     const e1Promise = iter.next();
     await tick();
-    fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-3', specRef: 'SPEC' }));
-    await e1Promise;
-
-    // "cancel" is not a commit keyword — it's just a decline that keeps the conversation going.
-    const e2Promise = iter.next({ kind: 'reply', text: 'cancel' } satisfies GateResume);
-    await tick();
-    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
-    expect(JSON.parse(verdictLine ?? '{}')).toEqual({
+    expect(JSON.parse(fake.stdinLines[0] ?? '{}')).toEqual({
       type: 'approval_verdict',
       id: 'appr-3',
-      approved: false,
-      feedback: 'cancel',
+      specRef: 'SPEC: do X',
+      approved: true,
     });
-
-    fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'ok, what next?' }));
-    const e2 = await e2Promise;
-    expect(e2.value).toEqual({ type: 'text', text: 'ok, what next?' });
+    fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'built' }));
+    const e1 = await e1Promise;
+    expect(e1.value).toEqual({ type: 'text', text: 'built' });
   });
 
-  it('a timeout resume writes approval_verdict{approved:false} with no feedback; the turn ends quietly', async () => {
+  it('fails the turn if stdin is gone before approval control and user_message can be written', async () => {
     const { runner, fake } = await makeReadyRunner();
-    const iter = runner.send('build a thing')[Symbol.asyncIterator]();
-
-    const e1Promise = iter.next();
-    await tick();
-    fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-4', specRef: 'SPEC' }));
-    await e1Promise;
-
-    const e2Promise = iter.next({ kind: 'timeout' } satisfies GateResume);
-    await tick();
-    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
-    expect(JSON.parse(verdictLine ?? '{}')).toEqual({
-      type: 'approval_verdict',
-      id: 'appr-4',
-      approved: false,
-    });
-
-    fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'no decision — standing by' }));
-    const e2 = await e2Promise;
-    expect(e2.value).toEqual({ type: 'text', text: 'no decision — standing by' });
-  });
-
-  it('fails the turn (no silent drop) if stdin is gone when the verdict must be written', async () => {
-    const { runner, fake } = await makeReadyRunner();
-    const iter = runner.send('build a thing')[Symbol.asyncIterator]();
-
-    const e1Promise = iter.next();
-    await tick();
-    fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-6', specRef: 'SPEC' }));
-    await e1Promise;
-
-    // Container's stdin dies while parked at the gate → writable becomes false.
     fake.stdin.destroy();
 
-    const e2 = await iter.next({ kind: 'reply', text: 'approve' } satisfies GateResume);
+    const iter = runner
+      .send('build a thing', { approval: { id: 'appr-6', specRef: 'SPEC: do X', approved: true } })
+      [Symbol.asyncIterator]();
+    const e2 = await iter.next();
     expect(e2.value).toEqual({ type: 'error', message: 'runner stdin is not writable' });
     expect((await iter.next()).done).toBe(true);
   });
 
-  it('a malformed request_approval (has id, missing specRef) writes approval_verdict{approved:false} to unblock the tool without parking', async () => {
+  it('a malformed request_approval (has id, missing specRef) is skipped without writing approval_verdict', async () => {
     const { runner, fake } = await makeReadyRunner();
     const iter = runner.send('build a thing')[Symbol.asyncIterator]();
 
     const e1Promise = iter.next();
     await tick();
-    // Has an id but no specRef — carry-forward fix: unblock the parked tool rather than
-    // dropping the verdict (which would leave a live promise waiting forever inside the turn).
     fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-5' }));
     fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'done anyway' }));
 
     const e1 = await e1Promise;
     expect(e1.value).toEqual({ type: 'text', text: 'done anyway' });
-    // The fallback approval_verdict must be written to the container so the parked submit_spec
-    // tool unblocks. Without this the tool would park forever on a verdict that never arrives.
-    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
-    expect(verdictLine).toBeDefined();
-    expect(JSON.parse(verdictLine ?? '{}')).toEqual({
-      type: 'approval_verdict',
-      id: 'appr-5',
-      approved: false,
-    });
+    expect(fake.stdinLines.some((l) => l.includes('approval_verdict'))).toBe(false);
   });
 });
 
@@ -952,7 +889,7 @@ describe('DockerRunner — commit gate translation', () => {
 describe('SessionManager + DockerRunner — commit gate end-to-end', () => {
   const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
 
-  it('container gate → requestor-only approval → checked verdict reaches the container', async () => {
+  it('container gate ends the first turn, then a requestor reply starts a second send with approval control first', async () => {
     const fake = new FakeChildProcess();
     const runner = new DockerRunner(fake.asChildProcess(), DEFAULT_CONFIG);
     const readyPromise = DockerRunner.waitReady(runner, DEFAULT_CONFIG.readyTimeoutMs);
@@ -976,14 +913,16 @@ describe('SessionManager + DockerRunner — commit gate end-to-end', () => {
     });
     await tick();
 
-    const turnId = (JSON.parse(fake.stdinLines[0] ?? '{}') as { id: string }).id;
+    const firstTurnId = (JSON.parse(fake.stdinLines[0] ?? '{}') as { id: string }).id;
 
     // The container raises the commit gate from inside the turn.
     fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-9', specRef: 'SPEC: ship it' }));
+    fake.writeOut(JSON.stringify({ type: 'text', id: firstTurnId, text: 'APPROVAL REQUESTED' }));
     await tick();
 
-    // (a) Parked: the spec is posted to the thread.
+    // (a) The prompt is posted, but the first turn is allowed to complete.
     expect(slack.updates.some((u) => u.text.includes('SPEC: ship it'))).toBe(true);
+    expect(slack.updates.some((u) => u.text.includes('APPROVAL REQUESTED'))).toBe(true);
 
     // (b) A non-requestor cannot resolve it — no verdict crosses to the container.
     await manager.enqueueExisting('TEAM:C:T', {
@@ -998,7 +937,7 @@ describe('SessionManager + DockerRunner — commit gate end-to-end', () => {
       slack.posts.some((p) => p.text === 'Only <@U-REQ> can approve or cancel this plan.'),
     ).toBe(true);
 
-    // (c) The requestor approves → the checked verdict reaches the container.
+    // (c) The requestor approves → a second send writes approval_verdict before user_message.
     await manager.enqueueExisting('TEAM:C:T', {
       message: 'approve',
       channel: 'C',
@@ -1006,16 +945,23 @@ describe('SessionManager + DockerRunner — commit gate end-to-end', () => {
       userId: 'U-REQ',
     });
     await tick();
-    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
+    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict') && l.includes('"id":"appr-9"'));
     expect(verdictLine).toBeDefined();
     expect(JSON.parse(verdictLine ?? '{}')).toEqual({
       type: 'approval_verdict',
       id: 'appr-9',
+      specRef: 'SPEC: ship it',
       approved: true,
     });
+    const verdictIndex = fake.stdinLines.findIndex((l) => l === verdictLine);
+    expect(JSON.parse(fake.stdinLines[verdictIndex + 1] ?? '{}')).toMatchObject({
+      type: 'user_message',
+      text: 'approve',
+    });
 
-    // The container completes the turn after approval.
-    fake.writeOut(JSON.stringify({ type: 'text', id: turnId, text: 'shipped' }));
+    // The second turn completes after approval.
+    const secondTurnId = (JSON.parse(fake.stdinLines[verdictIndex + 1] ?? '{}') as { id: string }).id;
+    fake.writeOut(JSON.stringify({ type: 'text', id: secondTurnId, text: 'shipped' }));
     await tick();
     expect(slack.updates.some((u) => u.text === 'shipped')).toBe(true);
   });

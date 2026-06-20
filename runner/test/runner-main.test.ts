@@ -726,15 +726,13 @@ async function waitFor<T>(probe: () => T | null, timeoutMs = 1000): Promise<T> {
 
 describe('runner main — commit gate stdin demux', () => {
   /**
-   * Drives the full round-trip the real container does, but with a fake SDK turn that calls
-   * submitSpec mid-stream: the tool emits request_approval and BLOCKS; the test then writes the
-   * approval_verdict on stdin WHILE the turn is live; the dispatcher must route it to the parked
-   * tool so the turn can finish. Input is written reactively (after request_approval appears)
-   * because a verdict delivered before the gate registers would have no pending gate to match.
+   * Drives the end-turn-and-resume flow: the first turn requests approval and completes, then a
+   * later approval_verdict + user_message pair is delivered in that order so the next turn can
+   * consume the persisted decision.
    */
   async function runGate(
     decision: { approved: boolean; feedback?: string },
-  ): Promise<{ outputs: CollectedOutput; seenVerdict: { approved: boolean; feedback?: string } | null }> {
+  ): Promise<{ outputs: CollectedOutput; seenResults: Array<{ status: string; feedback?: string }> }> {
     const input = new PassThrough();
     const outputs: CollectedOutput = [];
     const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown): boolean => {
@@ -752,7 +750,8 @@ describe('runner main — commit gate stdin demux', () => {
       return true;
     });
 
-    let seenVerdict: { approved: boolean; feedback?: string } | null = null;
+    const seenResults: Array<{ status: string; feedback?: string }> = [];
+    let turnIndex = 0;
     const sdkQuery: SdkQueryFn = (params) => ({
       [Symbol.asyncIterator]: async function* () {
         yield makeSdkInit('sess-1');
@@ -760,9 +759,14 @@ describe('runner main — commit gate stdin demux', () => {
           throw new Error('submitSpec was not wired into the query');
         }
         const verdict = await params.submitSpec('SPEC TEXT');
-        seenVerdict = verdict;
+        seenResults.push(verdict);
+        turnIndex++;
         yield makeSdkResult(
-          verdict.approved ? 'built it' : `revising: ${verdict.feedback ?? '(none)'}`,
+          turnIndex === 1
+            ? `first-turn:${verdict.status}`
+            : verdict.status === 'approved'
+              ? 'second-turn:approved'
+              : `second-turn:${verdict.status}:${verdict.feedback ?? '(none)'}`,
           'sess-1',
         );
       },
@@ -782,7 +786,7 @@ describe('runner main — commit gate stdin demux', () => {
 
       input.push(JSON.stringify({ type: 'user_message', id: 'u1', text: 'do a thing' }) + '\n');
 
-      // Wait until the parked tool has emitted request_approval, then answer it.
+      // Wait until the first turn has emitted request_approval, then resume on a later turn.
       const req = await waitFor(() => {
         const r = outputs.find((o) => o.type === 'request_approval') as
           | { id?: string; specRef?: string }
@@ -792,10 +796,12 @@ describe('runner main — commit gate stdin demux', () => {
       const line: Record<string, unknown> = {
         type: 'approval_verdict',
         id: req.id,
+        specRef: req.specRef,
         approved: decision.approved,
       };
       if (decision.feedback !== undefined) line['feedback'] = decision.feedback;
       input.push(JSON.stringify(line) + '\n');
+      input.push(JSON.stringify({ type: 'user_message', id: 'u2', text: decision.approved ? 'approve' : 'needs changes' }) + '\n');
       input.push(null); // EOF
 
       await loopPromise;
@@ -803,23 +809,28 @@ describe('runner main — commit gate stdin demux', () => {
       writeSpy.mockRestore();
     }
 
-    return { outputs, seenVerdict };
+    return { outputs, seenResults };
   }
 
-  it('routes an approving verdict to a submit_spec call parked mid-turn', async () => {
-    const { outputs, seenVerdict } = await runGate({ approved: true });
+  it('first turn requests approval, then a later approving verdict is consumed on the next turn', async () => {
+    const { outputs, seenResults } = await runGate({ approved: true });
 
     const req = outputs.find((o) => o.type === 'request_approval') as { specRef?: string } | undefined;
     expect(req?.specRef).toBe('SPEC TEXT');
-    expect(seenVerdict).toEqual({ approved: true });
-    expect(outputs.some((o) => o.type === 'text' && o.text === 'built it')).toBe(true);
+    expect(seenResults).toEqual([{ status: 'requested' }, { status: 'approved' }]);
+    expect(outputs.some((o) => o.type === 'text' && o.text === 'first-turn:requested')).toBe(true);
+    expect(outputs.some((o) => o.type === 'text' && o.text === 'second-turn:approved')).toBe(true);
     expect(outputs.some((o) => o.type === 'error')).toBe(false);
   });
 
-  it('routes a not-approved verdict with feedback back into the turn', async () => {
-    const { outputs, seenVerdict } = await runGate({ approved: false, feedback: 'make it faster' });
+  it('later rejected feedback is consumed on the next turn without re-emitting request_approval', async () => {
+    const { outputs, seenResults } = await runGate({ approved: false, feedback: 'make it faster' });
 
-    expect(seenVerdict).toEqual({ approved: false, feedback: 'make it faster' });
-    expect(outputs.some((o) => o.type === 'text' && o.text === 'revising: make it faster')).toBe(true);
+    expect(seenResults).toEqual([
+      { status: 'requested' },
+      { status: 'rejected', feedback: 'make it faster' },
+    ]);
+    expect(outputs.filter((o) => o.type === 'request_approval')).toHaveLength(1);
+    expect(outputs.some((o) => o.type === 'text' && o.text === 'second-turn:rejected:make it faster')).toBe(true);
   });
 });

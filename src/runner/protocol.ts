@@ -38,14 +38,17 @@ export type UserMessage = {
  *
  * Sent only AFTER the gateway has run its requestor-only, fail-closed approval check, so the
  * container may treat `approved: true` as an authorized human commit — the model can never
- * self-approve. `id` echoes the `request_approval` this answers. `feedback` carries the
- * requestor's reply when the gate was not a plain commit keyword (`approved: false`), so the
- * agent can revise and ask again; it is absent on a clean approval. (`exactOptionalPropertyTypes`
- * is on — `feedback` is genuinely optional, never `undefined`-valued.)
+ * self-approve. `id` echoes the `request_approval` this answers. `specRef` is the gateway-held
+ * SPEC identity the human saw, echoed back over the trusted channel so a recreated runner never
+ * reconstructs the id→SPEC binding from agent-writable disk. `feedback` carries the requestor's
+ * reply when the gate was not a plain commit keyword (`approved: false`), so the agent can revise
+ * and ask again; it is absent on a clean approval. (`exactOptionalPropertyTypes` is on —
+ * `feedback` is genuinely optional, never `undefined`-valued.)
  */
 export type ApprovalVerdictMessage = {
   type: 'approval_verdict';
   id: string;
+  specRef: string;
   approved: boolean;
   feedback?: string;
 };

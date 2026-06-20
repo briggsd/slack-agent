@@ -1,4 +1,13 @@
-import type { RunnerFactory, SessionRunner, RunnerStream, GateResume, VolumeReaper, BuildRunnerFactory, BuildOutcome } from '../runner/types.js';
+import type {
+  ApprovalControl,
+  RunnerFactory,
+  SessionRunner,
+  RunnerStream,
+  GateResume,
+  VolumeReaper,
+  BuildRunnerFactory,
+  BuildOutcome,
+} from '../runner/types.js';
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
 import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
 import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
@@ -26,11 +35,17 @@ export interface QueueItem {
   teamId?: string;
   userId?: string;
   profileId?: string;
+  approval?: ApprovalControl;
 }
+
+type PendingApproval =
+  | { kind: 'legacy'; resolve: (resume: GateResume) => void }
+  | { kind: 'build_spec'; approvalId: string; prompt: string; specRef: string };
 
 interface Session {
   key: string;
-  runner: SessionRunner;
+  runner: SessionRunner | null;
+  profileId: string;
   queue: QueueItem[];
   /** true while the drain loop is processing a message */
   draining: boolean;
@@ -47,12 +62,9 @@ interface Session {
    * needing the original QueueItem. `undefined` when the creating event had no team.
    */
   teamId: string | undefined;
-  /**
-   * Set while a run is parked at an `await_approval` gate. The next thread reply
-   * resolves it (with the reply text) instead of being enqueued as a new turn; a
-   * timer resolves it with a timeout if no reply arrives. Null when not parked.
-   */
-  pendingApproval: { resolve: (resume: GateResume) => void } | null;
+  /** Gateway-side approval state. Legacy `await_approval` gates still store a resolver;
+   *  build_spec stores an approval id/prompt so a later authenticated reply becomes a new turn. */
+  pendingApproval: PendingApproval | null;
 }
 
 /** One rolling-window day in ms — the per-user/global cap window. */
@@ -64,6 +76,29 @@ const DISABLED_CAPS: SpendCapsConfig = {
   perUser24hMicroUsd: 0,
   perGlobal24hMicroUsd: 0,
 };
+const DEFAULT_PENDING_APPROVAL_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+const BUILD_SPEC_APPROVE = new Set(['approve', 'approved']);
+const BUILD_SPEC_REJECT = new Set(['cancel', 'abort', 'reject']);
+
+function classifyBuildSpecApprovalReply(approvalId: string, specRef: string, reply: string): ApprovalControl {
+  const norm = reply.trim().toLowerCase();
+  if (BUILD_SPEC_APPROVE.has(norm)) {
+    return { id: approvalId, specRef, approved: true };
+  }
+  if (BUILD_SPEC_REJECT.has(norm)) {
+    return { id: approvalId, specRef, approved: false };
+  }
+  return { id: approvalId, specRef, approved: false, feedback: reply };
+}
+
+function formatBuildSpecApprovalPrompt(prompt: string, assistantText?: string): string {
+  const instruction =
+    '_Reply `approve` to build this SPEC, `reject` or `cancel` to abort, or reply with any other text to request changes. The next requestor reply resumes this gate; very late replies may start a new turn instead._';
+  return assistantText !== undefined
+    ? `${prompt}\n\n${instruction}\n\n${assistantText}`
+    : `${prompt}\n\n${instruction}`;
+}
 
 export class SessionManager {
   private sessions = new Map<string, Session>();
@@ -78,12 +113,13 @@ export class SessionManager {
   private readonly spendCaps: SpendCapsConfig;
   private readonly now: () => number;
   private readonly buildRunnerFactory: BuildRunnerFactory | undefined;
+  private readonly pendingApprovalRetentionMs: number;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private gcRunning = false;
 
   constructor(opts: {
     idleTimeoutMs: number;
-    /** How long a run parked at an approval gate waits for a reply before the
+    /** How long a legacy `await_approval` gate waits for a reply before the
      *  fallback fires (the run resumes with a `timeout` resume). Default 15 min. */
     gateTimeoutMs?: number;
     factory: RunnerFactory;
@@ -102,6 +138,8 @@ export class SessionManager {
     /** Factory for build tail runners (DispatchingRunnerFactory). Required when the
      *  router emits `run_build`; a missing value is a programming error. */
     buildRunnerFactory?: BuildRunnerFactory;
+    /** How long to keep a runner-reaped build_spec approval in memory for late replies. */
+    pendingApprovalRetentionMs?: number;
   }) {
     this.idleTimeoutMs = opts.idleTimeoutMs;
     this.gateTimeoutMs = opts.gateTimeoutMs ?? 15 * 60 * 1000;
@@ -114,6 +152,8 @@ export class SessionManager {
     this.spendCaps = opts.spendCaps ?? DISABLED_CAPS;
     this.now = opts.now ?? (() => Date.now());
     this.buildRunnerFactory = opts.buildRunnerFactory;
+    this.pendingApprovalRetentionMs =
+      opts.pendingApprovalRetentionMs ?? DEFAULT_PENDING_APPROVAL_RETENTION_MS;
 
     // Start the GC timer only when a reaper is provided.
     if (this.volumeReaper !== undefined) {
@@ -161,6 +201,7 @@ export class SessionManager {
     const session: Session = {
       key,
       runner,
+      profileId: profile.id,
       queue: [],
       draining: false,
       idleTimer: null,
@@ -195,6 +236,20 @@ export class SessionManager {
     });
 
     return session;
+  }
+
+  private async ensureRunner(session: Session): Promise<SessionRunner> {
+    if (session.runner !== null) return session.runner;
+    const profile = getProfile(session.profileId);
+    const runner = await this.factory.create(session.key, profile);
+    session.runner = runner;
+    try {
+      this.store.setStatus(session.key, 'active');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[session] store.setStatus(active) failed for ${session.key}: ${msg}`);
+    }
+    return runner;
   }
 
   /**
@@ -339,14 +394,15 @@ export class SessionManager {
   async enqueueExisting(key: string, item: QueueItem): Promise<boolean> {
     const session = this.sessions.get(key);
     if (session !== undefined) {
-      // A run parked at an approval gate: this reply IS the approval/redirect — hand
-      // it to the waiting run instead of enqueuing it as a new turn.
+      // A run is awaiting a human approval reply. Legacy one-shot gates still resume the
+      // parked generator; build_spec approvals turn the reply into a trusted control for
+      // the next runner turn.
       //
       // SECURITY (M6 #22):
       // (1) Gate authorization — resolution is REQUESTOR-ONLY (M6 S04). Only the user who
-      //     started the thread may approve/cancel/redirect a parked plan; this one check
+      //     started the thread may approve/cancel/redirect a pending decision; this one check
       //     gates all three paths. Fail-closed: an unknown requestor (undefined) matches
-      //     nobody, so the gate rides to its timeout-abandon rather than letting anyone in.
+      //     nobody, so no reply can resolve the pending decision.
       //     Invocation stays open by design — the real authority is downstream (every run
       //     ends at "open a PR", which a human reviews and merges; the bot never merges).
       // (2) Reply text is untrusted — HANDLED: the plan node folds gate feedback into the
@@ -358,7 +414,7 @@ export class SessionManager {
           item.userId === session.requestorUserId;
         if (!isRequestor) {
           // A bystander can't resolve someone else's run — and we don't enqueue it
-          // either (a parked supervised one-shot owns the thread until it resolves).
+          // either (the pending human decision owns the thread until it resolves).
           // Post a NEW threaded message (never an update() to the gate placeholder,
           // which must keep showing the plan + prompt for the requestor); ping the
           // requestor by name for accountability.
@@ -370,7 +426,7 @@ export class SessionManager {
             team_id: session.teamId ?? null,
             user_id: item.userId ?? null,
             kind: 'approval',
-            tool: 'plan-gate',
+            tool: session.pendingApproval.kind === 'build_spec' ? 'build_spec' : 'plan-gate',
             result: 'rejected_non_requestor',
           });
 
@@ -394,17 +450,48 @@ export class SessionManager {
         }
         this.resetIdleTimer(session);
 
-        // Audit: requestor resolved the gate (metadata only — no reply text).
+        const pending = session.pendingApproval;
+        if (pending.kind === 'legacy') {
+          // Audit: requestor resolved the gate (metadata only — no reply text).
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            kind: 'approval',
+            tool: 'plan-gate',
+            result: 'resolved',
+          });
+          pending.resolve({ kind: 'reply', text: item.message });
+          return true;
+        }
+
+        const breachedApprovalResume = this.checkCaps(session.key, session.requestorUserId);
+        if (breachedApprovalResume !== null) {
+          this.rejectForCap(breachedApprovalResume, 'rejected', {
+            sessionKey: session.key,
+            channel: item.channel,
+            threadTs: item.threadTs,
+            userId: session.requestorUserId,
+            teamId: session.teamId,
+          });
+          return true;
+        }
+
+        // Audit: requestor resolved the build_spec gate (metadata only — no reply text).
         this.audit({
           session_key: session.key,
           team_id: session.teamId ?? null,
           user_id: session.requestorUserId ?? null,
           kind: 'approval',
-          tool: 'plan-gate',
+          tool: 'build_spec',
           result: 'resolved',
         });
-
-        session.pendingApproval.resolve({ kind: 'reply', text: item.message });
+        session.pendingApproval = null;
+        session.queue.push({
+          ...item,
+          approval: classifyBuildSpecApprovalReply(pending.approvalId, pending.specRef, item.message),
+        });
+        void this.drain(session);
         return true;
       }
       // Normal in-memory hit — admission cap check before enqueuing.
@@ -467,13 +554,13 @@ export class SessionManager {
     return true;
   }
 
-  private resetIdleTimer(session: Session): void {
+  private resetIdleTimer(session: Session, delayMs = this.idleTimeoutMs): void {
     if (session.idleTimer !== null) {
       clearTimeout(session.idleTimer);
     }
     const timer = setTimeout(() => {
       void this.reapSession(session.key);
-    }, this.idleTimeoutMs);
+    }, delayMs);
     // Allow the process to exit even if this timer is pending
     if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
       (timer as { unref(): void }).unref();
@@ -481,19 +568,28 @@ export class SessionManager {
     session.idleTimer = timer;
   }
 
-  private async reapSession(key: string): Promise<void> {
+  private async reapSession(key: string, force = false): Promise<void> {
     const session = this.sessions.get(key);
     if (session === undefined) return;
     // Never reap mid-turn: a long-running turn would lose its runner. Try again later.
-    if (session.draining) {
+    if (!force && session.draining) {
       this.resetIdleTimer(session);
       return;
     }
-    this.sessions.delete(key);
     if (session.idleTimer !== null) {
       clearTimeout(session.idleTimer);
       session.idleTimer = null;
     }
+    if (!force && session.pendingApproval?.kind === 'build_spec') {
+      if (session.runner !== null) {
+        console.log(`[session] reaping runner for pending approval: ${key}`);
+        await session.runner.dispose();
+        session.runner = null;
+        this.resetIdleTimer(session, this.pendingApprovalRetentionMs);
+        return;
+      }
+    }
+    this.sessions.delete(key);
     console.log(`[session] reaping idle session: ${key}`);
     this.store.setStatus(key, 'reaped');
 
@@ -507,7 +603,10 @@ export class SessionManager {
       result: 'reaped',
     });
 
-    await session.runner.dispose();
+    if (session.runner !== null) {
+      await session.runner.dispose();
+      session.runner = null;
+    }
   }
 
   /**
@@ -537,7 +636,11 @@ export class SessionManager {
         if (result.done === true) break;
         const event = result.value;
         if (event.type === 'status') {
-          await tryUpdate(`_${event.text}_`);
+          if (session.pendingApproval?.kind === 'build_spec') {
+            await tryUpdate(formatBuildSpecApprovalPrompt(session.pendingApproval.prompt, `_${event.text}_`));
+          } else {
+            await tryUpdate(`_${event.text}_`);
+          }
         } else if (event.type === 'file') {
           try {
             await this.slack.uploadFile({
@@ -555,7 +658,29 @@ export class SessionManager {
             await tryUpdate(`:x: Failed to upload file ${event.name}: ${uploadMsg}`);
           }
         } else if (event.type === 'text') {
-          await tryUpdate(event.text);
+          if (session.pendingApproval?.kind === 'build_spec') {
+            await tryUpdate(formatBuildSpecApprovalPrompt(session.pendingApproval.prompt, event.text));
+          } else {
+            await tryUpdate(event.text);
+          }
+        } else if (event.type === 'approval_requested') {
+          session.pendingApproval = {
+            kind: 'build_spec',
+            approvalId: event.approvalId,
+            prompt: event.prompt,
+            specRef: event.specRef,
+          };
+
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            kind: 'approval',
+            tool: 'build_spec',
+            result: 'requested',
+          });
+
+          await tryUpdate(formatBuildSpecApprovalPrompt(event.prompt));
         } else if (event.type === 'await_approval') {
           // Park: post the plan, wait for the next thread reply (or a timeout), and
           // feed the result back into the run on the next `next()`.
@@ -720,10 +845,14 @@ export class SessionManager {
           item.channel,
           item.threadTs,
         );
+        const runner = await this.ensureRunner(session);
 
         // Drive the run manually via driveToThread. The router turn ignores the
         // return value — it's only used when runBuild calls driveToThread for the tail.
-        const iterator = session.runner.send(item.message);
+        const iterator = runner.send(
+          item.message,
+          item.approval !== undefined ? { approval: item.approval } : undefined,
+        );
         await this.driveToThread(iterator, placeholder, session, item);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -782,7 +911,7 @@ export class SessionManager {
     // routed to the gate by enqueueExisting, not enqueued as a brand-new turn.
     const result = new Promise<GateResume>((resolve) => {
       const settle = (resume: GateResume): void => {
-        if (session.pendingApproval === null) return; // already settled by the other path
+        if (session.pendingApproval?.kind !== 'legacy') return; // already settled by the other path
         clearTimeout(timer);
         session.pendingApproval = null;
         resolve(resume);
@@ -791,7 +920,7 @@ export class SessionManager {
       if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
         (timer as { unref(): void }).unref();
       }
-      session.pendingApproval = { resolve: settle };
+      session.pendingApproval = { kind: 'legacy', resolve: settle };
     });
     // Post the plan + how to respond AFTER parking is registered. Wording is neutral
     // about the outcome: the framework only feeds a `timeout` resume back into the run;
@@ -912,7 +1041,7 @@ export class SessionManager {
     this.stopVolumeGc();
     const keys = Array.from(this.sessions.keys());
     for (const key of keys) {
-      await this.reapSession(key);
+      await this.reapSession(key, true);
     }
   }
 }

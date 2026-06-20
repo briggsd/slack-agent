@@ -11,7 +11,16 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess, SpawnOptions } from 'child_process';
-import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory, VolumeReaper, GateResume, BuildOutcome } from './types.js';
+import type {
+  ApprovalControl,
+  RunnerEvent,
+  RunnerSendOptions,
+  RunnerStream,
+  SessionRunner,
+  RunnerFactory,
+  VolumeReaper,
+  BuildOutcome,
+} from './types.js';
 import type { Profile } from '../profiles/registry.js';
 import type {
   RunnerToGatewayMessage,
@@ -68,37 +77,10 @@ function toCount(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0;
 }
 
-// ── Commit-gate verdict classification ────────────────────────────────────────
-
-/** Commit keywords (exact match on the whole reply, trimmed + lowercased). */
-const GATE_APPROVE = new Set(['approve', 'approved']);
-
-/**
- * Map a resumed commit gate to the verdict the container's `build_spec` tool (phase ①) receives.
- *
- * The router NEVER abandons a turn at the gate (decision 2026-06-20): every outcome returns a
- * verdict so the parked tool always unblocks and the conversation keeps going. This is where
- * the router diverges from the supervised one-shot `plan-gate.ts`, which still abandons.
- *   - `approve` / `approved` → approved:true (the build tail is dispatched in S12)
- *   - any other reply        → approved:false + the RAW reply as feedback (the agent revises)
- *   - missing resume / timeout → approved:false, no feedback (the turn ends quietly; the
- *     session idles out via the reaper)
- *
- * The raw reply is passed through untouched: it is untrusted human text the agent must delimit
- * as data when revising, never interpret as instructions.
- */
-function classifyGateResume(
-  resume: GateResume | undefined,
-  approvalId: string,
-): ApprovalVerdictMessage {
-  if (resume === undefined || resume.kind === 'timeout') {
-    return { type: 'approval_verdict', id: approvalId, approved: false };
-  }
-  const norm = resume.text.trim().toLowerCase();
-  if (GATE_APPROVE.has(norm)) {
-    return { type: 'approval_verdict', id: approvalId, approved: true };
-  }
-  return { type: 'approval_verdict', id: approvalId, approved: false, feedback: resume.text };
+function approvalControlMessage(control: ApprovalControl): ApprovalVerdictMessage {
+  return control.feedback !== undefined
+    ? { type: 'approval_verdict', id: control.id, specRef: control.specRef, approved: control.approved, feedback: control.feedback }
+    : { type: 'approval_verdict', id: control.id, specRef: control.specRef, approved: control.approved };
 }
 
 // ── Sanitization helpers ──────────────────────────────────────────────────────
@@ -320,7 +302,7 @@ export class DockerRunner implements SessionRunner {
     });
   }
 
-  send(message: string): RunnerStream {
+  send(message: string, opts?: RunnerSendOptions): RunnerStream {
     const self = this;
 
     async function* gen(): RunnerStream {
@@ -332,17 +314,19 @@ export class DockerRunner implements SessionRunner {
         // Generate a simple correlation ID
         const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
+        // Write any trusted approval control first so the next user turn can consume it.
+        if (!self.child.stdin?.writable) {
+          yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+          return;
+        }
+        if (opts?.approval !== undefined) {
+          self.child.stdin.write(JSON.stringify(approvalControlMessage(opts.approval)) + '\n');
+        }
         const outMsg: GatewayToRunnerMessage = {
           type: 'user_message',
           id,
           text: message,
         };
-
-        // Write the user_message line
-        if (!self.child.stdin?.writable) {
-          yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
-          return;
-        }
         self.child.stdin.write(JSON.stringify(outMsg) + '\n');
 
         // Read events until we get text or error for this id
@@ -413,49 +397,19 @@ export class DockerRunner implements SessionRunner {
             yield { type: 'text', text: parsed.text } as RunnerEvent;
             break;
           } else if (parsed.type === 'request_approval') {
-            // The container raised a commit gate from inside the turn (the router's commit;
-            // S10b emits this from the `build_spec` tool, phase ①). Not gated on `id === id`: this
-            // carries its own approval-correlation id, distinct from the turn id. Treat the
-            // line as data — validate shape, never execute it.
+            // The container raised the build-spec human gate from inside the turn. This carries its
+            // own approval id, distinct from the user-message turn id, and does not park the turn:
+            // the manager stores it and routes a later authenticated reply back as a new-turn
+            // approval control.
             if (typeof parsed.id !== 'string') {
-              // No usable id — can't correlate; skip with a log
               console.error('[gateway] malformed request_approval: missing id — skipping');
               continue;
             }
             if (typeof parsed.specRef !== 'string') {
-              // Have an id but spec is malformed — unblock the parked tool
-              const fallback: GatewayToRunnerMessage = { type: 'approval_verdict', id: parsed.id, approved: false };
-              if (self.child.stdin?.writable) {
-                self.child.stdin.write(JSON.stringify(fallback) + '\n');
-              }
+              console.error('[gateway] malformed request_approval: missing specRef — skipping');
               continue;
             }
-            const approvalId = parsed.id;
-            // Park: surface the spec as the `await_approval` event the drive loop already
-            // handles (post + requestor-only gate). The resume fed back via next() is the
-            // gateway's checked verdict.
-            const resume = yield { type: 'await_approval', prompt: parsed.specRef } as RunnerEvent;
-            // Always answer the container: the router never abandons at the gate, so the parked
-            // build_spec tool (phase ①) always unblocks and the conversation continues. If stdin is gone,
-            // fail the turn explicitly — same guard as the initial user_message write — rather
-            // than dropping the verdict, resetting the budget, and waiting a full fresh turn for
-            // a reply the container can never receive.
-            if (!self.child.stdin?.writable) {
-              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
-              return;
-            }
-            // `resume` is `GateResume | BuildOutcome | undefined` (widened TNext). The manager
-            // pairs each yield with the resume type for that yield: an `await_approval` yield is
-            // resumed with a `GateResume`, a `run_build` yield (below) with a `BuildOutcome`. This
-            // is the approval yield, so its resume is always a GateResume (or undefined) — cast it.
-            const verdict: GatewayToRunnerMessage = classifyGateResume(
-              resume as GateResume | undefined,
-              approvalId,
-            );
-            self.child.stdin.write(JSON.stringify(verdict) + '\n');
-            // Restart the turn budget: wall-clock spent parked at the human gate (which can
-            // far exceed turnTimeoutMs) must not count against the post-approval continuation.
-            deadline = Date.now() + turnTimeoutMs;
+            yield { type: 'approval_requested', approvalId: parsed.id, prompt: parsed.specRef, specRef: parsed.specRef } as RunnerEvent;
             continue;
           } else if (parsed.type === 'request_clone') {
             // The container requested a credentialed clone (the credential never enters the agent env).

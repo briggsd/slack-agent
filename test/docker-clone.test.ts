@@ -229,7 +229,7 @@ describe('DockerRunner — request_clone round-trip (S11)', () => {
 });
 
 describe('DockerRunner — carry-forward fix for malformed request_approval (S11)', () => {
-  it('a malformed request_approval (has id, missing specRef) writes approval_verdict{approved:false} to unblock the parked tool', async () => {
+  it('a malformed request_approval (has id, missing specRef) is skipped without writing approval_verdict', async () => {
     const { runner, fake } = await makeReadyRunner();
     const iter = runner.send('build')[Symbol.asyncIterator]();
 
@@ -243,12 +243,6 @@ describe('DockerRunner — carry-forward fix for malformed request_approval (S11
     const e1 = await e1Promise;
     expect(e1.value).toEqual({ type: 'text', text: 'done' });
 
-    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
-    expect(verdictLine).toBeDefined();
-    expect(JSON.parse(verdictLine ?? '{}')).toEqual({
-      type: 'approval_verdict',
-      id: 'appr-x',
-      approved: false,
-    });
+    expect(fake.stdinLines.some((l) => l.includes('approval_verdict'))).toBe(false);
   });
 });

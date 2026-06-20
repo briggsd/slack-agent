@@ -5,6 +5,10 @@ export type RunnerEvent =
   | { type: 'file'; name: string; data: Buffer }  // file produced during the turn
   | { type: 'text'; text: string }     // final assistant text for this turn
   | { type: 'await_approval'; prompt: string }  // gateway-side gate: pause, post `prompt`, await a reply
+  // gateway-internal: the runner's build_spec tool asked the gateway to collect a human decision,
+  // but the turn itself continues and ends normally. The manager stores the approval id and routes
+  // a later authenticated thread reply back as a new-turn approval control.
+  | { type: 'approval_requested'; approvalId: string; prompt: string; specRef: string }
   // gateway-side: a gate deliberately ended the run (cancel/timeout) — NOT an error. Contract:
   // the consumer stops driving the stream on this event (calls `.return()`), which unwinds the
   // run's `finally` blocks (e.g. the orchestrator's lease revoke). It is the terminal counterpart
@@ -46,6 +50,18 @@ export type BuildOutcome =
   | { ok: true }
   | { ok: false; reason: string };  // short, token-free
 
+/** A trusted approval verdict that the gateway feeds to the runner before the next user turn. */
+export type ApprovalControl = {
+  id: string;
+  specRef: string;
+  approved: boolean;
+  feedback?: string;
+};
+
+export interface RunnerSendOptions {
+  approval?: ApprovalControl;
+}
+
 /**
  * A run's event stream. Two-way: the consumer may feed a {@link GateResume} back via
  * `next()` to resume a run parked at an `await_approval` gate, or a {@link BuildOutcome}
@@ -57,7 +73,7 @@ export type RunnerStream = AsyncGenerator<RunnerEvent, void, GateResume | BuildO
 
 export interface SessionRunner {
   /** Send one user message; yields events until the turn completes. */
-  send(message: string): RunnerStream;
+  send(message: string, opts?: RunnerSendOptions): RunnerStream;
   dispose(): Promise<void>;
 }
 
