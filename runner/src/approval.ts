@@ -9,7 +9,13 @@
  * takes an emit callback and is driven by parsed messages, so it unit-tests offline.
  */
 
-import type { ApprovalVerdictMessage, BuildResultMessage, CloneResultMessage, UserMessage } from './protocol.js';
+import type {
+  ApprovalVerdictMessage,
+  BuildResultMessage,
+  CloneResultMessage,
+  PublishResultMessage,
+  UserMessage,
+} from './protocol.js';
 
 /** The human's decision on a submitted spec, as the tool sees it. */
 export type Verdict = { approved: boolean; feedback?: string };
@@ -83,6 +89,7 @@ export type InboundParsed =
   | { kind: 'verdict'; msg: ApprovalVerdictMessage }
   | { kind: 'clone_result'; msg: CloneResultMessage }
   | { kind: 'build_result'; msg: BuildResultMessage }
+  | { kind: 'publish_result'; msg: PublishResultMessage }
   | { kind: 'bad'; error: string };
 
 /**
@@ -153,6 +160,24 @@ export function parseInbound(line: string): InboundParsed {
       msg = { type: 'build_result', id, ok: false };
     }
     return { kind: 'build_result', msg };
+  }
+  if (obj['type'] === 'publish_result') {
+    if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
+      return { kind: 'bad', error: 'unexpected publish_result shape' };
+    }
+    const ok = obj['ok'];
+    const id = obj['id'];
+    let msg: PublishResultMessage;
+    if (ok && typeof obj['prUrl'] === 'string') {
+      msg = { type: 'publish_result', id, ok: true, prUrl: obj['prUrl'] };
+    } else if (ok) {
+      msg = { type: 'publish_result', id, ok: true };
+    } else if (typeof obj['reason'] === 'string') {
+      msg = { type: 'publish_result', id, ok: false, reason: obj['reason'] };
+    } else {
+      msg = { type: 'publish_result', id, ok: false };
+    }
+    return { kind: 'publish_result', msg };
   }
   return { kind: 'bad', error: 'unknown message type' };
 }

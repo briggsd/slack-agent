@@ -24,6 +24,8 @@ import { DockerGitNodeExecutor } from '../oneshot/docker-git-node.js';
 import { parseCheckCmds } from '../config.js';
 import { FakeGitNodeExecutor } from '../oneshot/fake-git-node.js';
 import { DispatchingRunnerFactory } from '../oneshot/dispatching-factory.js';
+import { RealCloneService } from '../oneshot/clone-service.js';
+import { RealPublishService } from '../oneshot/publish-service.js';
 
 // ─── Minimal config (does not call loadConfig — avoids requiring Slack tokens) ─
 
@@ -49,17 +51,6 @@ let baseFactory: RunnerFactory;
 let dispatchingFactory: DispatchingRunnerFactory;
 
 if (RUNNER_BACKEND === 'docker') {
-  baseFactory = new DockerRunnerFactory({
-    image: envString('RUNNER_IMAGE', 'slackbot-runner:latest'),
-    readyTimeoutMs: envNumber('RUNNER_READY_TIMEOUT_MS', 30_000),
-    turnTimeoutMs: envNumber('RUNNER_TURN_TIMEOUT_MS', 5 * 60_000),
-    killGraceMs: envNumber('RUNNER_KILL_GRACE_MS', 5_000),
-    memory: envString('RUNNER_MEMORY', '512m'),
-    cpus: envString('RUNNER_CPUS', '1.0'),
-    pidsLimit: envNumber('RUNNER_PIDS_LIMIT', 256),
-  });
-  console.log('[harness] using DockerRunnerFactory');
-
   // Build real broker + git-node executor for docker backend
   const botTokens = new Map<GitHost, string>();
   const githubToken = process.env['GITHUB_BOT_TOKEN'];
@@ -76,6 +67,19 @@ if (RUNNER_BACKEND === 'docker') {
     ...(testCmdRaw !== undefined && testCmdRaw !== '' ? { testCmd: testCmdRaw } : {}),
     ...(checkCmds.size > 0 ? { checkCmds } : {}),
   });
+  const cloneService = new RealCloneService(broker, gitNodes);
+  const publishService = new RealPublishService(broker, gitNodes);
+  baseFactory = new DockerRunnerFactory({
+    image: envString('RUNNER_IMAGE', 'slackbot-runner:latest'),
+    readyTimeoutMs: envNumber('RUNNER_READY_TIMEOUT_MS', 30_000),
+    turnTimeoutMs: envNumber('RUNNER_TURN_TIMEOUT_MS', 5 * 60_000),
+    killGraceMs: envNumber('RUNNER_KILL_GRACE_MS', 5_000),
+    memory: envString('RUNNER_MEMORY', '512m'),
+    cpus: envString('RUNNER_CPUS', '1.0'),
+    pidsLimit: envNumber('RUNNER_PIDS_LIMIT', 256),
+  }, undefined, cloneService, publishService);
+  console.log('[harness] using DockerRunnerFactory');
+
   dispatchingFactory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);
   console.log(`[harness] one-shot mode: docker (hosts=[${[...botTokens.keys()].join(',')}])`);
 } else {

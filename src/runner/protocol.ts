@@ -17,7 +17,12 @@
 
 // ── Gateway → Runner ──────────────────────────────────────────────────────────
 
-export type GatewayToRunnerMessage = UserMessage | ApprovalVerdictMessage | CloneResultMessage | BuildResultMessage;
+export type GatewayToRunnerMessage =
+  | UserMessage
+  | ApprovalVerdictMessage
+  | CloneResultMessage
+  | BuildResultMessage
+  | PublishResultMessage;
 
 export type UserMessage = {
   type: 'user_message';
@@ -76,6 +81,21 @@ export type BuildResultMessage = {
   reason?: string;  // present iff !ok — short, token-free
 };
 
+/**
+ * The gateway's result of publishing a verified local candidate the runner requested via a
+ * {@link RequestPublishMessage}. `id` echoes the `request_publish` this answers. `prUrl` is the
+ * opened PR URL (present iff `ok`). `reason` is a short diagnostic (present iff `!ok`, token-free).
+ * (`exactOptionalPropertyTypes` is on — `prUrl` and `reason` are genuinely optional, never
+ * `undefined`-valued.)
+ */
+export type PublishResultMessage = {
+  type: 'publish_result';
+  id: string;       // echoes the request_publish this answers
+  ok: boolean;
+  prUrl?: string;   // present iff ok
+  reason?: string;  // present iff !ok — short, token-free
+};
+
 // ── Runner → Gateway ──────────────────────────────────────────────────────────
 
 export type RunnerToGatewayMessage =
@@ -87,6 +107,7 @@ export type RunnerToGatewayMessage =
   | RequestApprovalMessage
   | RequestCloneMessage
   | RequestBuildMessage
+  | RequestPublishMessage
   | ErrorMessage;
 
 /** Emitted once when the runner is ready to accept input. */
@@ -184,6 +205,23 @@ export type RequestBuildMessage = {
   type: 'request_build';
   id: string;    // the runner's own build-correlation id
   repo: string;  // "owner/name" — the cloned repo the coordinator wants built
+};
+
+/**
+ * The runner requests publication of a verified local candidate. Raised from INSIDE a turn: the
+ * agent calls the `publish`/`open_pr` tool, which emits this line and blocks until the gateway
+ * answers with a {@link PublishResultMessage} bearing the same `id`. The gateway services the
+ * publish inline — it mints a WRITE lease, pushes the session volume's repo worktree, opens a PR,
+ * revokes the lease, and returns the PR URL (or a failure reason). The credential never enters
+ * the agent env. `id` is the runner's own publish-correlation id (distinct from the turn id).
+ * `repo` is the strict "owner/name" slug whose workdir is derived by the gateway.
+ */
+export type RequestPublishMessage = {
+  type: 'request_publish';
+  id: string;     // the runner's own publish-correlation id
+  repo: string;   // "owner/name" — the verified repo candidate to publish
+  title?: string; // optional PR title override
+  body?: string;  // optional PR body override
 };
 
 /** Per-message failure. The runner remains usable after an error. */

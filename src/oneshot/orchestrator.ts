@@ -17,6 +17,23 @@ import { blueprintFor } from './registry.js';
 import { runBlueprint } from '../blueprints/executor.js';
 import type { OneShotContext, OneShotDeps } from './context.js';
 
+export function branchForTask(taskId: string): string {
+  return `slackbot/oneshot-${taskId}`;
+}
+
+export function taskIdFromWorkspaceVolume(volume: string): string {
+  const prefix = 'slackbot-ws-';
+  return volume.startsWith(prefix) ? volume.slice(prefix.length) : volume;
+}
+
+export function taskIdForSessionKey(sessionKey: string): string {
+  return taskIdFromWorkspaceVolume(volumeNameFor(sessionKey));
+}
+
+export function workdirForRepo(repo: string): string {
+  return `/workspace/${repo.replaceAll('/', '-')}`;
+}
+
 export class OneShotOrchestrator implements SessionRunner {
   private readonly inner: SessionRunner;
   private readonly broker: CredentialBroker;
@@ -74,14 +91,13 @@ export class OneShotOrchestrator implements SessionRunner {
       }
       ({ host, repo, instruction } = parsed);
     }
-    const branch = `slackbot/oneshot-${self.taskId}`;
+    const branch = branchForTask(self.taskId);
     // Stable workdir derived from the repo slug (ALL slashes → dashes, so GitLab
     // subgroups collapse to one path segment). The slug is already validated safe
     // (no traversal) by parseOneShotTask on the parsed path or by the isSafeRepoSlug
     // check above on the explicit-context path. One thread = one session = one
     // container/volume, so this fixed path is single-occupant — no per-task scoping needed.
-    const repoSlug = repo.replaceAll('/', '-');
-    const workdir = `/workspace/${repoSlug}`;
+    const workdir = workdirForRepo(repo);
 
     // Lease acquisition is fallible (e.g. an unconfigured host throws) — surface it
     // as an error event rather than letting the rejection escape the iterator.
