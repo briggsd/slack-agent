@@ -146,6 +146,36 @@ describe('S12a — createBuildRunner runs the build-tail blueprint', () => {
     expect(baseFactory.suffixes[0]).toBe('build');
   });
 
+  it('emits an error instead of reporting candidate-ready when checks still fail after retries', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://github.com/acme/widgets/pull/1');
+    gitNodes.setCheckResult('lint', {
+      exitCode: 1,
+      output: 'Error: socket hang up',
+      skipped: false,
+    });
+    const baseFactory = new FakeRunnerFactory([
+      [{ type: 'text', text: 'impl cycle 1 done' }],
+      [{ type: 'text', text: 'impl cycle 2 done' }],
+    ]);
+
+    const factory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);
+    const runner = await factory.createBuildRunner(TEST_SESSION_KEY, 'acme/widgets');
+
+    const events = await drain(runner.send(''));
+
+    expect(
+      events.some((e) => e.type === 'error' && e.message === 'build checks failed after retries'),
+    ).toBe(true);
+    expect(events.filter((e) => e.type === 'pr_opened')).toHaveLength(0);
+    expect(gitNodes.checks).toHaveLength(4);
+    expect(gitNodes.pushes).toHaveLength(0);
+    expect(gitNodes.changeRequests).toHaveLength(0);
+    expect(broker.leases).toHaveLength(0);
+    expect(broker.revokes).toHaveLength(0);
+    expect(baseFactory.suffixes).toEqual(['build']);
+  });
+
   it('rejects an unsafe repo slug (traversal) with an error event before any lease or git op', async () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor('https://github.com/x/y/pull/1');

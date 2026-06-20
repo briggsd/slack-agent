@@ -151,6 +151,9 @@ export class OneShotOrchestrator implements SessionRunner {
       }
     };
 
+    const checkPolicy =
+      blueprint.requiresPassingChecks === true ? { requiresPassingChecks: true } : {};
+
     const ctx: OneShotContext = {
       host,
       repo,
@@ -160,6 +163,7 @@ export class OneShotOrchestrator implements SessionRunner {
       workdir,
       branch,
       lease,
+      ...checkPolicy,
     };
 
     const deps: OneShotDeps = {

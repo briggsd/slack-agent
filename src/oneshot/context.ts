@@ -46,6 +46,7 @@ export interface OneShotAgenticContext {
  */
 export interface OneShotContext extends OneShotAgenticContext {
   readonly lease: CredentialLease;
+  readonly requiresPassingChecks?: boolean;
 }
 
 export type OneShotNode = BlueprintNode<OneShotContext, OneShotDeps>;
@@ -59,6 +60,8 @@ export type OneShotAgenticNode = BlueprintNode<OneShotAgenticContext, OneShotDep
 export interface OneShotBlueprint extends Blueprint<OneShotContext, OneShotDeps> {
   /** False for local-only blueprints that never need a real credential lease. */
   readonly requiresLease?: boolean;
+  /** True for local candidate flows that must fail closed when checks do not pass. */
+  readonly requiresPassingChecks?: boolean;
 }
 
 // Compile-time guard for the structural invariant: the agent-facing view must NEVER

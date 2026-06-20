@@ -21,6 +21,11 @@ export interface BoundedRetryOptions<Ctx, Deps> {
    * An optional status string is yielded as a status event if present.
    */
   decide(ctx: Ctx, deps: Deps, attempt: number): Promise<{ retry: boolean; status?: string }>;
+  /**
+   * Optional final assertion after the loop exits, whether it used all attempts or
+   * stopped early. Throw to convert the blueprint result into an error event.
+   */
+  finish?(ctx: Ctx, deps: Deps): Promise<{ status?: string }>;
 }
 
 /**
@@ -59,6 +64,12 @@ export function boundedRetry<Ctx, Deps>(
           if (!retry) {
             break;
           }
+        }
+      }
+      if (opts.finish !== undefined) {
+        const { status } = await opts.finish(ctx, deps);
+        if (status !== undefined) {
+          yield { type: 'status', text: status };
         }
       }
     },
