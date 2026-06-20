@@ -26,6 +26,9 @@ import { BuildCoordinator } from './build.js';
 import type { BuildOutcome } from './build.js';
 import { PublishCoordinator } from './publish.js';
 import type { PublishInput, PublishOutcome } from './publish.js';
+import { ChecksCoordinator } from './checks.js';
+import type { ChecksInput, ChecksOutcome } from './checks.js';
+import type { RunChecksKind } from './protocol.js';
 
 // ── Injectable seams for testing ──────────────────────────────────────────────
 
@@ -76,6 +79,12 @@ export type SdkQueryFn = (params: {
    * the test fake calls it directly. Omitted only by callers that don't wire publish support.
    */
   publish?: (input: PublishInput) => Promise<PublishOutcome>;
+  /**
+   * Bound at the runner so the SDK's `run_checks` tool can ask the gateway to run deterministic
+   * checks on the verified local candidate. The real query wraps this in an in-process MCP tool;
+   * the test fake calls it directly. Omitted only by callers that don't wire check support.
+   */
+  runChecks?: (input: ChecksInput) => Promise<ChecksOutcome>;
   options?: {
     resume?: string;
     cwd?: string;
@@ -144,7 +153,11 @@ const CLONE_SYSTEM_PROMPT_ADDITION =
   'builds the approved plan).';
 
 const PUBLISH_SYSTEM_PROMPT_ADDITION =
-  'After the coordinator has verified the local candidate, use publish (mcp__commit__publish) ' +
+  'After build_spec returns candidate-ready, inspect the cloned repo worktree with normal ' +
+  'workspace tools before publishing; for example, use Bash to run git -C /workspace/<owner-name> ' +
+  'diff main...HEAD or equivalent. Then call run_checks (mcp__commit__run_checks) with the same ' +
+  '"owner/name" repo and review the raw lint/test output. After the coordinator has verified the ' +
+  'diff and checks, use publish (mcp__commit__publish) ' +
   'or open_pr (mcp__commit__open_pr) with the same "owner/name" repo to ask the gateway to push ' +
   'the verified worktree and open a PR. The gateway handles credentials; do not push or open a PR yourself.';
 
@@ -206,6 +219,33 @@ export async function runPublish(
     : `PUBLISH DID NOT COMPLETE: ${outcome.reason}. Tell the user the short failure reason.`;
 }
 
+/**
+ * The run_checks tool flow: ask the gateway to run deterministic project checks and return raw
+ * check output as delimited data. Exported so it is unit-testable without the SDK.
+ */
+export async function runChecks(
+  input: ChecksInput,
+  checks: (input: ChecksInput) => Promise<ChecksOutcome>,
+): Promise<string> {
+  const normalized: ChecksInput = { repo: input.repo, kind: input.kind ?? 'all' };
+  const outcome = await checks(normalized);
+  if (!outcome.ok) {
+    return `RUN CHECKS DID NOT COMPLETE: ${outcome.reason}. Tell the user the short failure reason.`;
+  }
+
+  const parts = outcome.results.map((result) =>
+    [
+      `CHECK ${result.kind}`,
+      `exitCode: ${result.exitCode}`,
+      `skipped: ${result.skipped}`,
+      `<raw_output kind="${result.kind}">`,
+      result.output,
+      '</raw_output>',
+    ].join('\n'),
+  );
+  return `RUN CHECKS COMPLETE. Requested kind: ${normalized.kind}.\n\n${parts.join('\n\n')}`;
+}
+
 function publishInputFromArgs(args: {
   repo: string;
   title?: string | undefined;
@@ -215,6 +255,16 @@ function publishInputFromArgs(args: {
     repo: args.repo,
     ...(args.title !== undefined ? { title: args.title } : {}),
     ...(args.body !== undefined ? { body: args.body } : {}),
+  };
+}
+
+function checksInputFromArgs(args: {
+  repo: string;
+  kind?: RunChecksKind | undefined;
+}): ChecksInput {
+  return {
+    repo: args.repo,
+    kind: args.kind ?? 'all',
   };
 }
 
@@ -279,6 +329,18 @@ export async function runLoop(opts: {
     emit(msg);
   });
 
+  // The checks coordinator. `run_checks` calls checksCoordinator.requestChecks mid-turn;
+  // inbound run_checks_result lines are routed to checksCoordinator.handleResult by the dispatcher.
+  const checksCoordinator = new ChecksCoordinator((input, checksId) => {
+    const msg: RunnerToGatewayMessage = {
+      type: 'request_run_checks',
+      id: checksId,
+      repo: input.repo,
+      kind: input.kind ?? 'all',
+    };
+    emit(msg);
+  });
+
   // Signal readiness
   emit({ type: 'ready' });
 
@@ -328,6 +390,12 @@ export async function runLoop(opts: {
       }
       return;
     }
+    if (parsed.kind === 'run_checks_result') {
+      if (!checksCoordinator.handleResult(parsed.msg)) {
+        log(`run_checks_result for unknown id ${parsed.msg.id} — ignored`);
+      }
+      return;
+    }
     if (parsed.kind === 'user') {
       turnQueue.push(parsed.msg);
       signal();
@@ -343,6 +411,7 @@ export async function runLoop(opts: {
     cloneCoordinator.failAllPending();
     buildCoordinator.failAllPending();
     publishCoordinator.failAllPending();
+    checksCoordinator.failAllPending();
     signal();
   });
 
@@ -350,6 +419,7 @@ export async function runLoop(opts: {
   const cloneRepo = (repo: string): Promise<CloneOutcome> => cloneCoordinator.requestClone(repo);
   const requestBuild = (repo: string): Promise<BuildOutcome> => buildCoordinator.requestBuild(repo);
   const publish = (input: PublishInput): Promise<PublishOutcome> => publishCoordinator.requestPublish(input);
+  const runChecks = (input: ChecksInput): Promise<ChecksOutcome> => checksCoordinator.requestChecks(input);
 
   // Drain turns serially. A turn holds the loop until its SDK stream completes; verdicts for
   // an in-flight gate are delivered concurrently by the listener above, not from here.
@@ -378,6 +448,7 @@ export async function runLoop(opts: {
       cloneRepo,
       requestBuild,
       publish,
+      runChecks,
     });
   }
 }
@@ -400,6 +471,7 @@ async function processTurn(
     cloneRepo: (repo: string) => Promise<CloneOutcome>;
     requestBuild: (repo: string) => Promise<BuildOutcome>;
     publish: (input: PublishInput) => Promise<PublishOutcome>;
+    runChecks: (input: ChecksInput) => Promise<ChecksOutcome>;
   },
 ): Promise<string | null> {
   const { id, text } = msg;
@@ -415,6 +487,7 @@ async function processTurn(
       cloneRepo: deps.cloneRepo,
       requestBuild: deps.requestBuild,
       publish: deps.publish,
+      runChecks: deps.runChecks,
       options: {
         ...(currentSessionId !== null ? { resume: currentSessionId } : {}),
         cwd: WORKSPACE_DIR,
@@ -723,13 +796,12 @@ async function realReadBinaryFile(path: string): Promise<Buffer | null> {
 }
 
 /**
- * Build the in-process MCP server that exposes the build gate as the `build_spec` tool and
- * the clone tool as `clone_repo`. `build_spec` reads /workspace/SPEC.md (via the injected
- * readFile seam), raises the approval gate (phase ①), and on approval requests a build via the
- * injected requestBuild callback (phase ②). `clone_repo` calls the injected cloneRepo callback
- * which in turn emits a `request_clone` to the gateway. Both tools surface to the model under
- * the `mcp__commit__` prefix. `alwaysLoad` keeps them out of deferred tool search so the agent
- * can always reach them.
+ * Build the in-process MCP server that exposes the commit workflow tools. `build_spec` reads
+ * /workspace/SPEC.md (via the injected readFile seam), raises the approval gate (phase ①), and
+ * on approval requests a build via the injected requestBuild callback (phase ②). `clone_repo`,
+ * `run_checks`, and `publish`/`open_pr` emit gateway-serviced requests. All tools surface to the
+ * model under the `mcp__commit__` prefix. `alwaysLoad` keeps them out of deferred tool search so
+ * the agent can always reach them.
  */
 function buildCommitMcpServer(
   submitSpec: (specRef: string) => Promise<Verdict>,
@@ -737,6 +809,7 @@ function buildCommitMcpServer(
   cloneRepo: (repo: string) => Promise<CloneOutcome>,
   requestBuild: (repo: string) => Promise<BuildOutcome>,
   publish: (input: PublishInput) => Promise<PublishOutcome>,
+  runChecksFn: (input: ChecksInput) => Promise<ChecksOutcome>,
 ) {
   const buildSpecTool = tool(
     'build_spec',
@@ -772,6 +845,23 @@ function buildCommitMcpServer(
     body: z.string().optional().describe('Optional PR body. Omit or leave empty for the gateway fallback.'),
   };
 
+  const checksSchema = {
+    repo: z.string().describe('Repository slug in "owner/name" format.'),
+    kind: z.enum(['lint', 'test', 'all']).optional().describe('Which checks to run. Omit for all.'),
+  };
+
+  const runChecksTool = tool(
+    'run_checks',
+    'Run deterministic project checks on the local candidate through the gateway. Pass the ' +
+      '"owner/name" repo. Defaults to all, which runs lint then test. Inspect the raw output; ' +
+      'non-zero check exits are returned as data, not tool failure.',
+    checksSchema,
+    async (args) => {
+      const text = await runChecks(checksInputFromArgs(args), runChecksFn);
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
   const publishTool = tool(
     'publish',
     'Publish a verified local candidate by asking the gateway to push the session worktree and open a PR. ' +
@@ -796,7 +886,7 @@ function buildCommitMcpServer(
   return createSdkMcpServer({
     name: 'commit',
     version: '0.0.0',
-    tools: [buildSpecTool, cloneRepoTool, publishTool, openPrTool],
+    tools: [buildSpecTool, cloneRepoTool, runChecksTool, publishTool, openPrTool],
     alwaysLoad: true,
   });
 }
@@ -807,6 +897,7 @@ function realSdkQuery(params: {
   cloneRepo?: (repo: string) => Promise<CloneOutcome>;
   requestBuild?: (repo: string) => Promise<BuildOutcome>;
   publish?: (input: PublishInput) => Promise<PublishOutcome>;
+  runChecks?: (input: ChecksInput) => Promise<ChecksOutcome>;
   options?: {
     resume?: string;
     cwd?: string;
@@ -822,14 +913,14 @@ function realSdkQuery(params: {
   };
 }): AsyncIterable<SDKMessage> {
   const opts = params.options;
-  // build_spec, clone_repo, publish, and open_pr are always wired together by runLoop, and the
-  // commit MCP server hosts all of them. All-four-or-nothing: never half-load the server if only
+  // The commit MCP tools are always wired together by runLoop. Never half-load the server if only
   // some callbacks were ever passed.
   const mcpServers =
     params.submitSpec !== undefined &&
     params.cloneRepo !== undefined &&
     params.requestBuild !== undefined &&
     params.publish !== undefined
+    && params.runChecks !== undefined
       ? {
           commit: buildCommitMcpServer(
             params.submitSpec,
@@ -837,6 +928,7 @@ function realSdkQuery(params: {
             params.cloneRepo,
             params.requestBuild,
             params.publish,
+            params.runChecks,
           ),
         }
       : undefined;

@@ -14,6 +14,8 @@ import type {
   BuildResultMessage,
   CloneResultMessage,
   PublishResultMessage,
+  RunChecksResult,
+  RunChecksResultMessage,
   UserMessage,
 } from './protocol.js';
 
@@ -90,6 +92,7 @@ export type InboundParsed =
   | { kind: 'clone_result'; msg: CloneResultMessage }
   | { kind: 'build_result'; msg: BuildResultMessage }
   | { kind: 'publish_result'; msg: PublishResultMessage }
+  | { kind: 'run_checks_result'; msg: RunChecksResultMessage }
   | { kind: 'bad'; error: string };
 
 /**
@@ -178,6 +181,47 @@ export function parseInbound(line: string): InboundParsed {
       msg = { type: 'publish_result', id, ok: false };
     }
     return { kind: 'publish_result', msg };
+  }
+  if (obj['type'] === 'run_checks_result') {
+    if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
+      return { kind: 'bad', error: 'unexpected run_checks_result shape' };
+    }
+    const ok = obj['ok'];
+    const id = obj['id'];
+    let msg: RunChecksResultMessage;
+    if (ok) {
+      if (!Array.isArray(obj['results'])) {
+        return { kind: 'bad', error: 'unexpected run_checks_result shape' };
+      }
+      const results: RunChecksResult[] = [];
+      for (const item of obj['results']) {
+        if (typeof item !== 'object' || item === null) {
+          return { kind: 'bad', error: 'unexpected run_checks_result shape' };
+        }
+        const result = item as Record<string, unknown>;
+        if (
+          (result['kind'] !== 'lint' && result['kind'] !== 'test') ||
+          typeof result['exitCode'] !== 'number' ||
+          !Number.isFinite(result['exitCode']) ||
+          typeof result['skipped'] !== 'boolean' ||
+          typeof result['output'] !== 'string'
+        ) {
+          return { kind: 'bad', error: 'unexpected run_checks_result shape' };
+        }
+        results.push({
+          kind: result['kind'],
+          exitCode: result['exitCode'],
+          skipped: result['skipped'],
+          output: result['output'],
+        });
+      }
+      msg = { type: 'run_checks_result', id, ok: true, results };
+    } else if (typeof obj['reason'] === 'string') {
+      msg = { type: 'run_checks_result', id, ok: false, reason: obj['reason'] };
+    } else {
+      msg = { type: 'run_checks_result', id, ok: false };
+    }
+    return { kind: 'run_checks_result', msg };
   }
   return { kind: 'bad', error: 'unknown message type' };
 }

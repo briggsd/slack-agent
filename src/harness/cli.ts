@@ -26,6 +26,7 @@ import { FakeGitNodeExecutor } from '../oneshot/fake-git-node.js';
 import { DispatchingRunnerFactory } from '../oneshot/dispatching-factory.js';
 import { RealCloneService } from '../oneshot/clone-service.js';
 import { RealPublishService } from '../oneshot/publish-service.js';
+import { RealCheckService } from '../oneshot/check-service.js';
 
 // ─── Minimal config (does not call loadConfig — avoids requiring Slack tokens) ─
 
@@ -69,6 +70,7 @@ if (RUNNER_BACKEND === 'docker') {
   });
   const cloneService = new RealCloneService(broker, gitNodes);
   const publishService = new RealPublishService(broker, gitNodes);
+  const checkService = new RealCheckService(gitNodes);
   baseFactory = new DockerRunnerFactory({
     image: envString('RUNNER_IMAGE', 'slackbot-runner:latest'),
     readyTimeoutMs: envNumber('RUNNER_READY_TIMEOUT_MS', 30_000),
@@ -77,7 +79,7 @@ if (RUNNER_BACKEND === 'docker') {
     memory: envString('RUNNER_MEMORY', '512m'),
     cpus: envString('RUNNER_CPUS', '1.0'),
     pidsLimit: envNumber('RUNNER_PIDS_LIMIT', 256),
-  }, undefined, cloneService, publishService);
+  }, undefined, cloneService, publishService, checkService);
   console.log('[harness] using DockerRunnerFactory');
 
   dispatchingFactory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);

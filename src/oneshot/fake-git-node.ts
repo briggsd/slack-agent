@@ -30,6 +30,7 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   private verifyRepoResult = true;
   private pushError: Error | null = null;
   private openChangeError: Error | null = null;
+  private checkError: Error | null = null;
 
   /** Fixed fallback result when no queue entry is available. */
   private checkResults: Map<'lint' | 'test', CheckResult> = new Map();
@@ -66,6 +67,11 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   /** Script openChangeRequest() to reject with the given error (for failure-path tests). */
   failNextOpenChange(err: Error): void {
     this.openChangeError = err;
+  }
+
+  /** Script runCheck() to reject with the given error (for infrastructure failure tests). */
+  failNextCheck(err: Error): void {
+    this.checkError = err;
   }
 
   /** Script runCheck() to always return a specific result for the given kind. */
@@ -127,6 +133,11 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
 
   async runCheck(req: CheckRequest): Promise<CheckResult> {
     this.checks.push(req);
+    if (this.checkError !== null) {
+      const err = this.checkError;
+      this.checkError = null;
+      throw err;
+    }
 
     // Try to pop from the queue first
     const queue = this.checkQueues.get(req.kind);

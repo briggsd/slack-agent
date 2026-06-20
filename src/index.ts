@@ -21,6 +21,7 @@ import type { GitNodeExecutor } from './oneshot/git-node.js';
 import { DispatchingRunnerFactory } from './oneshot/dispatching-factory.js';
 import { RealCloneService } from './oneshot/clone-service.js';
 import { RealPublishService } from './oneshot/publish-service.js';
+import { RealCheckService } from './oneshot/check-service.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -109,6 +110,7 @@ async function main(): Promise<void> {
     });
     const cloneService = new RealCloneService(broker, gitNodes);
     const publishService = new RealPublishService(broker, gitNodes);
+    const checkService = new RealCheckService(gitNodes);
 
     const dockerFactory = new DockerRunnerFactory({
       image: dc.RUNNER_IMAGE,
@@ -118,7 +120,7 @@ async function main(): Promise<void> {
       memory: dc.RUNNER_MEMORY,
       cpus: dc.RUNNER_CPUS,
       pidsLimit: dc.RUNNER_PIDS_LIMIT,
-    }, nodeSpawn, cloneService, publishService);
+    }, nodeSpawn, cloneService, publishService, checkService);
     baseFactory = dockerFactory;
     volumeReaper = dockerFactory;
     console.log(`[gateway] using DockerRunnerFactory (image=${dc.RUNNER_IMAGE})`);

@@ -21,11 +21,14 @@ import type {
   RequestCloneMessage,
   RequestBuildMessage,
   PublishResultMessage,
+  RunChecksResultMessage,
 } from './protocol.js';
 import type { CloneService } from './clone-service.js';
 import type { CloneOutcome } from './clone-service.js';
 import type { PublishService } from './publish-service.js';
 import type { PublishOutcome, PublishServiceRequest } from './publish-service.js';
+import type { CheckService } from './check-service.js';
+import type { CheckOutcome, CheckServiceRequest, RunChecksKind } from './check-service.js';
 
 // ── Config types ──────────────────────────────────────────────────────────────
 
@@ -118,6 +121,8 @@ const PER_TURN_COST_CEILING_MICRO_USD = 20_000_000;
 /** Hard cap on a single `docker volume rm` so a wedged daemon can't stall the GC sweep. */
 const VOLUME_RM_TIMEOUT_MS = 30_000;
 
+const SAFE_OWNER_REPO_SLUG = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
 // ── DockerRunner ──────────────────────────────────────────────────────────────
 
 export class DockerRunner implements SessionRunner {
@@ -127,6 +132,7 @@ export class DockerRunner implements SessionRunner {
   private readonly cloneService?: CloneService;
   private readonly volume?: string;
   private readonly publishService?: PublishService;
+  private readonly checkService?: CheckService;
   private disposed = false;
 
   /** Buffer for partial stdout data (NDJSON framing — may receive split chunks) */
@@ -152,6 +158,7 @@ export class DockerRunner implements SessionRunner {
     cloneService?: CloneService,
     volume?: string,
     publishService?: PublishService,
+    checkService?: CheckService,
   ) {
     this.child = child;
     this.config = config;
@@ -159,6 +166,7 @@ export class DockerRunner implements SessionRunner {
     if (cloneService !== undefined) this.cloneService = cloneService;
     if (volume !== undefined) this.volume = volume;
     if (publishService !== undefined) this.publishService = publishService;
+    if (checkService !== undefined) this.checkService = checkService;
 
     // A broken pipe (container died mid-write) must not crash the gateway
     child.stdin?.on('error', () => {});
@@ -584,6 +592,58 @@ export class DockerRunner implements SessionRunner {
             // post-publish continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
             continue;
+          } else if (parsed.type === 'request_run_checks') {
+            // The container requested deterministic checks for a verified local candidate.
+            // Validate the line as data; service it inline via the no-credential gateway seam.
+            if (typeof parsed.id !== 'string') {
+              console.error('[gateway] malformed request_run_checks: missing id — skipping');
+              continue;
+            }
+            const checksId = parsed.id;
+            const kind = (parsed as { kind?: unknown }).kind;
+            if (
+              typeof parsed.repo !== 'string' ||
+              !SAFE_OWNER_REPO_SLUG.test(parsed.repo) ||
+              (kind !== undefined && kind !== 'lint' && kind !== 'test' && kind !== 'all')
+            ) {
+              const fallback: GatewayToRunnerMessage = {
+                type: 'run_checks_result',
+                id: checksId,
+                ok: false,
+                reason: 'malformed request',
+              };
+              if (self.child.stdin?.writable) {
+                self.child.stdin.write(JSON.stringify(fallback) + '\n');
+              }
+              continue;
+            }
+            const checksKind: RunChecksKind = kind === undefined ? 'all' : kind;
+            const checksReq: CheckServiceRequest = {
+              repo: parsed.repo,
+              volume: self.volume ?? '',
+              kind: checksKind,
+            };
+            yield { type: 'status', text: `running checks for ${checksReq.repo}...` } as RunnerEvent;
+
+            let checksOutcome: CheckOutcome;
+            if (self.checkService !== undefined && self.volume !== undefined) {
+              checksOutcome = await self.checkService.runChecks(checksReq);
+            } else {
+              checksOutcome = { ok: false, reason: 'run_checks unavailable' };
+            }
+
+            if (!self.child.stdin?.writable) {
+              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              return;
+            }
+            const checksResult: RunChecksResultMessage = checksOutcome.ok
+              ? { type: 'run_checks_result', id: checksId, ok: true, results: checksOutcome.results }
+              : { type: 'run_checks_result', id: checksId, ok: false, reason: checksOutcome.reason };
+            self.child.stdin.write(JSON.stringify(checksResult satisfies GatewayToRunnerMessage) + '\n');
+            // Checks are gateway-side work (ephemeral check container), not the agent's — give
+            // the post-check continuation a fresh turn budget.
+            deadline = Date.now() + turnTimeoutMs;
+            continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
             yield { type: 'error', message: parsed.message } as RunnerEvent;
             break;
@@ -659,17 +719,20 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
   private readonly spawnFn: SpawnFn;
   private readonly cloneService?: CloneService;
   private readonly publishService?: PublishService;
+  private readonly checkService?: CheckService;
 
   constructor(
     config: DockerRunnerConfig,
     spawnFn: SpawnFn = nodeSpawn,
     cloneService?: CloneService,
     publishService?: PublishService,
+    checkService?: CheckService,
   ) {
     this.config = config;
     this.spawnFn = spawnFn;
     if (cloneService !== undefined) this.cloneService = cloneService;
     if (publishService !== undefined) this.publishService = publishService;
+    if (checkService !== undefined) this.checkService = checkService;
   }
 
   /** Remove the Docker volume backing `sessionKey`. Resolves true when the volume is
@@ -769,7 +832,7 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
     const runner = new DockerRunner(child, this.config, {
       containerName,
       spawnFn: this.spawnFn,
-    }, this.cloneService, volumeName, this.publishService);
+    }, this.cloneService, volumeName, this.publishService, this.checkService);
 
     await DockerRunner.waitReady(runner, this.config.readyTimeoutMs);
 
