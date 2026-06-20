@@ -9,7 +9,7 @@
 # docs/user/ci-templates.md "Enabling the Pi runtime").
 #
 # Reviewer conventions live in the repo-root .ai-review.json (auto-discovered).
-# The action ref + package tarball are pinned to the immutable v0.3.0 release.
+# The action ref + package tarball are pinned to the immutable v0.3.1 release.
 
 name: AI Review
 
@@ -26,7 +26,7 @@ permissions:
   pull-requests: read
 
 env:
-  AI_REVIEW_PACKAGE: https://github.com/briggsd/code-reviewer/releases/download/v0.3.0/briggsd-code-reviewer-0.3.0.tgz
+  AI_REVIEW_PACKAGE: https://github.com/briggsd/code-reviewer/releases/download/v0.3.1/briggsd-code-reviewer-0.3.1.tgz
 
 jobs:
   dry-run:
@@ -39,7 +39,7 @@ jobs:
           persist-credentials: false
 
       - name: Run AI review (no write-back)
-        uses: briggsd/code-reviewer@v0.3.0
+        uses: briggsd/code-reviewer@v0.3.1
         env:
           AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
         with:
@@ -76,7 +76,7 @@ jobs:
           persist-credentials: false
 
       - name: Publish AI review summary
-        uses: briggsd/code-reviewer@v0.3.0
+        uses: briggsd/code-reviewer@v0.3.1
         env:
           AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
         with:
