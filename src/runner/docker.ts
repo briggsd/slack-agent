@@ -11,11 +11,12 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess, SpawnOptions } from 'child_process';
-import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory, VolumeReaper } from './types.js';
+import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory, VolumeReaper, GateResume } from './types.js';
 import type { Profile } from '../profiles/registry.js';
 import type {
   RunnerToGatewayMessage,
   GatewayToRunnerMessage,
+  ApprovalVerdictMessage,
 } from './protocol.js';
 
 // ── Config types ──────────────────────────────────────────────────────────────
@@ -54,6 +55,55 @@ export type SpawnFn = (
  */
 function toCount(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0;
+}
+
+// ── Commit-gate verdict classification ────────────────────────────────────────
+
+/**
+ * Keyword vocabulary for resolving a commit gate — mirrors src/oneshot/nodes/plan-gate.ts so
+ * the router's gate and the supervised one-shot's gate read the same way to a human. Exact
+ * match on the whole reply (trimmed + lowercased).
+ */
+const GATE_APPROVE = new Set(['approve', 'approved']);
+const GATE_CANCEL = new Set(['cancel', 'abort', 'reject']);
+
+/**
+ * Outcome of classifying the requestor's gate reply (the {@link GateResume} the gateway feeds
+ * back after its requestor-only check). Either a verdict to send the container, or an abandon
+ * that ends the run the same way the one-shot gate does.
+ */
+type GateOutcome =
+  | { kind: 'verdict'; message: ApprovalVerdictMessage }
+  | { kind: 'abandon'; reason: string };
+
+/**
+ * Map a resumed commit gate to its outcome (mirrors plan-gate.ts's reply handling):
+ *   - missing resume / timeout      → abandon ('timed out')
+ *   - `approve` / `approved`        → verdict approved:true (the build tail is dispatched in S12)
+ *   - `cancel` / `abort` / `reject` → abandon ('cancelled')
+ *   - anything else                 → verdict approved:false + the RAW reply as feedback
+ *
+ * The raw reply is passed through untouched: it is untrusted human text the agent must delimit
+ * as data when revising, never interpret as instructions.
+ */
+function classifyGateResume(
+  resume: GateResume | undefined,
+  approvalId: string,
+): GateOutcome {
+  if (resume === undefined || resume.kind === 'timeout') {
+    return { kind: 'abandon', reason: 'timed out' };
+  }
+  const norm = resume.text.trim().toLowerCase();
+  if (GATE_APPROVE.has(norm)) {
+    return { kind: 'verdict', message: { type: 'approval_verdict', id: approvalId, approved: true } };
+  }
+  if (GATE_CANCEL.has(norm)) {
+    return { kind: 'abandon', reason: 'cancelled' };
+  }
+  return {
+    kind: 'verdict',
+    message: { type: 'approval_verdict', id: approvalId, approved: false, feedback: resume.text },
+  };
 }
 
 // ── Sanitization helpers ──────────────────────────────────────────────────────
@@ -288,7 +338,7 @@ export class DockerRunner implements SessionRunner {
 
         // Read events until we get text or error for this id
         const { turnTimeoutMs } = self.config;
-        const deadline = Date.now() + turnTimeoutMs;
+        let deadline = Date.now() + turnTimeoutMs;
 
         while (true) {
           const remaining = deadline - Date.now();
@@ -353,6 +403,42 @@ export class DockerRunner implements SessionRunner {
           } else if (parsed.type === 'text' && parsed.id === id) {
             yield { type: 'text', text: parsed.text } as RunnerEvent;
             break;
+          } else if (parsed.type === 'request_approval') {
+            // The container raised a commit gate from inside the turn (the router's commit;
+            // S10b emits this from the `submit_spec` tool). Not gated on `id === id`: this
+            // carries its own approval-correlation id, distinct from the turn id. Treat the
+            // line as data — validate shape, never execute it.
+            if (typeof parsed.id !== 'string' || typeof parsed.specRef !== 'string') {
+              continue; // malformed control line — skip, like any bad message
+            }
+            const approvalId = parsed.id;
+            // Park: surface the spec as the `await_approval` event the drive loop already
+            // handles (post + requestor-only gate). The resume fed back via next() is the
+            // gateway's checked verdict.
+            const resume = yield { type: 'await_approval', prompt: parsed.specRef } as RunnerEvent;
+            const outcome = classifyGateResume(resume, approvalId);
+            if (outcome.kind === 'abandon') {
+              // Cancel/timeout — end the run as the one-shot gate does; the drive loop renders
+              // it cleanly and stops driving. No verdict is sent: tearing down the container's
+              // parked tool on a mid-turn abandon is S10b's concern (stdin demux).
+              yield { type: 'abandoned', reason: outcome.reason } as RunnerEvent;
+              return;
+            }
+            // Approval (or requested-changes feedback): answer the container so its parked
+            // tool unblocks and the turn proceeds toward its terminal text/error. If stdin is
+            // gone, fail the turn explicitly — same guard as the initial user_message write —
+            // rather than dropping the verdict, resetting the budget, and waiting a full fresh
+            // turn for a reply the container can never receive.
+            if (!self.child.stdin?.writable) {
+              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              return;
+            }
+            const verdict: GatewayToRunnerMessage = outcome.message;
+            self.child.stdin.write(JSON.stringify(verdict) + '\n');
+            // Restart the turn budget: wall-clock spent parked at the human gate (which can
+            // far exceed turnTimeoutMs) must not count against the post-approval continuation.
+            deadline = Date.now() + turnTimeoutMs;
+            continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
             yield { type: 'error', message: parsed.message } as RunnerEvent;
             break;

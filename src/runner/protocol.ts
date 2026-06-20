@@ -17,13 +17,31 @@
 
 // ── Gateway → Runner ──────────────────────────────────────────────────────────
 
-export type GatewayToRunnerMessage = UserMessage;
+export type GatewayToRunnerMessage = UserMessage | ApprovalVerdictMessage;
 
 export type UserMessage = {
   type: 'user_message';
   /** Correlation ID — echoed back on the response events */
   id: string;
   text: string;
+};
+
+/**
+ * The gateway's verdict on a commit gate the runner raised via a
+ * {@link RequestApprovalMessage} (the router's commit, design/0007 decision 5).
+ *
+ * Sent only AFTER the gateway has run its requestor-only, fail-closed approval check, so the
+ * container may treat `approved: true` as an authorized human commit — the model can never
+ * self-approve. `id` echoes the `request_approval` this answers. `feedback` carries the
+ * requestor's reply when the gate was not a plain commit keyword (`approved: false`), so the
+ * agent can revise and ask again; it is absent on a clean approval. (`exactOptionalPropertyTypes`
+ * is on — `feedback` is genuinely optional, never `undefined`-valued.)
+ */
+export type ApprovalVerdictMessage = {
+  type: 'approval_verdict';
+  id: string;
+  approved: boolean;
+  feedback?: string;
 };
 
 // ── Runner → Gateway ──────────────────────────────────────────────────────────
@@ -34,6 +52,7 @@ export type RunnerToGatewayMessage =
   | FileMessage
   | TextMessage
   | UsageMessage
+  | RequestApprovalMessage
   | ErrorMessage;
 
 /** Emitted once when the runner is ready to accept input. */
@@ -83,6 +102,23 @@ export type UsageMessage = {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+};
+
+/**
+ * The runner asks the human to commit — the router's commit gate (design/0007 decision 5).
+ *
+ * Raised from INSIDE a turn: the agent calls its `submit_spec` tool, which emits this line
+ * and blocks until the gateway answers with an {@link ApprovalVerdictMessage} bearing the same
+ * `id`. The gateway parks the turn, posts `specRef`, and runs its requestor-only approval check
+ * before replying — raising the gate is the model raising its hand, not approving itself. `id`
+ * is the runner's own approval-correlation id (distinct from the turn id; a turn could raise
+ * more than one gate). `specRef` is the spec the human approves — a text blob in this slice; a
+ * `/workspace` path arrives with S11.
+ */
+export type RequestApprovalMessage = {
+  type: 'request_approval';
+  id: string;
+  specRef: string;
 };
 
 /** Per-message failure. The runner remains usable after an error. */
