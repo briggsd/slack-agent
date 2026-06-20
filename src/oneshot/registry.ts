@@ -1,12 +1,13 @@
 import type { OneShotBlueprint } from './context.js';
 import { repoOneshot } from './repo-oneshot.js';
 import { supervisedRepoOneshot } from './supervised-repo-oneshot.js';
+import { buildTail } from './build-tail.js';
 
 /**
  * Look up the blueprint for a given profile id.
  * Throws if no blueprint is registered for the given id.
  */
-const BLUEPRINTS: readonly OneShotBlueprint[] = [repoOneshot, supervisedRepoOneshot];
+const BLUEPRINTS: readonly OneShotBlueprint[] = [repoOneshot, supervisedRepoOneshot, buildTail];
 
 export function blueprintFor(blueprintId: string): OneShotBlueprint {
   const blueprint = BLUEPRINTS.find((b) => b.id === blueprintId);

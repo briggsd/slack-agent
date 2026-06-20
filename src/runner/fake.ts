@@ -65,6 +65,8 @@ export class FakeRunnerFactory implements RunnerFactory {
   public creates: string[] = [];
   /** The profile passed to each create() call, in order. */
   public profiles: Profile[] = [];
+  /** The nameSuffix (or undefined) passed to each create() call, in order. */
+  public suffixes: (string | undefined)[] = [];
   private script: TurnScript[];
   public runners: FakeRunner[] = [];
 
@@ -72,9 +74,10 @@ export class FakeRunnerFactory implements RunnerFactory {
     this.script = script;
   }
 
-  async create(sessionKey: string, profile: Profile): Promise<SessionRunner> {
+  async create(sessionKey: string, profile: Profile, opts?: { nameSuffix?: string }): Promise<SessionRunner> {
     this.creates.push(sessionKey);
     this.profiles.push(profile);
+    this.suffixes.push(opts?.nameSuffix);
     const runner = new FakeRunner(sessionKey, this.script);
     this.runners.push(runner);
     return runner;

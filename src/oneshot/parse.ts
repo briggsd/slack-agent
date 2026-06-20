@@ -27,8 +27,10 @@ export interface ParsedOneShotTask {
  */
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
-/** True iff `repo` is a safe `owner/name` (or GitLab `group/sub/name`) slug — no traversal. */
-function isSafeRepoSlug(repo: string): boolean {
+/** True iff `repo` is a safe `owner/name` (or GitLab `group/sub/name`) slug — no traversal.
+ *  Exported so paths that bypass {@link parseOneShotTask} (e.g. the orchestrator's
+ *  explicit-context build tail) can re-apply the same no-traversal guarantee. */
+export function isSafeRepoSlug(repo: string): boolean {
   const segments = repo.split('/');
   // At least owner + name.
   if (segments.length < 2) {

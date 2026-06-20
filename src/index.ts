@@ -148,6 +148,7 @@ async function main(): Promise<void> {
     volumeTtlMs: config.VOLUME_TTL_MS,
     gcIntervalMs: config.VOLUME_GC_INTERVAL_MS,
     spendCaps: config.spendCaps,
+    buildRunnerFactory: factory,
   });
 
   await app.start();
