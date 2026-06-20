@@ -69,15 +69,16 @@ export type CloneResultMessage = {
  * The gateway's result of a build the runner requested via a {@link RequestBuildMessage}.
  * Sent after the build tail completes (the gateway runs a fresh implementer container on the
  * session's shared volume, via S12a's engine). `id` echoes the `request_build` this answers.
- * `prUrl` is the opened PR URL (present iff `ok`). `reason` is a short diagnostic
- * (present iff `!ok`, token-free). (`exactOptionalPropertyTypes` is on — `prUrl` and `reason`
- * are genuinely optional, never `undefined`-valued.)
+ * Success means a local candidate is ready on that shared volume. `prUrl` is tolerated only as a
+ * legacy rolling-compatibility field; the gateway no longer emits it for current build success.
+ * `reason` is a short diagnostic (present iff `!ok`, token-free). (`exactOptionalPropertyTypes`
+ * is on — `prUrl` and `reason` are genuinely optional, never `undefined`-valued.)
  */
 export type BuildResultMessage = {
   type: 'build_result';
   id: string;       // echoes the request_build this answers
   ok: boolean;
-  prUrl?: string;   // present iff ok
+  prUrl?: string;   // tolerated legacy field on ok:true
   reason?: string;  // present iff !ok — short, token-free
 };
 
@@ -196,10 +197,11 @@ export type RequestCloneMessage = {
  * extension). Raised from INSIDE a turn: the agent calls its `build_spec` tool (phase ②, after
  * approval), which emits this line and blocks until the gateway answers with a
  * {@link BuildResultMessage} bearing the same `id`. The gateway services the build via S12a's
- * engine — a fresh implementer container on the session's shared volume — and returns the PR URL
- * (or a failure reason). The credential never enters the agent env (the build tail mints its own
- * lease). `id` is the runner's own build-correlation id (distinct from the turn id). `repo` is
- * the "owner/name" slug the coordinator wants built.
+ * engine — a fresh implementer container on the session's shared volume — and returns
+ * candidate-ready success (or a failure reason). This local build path does not push or open a PR;
+ * publish/open_pr is the explicit later step after coordinator verification. `id` is the runner's
+ * own build-correlation id (distinct from the turn id). `repo` is the "owner/name" slug the
+ * coordinator wants built.
  */
 export type RequestBuildMessage = {
   type: 'request_build';

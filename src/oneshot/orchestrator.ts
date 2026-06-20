@@ -1,6 +1,6 @@
 /**
- * OneShotOrchestrator — a SessionRunner that executes the minimal one-shot blueprint:
- *   parse → lease → run blueprint (clone → implement → push → open PR) → revoke → done
+ * OneShotOrchestrator — a SessionRunner that executes a one-shot blueprint:
+ *   parse → maybe lease → run blueprint → revoke → done
  *
  * All dependencies are injected (inner runner, broker, git nodes) so this is
  * fully testable offline. The real git node executor and live wiring are S03/S05.
@@ -15,7 +15,7 @@ import { volumeNameFor } from '../runner/docker.js';
 import { REPO_ONESHOT_PROFILE_ID } from '../profiles/registry.js';
 import { blueprintFor } from './registry.js';
 import { runBlueprint } from '../blueprints/executor.js';
-import type { OneShotContext, OneShotDeps } from './context.js';
+import type { OneShotBlueprint, OneShotContext, OneShotDeps } from './context.js';
 
 export function branchForTask(taskId: string): string {
   return `slackbot/oneshot-${taskId}`;
@@ -32,6 +32,17 @@ export function taskIdForSessionKey(sessionKey: string): string {
 
 export function workdirForRepo(repo: string): string {
   return `/workspace/${repo.replaceAll('/', '-')}`;
+}
+
+function localOnlyLease(host: GitHost, repo: string): CredentialLease {
+  return {
+    token: '',
+    host,
+    repo,
+    async revoke(): Promise<void> {
+      // Local-only flows never mint a real lease.
+    },
+  };
 }
 
 export class OneShotOrchestrator implements SessionRunner {
@@ -99,17 +110,33 @@ export class OneShotOrchestrator implements SessionRunner {
     // container/volume, so this fixed path is single-occupant — no per-task scoping needed.
     const workdir = workdirForRepo(repo);
 
-    // Lease acquisition is fallible (e.g. an unconfigured host throws) — surface it
-    // as an error event rather than letting the rejection escape the iterator.
-    let lease: CredentialLease;
+    let blueprint: OneShotBlueprint;
     try {
-      lease = await self.broker.lease({ host, repo, taskId: self.taskId });
+      blueprint = blueprintFor(this.blueprintId);
     } catch (err: unknown) {
       yield {
         type: 'error',
         message: err instanceof Error ? err.message : String(err),
       } satisfies RunnerEvent;
       return;
+    }
+    const requiresLease = blueprint.requiresLease !== false;
+
+    // Lease acquisition is fallible (e.g. an unconfigured host throws) — surface it
+    // as an error event rather than letting the rejection escape the iterator.
+    let lease: CredentialLease;
+    if (requiresLease) {
+      try {
+        lease = await self.broker.lease({ host, repo, taskId: self.taskId });
+      } catch (err: unknown) {
+        yield {
+          type: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        } satisfies RunnerEvent;
+        return;
+      }
+    } else {
+      lease = localOnlyLease(host, repo);
     }
 
     // Revoke at most once, regardless of which path we exit through.
@@ -148,7 +175,7 @@ export class OneShotOrchestrator implements SessionRunner {
       // unknown id). If you add cleanup/metrics to the catch, mirror it into the
       // node path too — it will not run for node failures.
       // `yield*` (not `for await`) forwards a gate resume value back into the blueprint.
-      yield* runBlueprint(blueprintFor(this.blueprintId), ctx, deps);
+      yield* runBlueprint(blueprint, ctx, deps);
       await revokeOnce();
     } catch (err: unknown) {
       await revokeOnce();

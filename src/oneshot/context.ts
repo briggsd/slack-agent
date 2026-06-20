@@ -56,7 +56,10 @@ export type OneShotNode = BlueprintNode<OneShotContext, OneShotDeps>;
  * expected, and is always called with the full context at runtime).
  */
 export type OneShotAgenticNode = BlueprintNode<OneShotAgenticContext, OneShotDeps>;
-export type OneShotBlueprint = Blueprint<OneShotContext, OneShotDeps>;
+export interface OneShotBlueprint extends Blueprint<OneShotContext, OneShotDeps> {
+  /** False for local-only blueprints that never need a real credential lease. */
+  readonly requiresLease?: boolean;
+}
 
 // Compile-time guard for the structural invariant: the agent-facing view must NEVER
 // expose the credential `lease`. If `lease` ever leaks back into OneShotAgenticContext

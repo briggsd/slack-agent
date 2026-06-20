@@ -93,7 +93,7 @@ function turnId(fake: FakeChildProcess): string {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('DockerRunner — request_build round-trip (S12b)', () => {
-  it('request_build → yields run_build event → feed back BuildOutcome{ok:true} → build_result written to stdin', async () => {
+  it('request_build → yields run_build event → feed back BuildOutcome{ok:true} → ok-only build_result written to stdin', async () => {
     const { runner, fake } = await makeReadyRunner();
 
     const iter = runner.send('build owner/repo')[Symbol.asyncIterator]();
@@ -108,7 +108,7 @@ describe('DockerRunner — request_build round-trip (S12b)', () => {
     expect(e1.value).toEqual({ type: 'run_build', repo: 'owner/repo' });
 
     // Feed back the BuildOutcome via next() the way the manager does
-    const outcome: BuildOutcome = { ok: true, prUrl: 'https://github.com/owner/repo/pull/42' };
+    const outcome: BuildOutcome = { ok: true };
     const e2Promise = iter.next(outcome);
 
     // The generator should write build_result to the container's stdin
@@ -118,7 +118,6 @@ describe('DockerRunner — request_build round-trip (S12b)', () => {
       type: 'build_result',
       id: 'build-1',
       ok: true,
-      prUrl: 'https://github.com/owner/repo/pull/42',
     });
 
     // Turn completes normally after the build
@@ -199,7 +198,7 @@ describe('DockerRunner — request_build round-trip (S12b)', () => {
     // (if deadline were NOT reset, the turn might time out; here we just verify
     // the turn completes normally, which proves the deadline was updated or at
     // minimum the continuation is still driven).
-    const outcome: BuildOutcome = { ok: true, prUrl: 'https://pr/1' };
+    const outcome: BuildOutcome = { ok: true };
     const e2Promise = iter.next(outcome);
 
     await waitForStdinLine(fake, (l) => l.includes('build_result'));

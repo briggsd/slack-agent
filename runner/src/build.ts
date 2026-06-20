@@ -5,7 +5,7 @@
  * SDK turn. That emits a `request_build` line to the gateway and blocks on a promise. The
  * runner's stdin dispatcher routes the gateway's `build_result` back in via
  * {@link BuildCoordinator.handleResult}, which resolves the promise — so the tool returns the
- * outcome (PR URL or failure reason) to the model. The gateway services the build via S12a's
+ * outcome (candidate-ready success or failure reason) to the model. The gateway services the build via S12a's
  * engine (it does NOT service it inline — it yields `run_build` up to the manager). The
  * coordinator is pure (no SDK, no stdio of its own): it takes an emit callback and is driven by
  * parsed messages, so it unit-tests offline.
@@ -15,7 +15,7 @@ import type { BuildResultMessage } from './protocol.js';
 
 /** The outcome of a build, as the build_spec tool sees it. */
 export type BuildOutcome =
-  | { ok: true; prUrl: string }
+  | { ok: true }
   | { ok: false; reason: string };
 
 /** Emits a `request_build` line. Injected so the coordinator never touches stdout directly. */
@@ -53,7 +53,7 @@ export class BuildCoordinator {
     if (resolve === undefined) return false;
     this.pending.delete(msg.id);
     const outcome: BuildOutcome = msg.ok
-      ? { ok: true, prUrl: msg.prUrl ?? '' }
+      ? { ok: true }
       : { ok: false, reason: msg.reason ?? 'build failed' };
     resolve(outcome);
     return true;

@@ -88,7 +88,7 @@ const DEFAULT_DOCKER_CONFIG: DockerRunnerConfig = {
 // ── Group 1: Engine via createBuildRunner ─────────────────────────────────────
 
 describe('S12a — createBuildRunner runs the build-tail blueprint', () => {
-  it('drives to a pr_opened event with no clone, branch+push+PR recorded, lease minted+revoked', async () => {
+  it('completes as a local candidate with branch+fix loop only and no credential lease', async () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor('https://github.com/acme/widgets/pull/1');
     const baseFactory = new FakeRunnerFactory([
@@ -101,15 +101,20 @@ describe('S12a — createBuildRunner runs the build-tail blueprint', () => {
 
     const events = await drain(runner.send(''));
 
-    // Must have a pr_opened event
-    const prEvents = events.filter(
-      (e): e is { type: 'pr_opened'; url: string } => e.type === 'pr_opened',
-    );
-    expect(prEvents).toHaveLength(1);
-    expect(prEvents[0]?.url).toBe('https://github.com/acme/widgets/pull/1');
+    const statusTexts = events
+      .filter((e): e is { type: 'status'; text: string } => e.type === 'status')
+      .map((e) => e.text);
+    expect(statusTexts).toContain('creating branch…');
+    expect(statusTexts).toContain('implementing…');
+    expect(statusTexts).toContain('linting…');
+    expect(statusTexts).toContain('testing…');
+    expect(statusTexts).not.toContain('pushing branch…');
+    expect(statusTexts).not.toContain('opening pull request…');
 
     // No errors
     expect(events.filter((e) => e.type === 'error')).toHaveLength(0);
+    expect(events.filter((e) => e.type === 'pr_opened')).toHaveLength(0);
+    expect(events.filter((e) => e.type === 'text')).toHaveLength(0);
 
     // No clone was run (build tail skips clone/research/plan)
     expect(gitNodes.clones).toHaveLength(0);
@@ -121,22 +126,20 @@ describe('S12a — createBuildRunner runs the build-tail blueprint', () => {
     expect(gitNodes.branches[0]?.workdir).toBe('/workspace/acme-widgets');
     expect(gitNodes.branches[0]?.volume).toBe(volumeNameFor(TEST_SESSION_KEY));
 
-    // Push happened
-    expect(gitNodes.pushes).toHaveLength(1);
-    expect(gitNodes.pushes[0]?.repo).toBe('acme/widgets');
-    expect(gitNodes.pushes[0]?.branch).toBe(expectedBranch);
-    expect(gitNodes.pushes[0]?.volume).toBe(volumeNameFor(TEST_SESSION_KEY));
+    // Checks still ran on the local candidate
+    expect(gitNodes.checks).toHaveLength(2);
+    expect(gitNodes.checks[0]?.kind).toBe('lint');
+    expect(gitNodes.checks[1]?.kind).toBe('test');
+    expect(gitNodes.checks[0]?.repo).toBe('acme/widgets');
+    expect(gitNodes.checks[1]?.repo).toBe('acme/widgets');
 
-    // PR was opened
-    expect(gitNodes.changeRequests).toHaveLength(1);
-    expect(gitNodes.changeRequests[0]?.repo).toBe('acme/widgets');
-    expect(gitNodes.changeRequests[0]?.base).toBe('main');
+    // No push or PR open happens in the local-only build tail
+    expect(gitNodes.pushes).toHaveLength(0);
+    expect(gitNodes.changeRequests).toHaveLength(0);
 
-    // Broker: lease minted for github + repo, and revoked
-    expect(broker.leases).toHaveLength(1);
-    expect(broker.leases[0]?.host).toBe('github');
-    expect(broker.leases[0]?.repo).toBe('acme/widgets');
-    expect(broker.revokes).toHaveLength(1);
+    // Broker is untouched for the local-only build tail
+    expect(broker.leases).toHaveLength(0);
+    expect(broker.revokes).toHaveLength(0);
 
     // Inner runner was requested with nameSuffix:'build'
     expect(baseFactory.suffixes).toHaveLength(1);
@@ -239,19 +242,19 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
     }
   }
 
-  it('tail yields pr_opened → build placeholder shows "Opened PR: <url>", open-pr audit recorded, tail disposed', async () => {
+  it('tail completes locally → no PR update is posted and the router turn resumes successfully', async () => {
     const slack = new FakeSlackClient();
 
     // Router runner yields a run_build event then a text completion
     const routerScript: RunnerEvent[] = [
       { type: 'run_build', repo: 'acme/widgets' },
-      { type: 'text', text: 'build done' },
+      { type: 'text', text: 'router resumed' },
     ];
 
-    // Tail runner yields pr_opened
+    // Tail runner completes with local-only output
     const tailScript: RunnerEvent[] = [
-      { type: 'status', text: 'opening PR…' },
-      { type: 'pr_opened', url: 'https://github.com/acme/widgets/pull/42' },
+      { type: 'status', text: 'testing…' },
+      { type: 'text', text: 'candidate ready locally' },
     ];
 
     const routerFactory = new FakeRunnerFactory([[...routerScript]]);
@@ -273,10 +276,9 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
     // Wait for drain to complete
     await new Promise((r) => setTimeout(r, 50));
 
-    // build placeholder should show "Opened PR: <url>"
-    expect(
-      slack.updates.some((u) => u.text === 'Opened PR: https://github.com/acme/widgets/pull/42'),
-    ).toBe(true);
+    expect(slack.updates.some((u) => u.text === 'candidate ready locally')).toBe(true);
+    expect(slack.updates.some((u) => u.text === 'router resumed')).toBe(true);
+    expect(slack.updates.some((u) => u.text.includes('Opened PR:'))).toBe(false);
 
     // createBuildRunner was called with the event's repo
     expect(buildFactory.createCalls).toHaveLength(1);
@@ -333,9 +335,7 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
       { type: 'text', text: 'done' },
     ];
 
-    const tailScript: RunnerEvent[] = [
-      { type: 'pr_opened', url: 'https://github.com/org/my-proj/pull/7' },
-    ];
+    const tailScript: RunnerEvent[] = [{ type: 'text', text: 'done locally' }];
 
     const routerFactory = new FakeRunnerFactory([[...routerScript]]);
     const buildFactory = new FakeBuildFactory([[...tailScript]]);

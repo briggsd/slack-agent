@@ -110,7 +110,7 @@ describe('parseInbound', () => {
 // ── parseInbound — build_result case ──────────────────────────────────────────
 
 describe('parseInbound — build_result', () => {
-  it('parses a well-formed build_result with ok:true and prUrl', () => {
+  it('parses a well-formed legacy build_result with ok:true and prUrl', () => {
     const result = parseInbound(
       JSON.stringify({ type: 'build_result', id: 'build-1', ok: true, prUrl: 'https://github.com/owner/repo/pull/1' }),
     );
