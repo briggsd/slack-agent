@@ -325,6 +325,15 @@ export class DockerRunner implements SessionRunner {
               continue;
             }
             yield { type: 'file', name: parsed.name, data } as RunnerEvent;
+          } else if (parsed.type === 'usage' && parsed.id === id) {
+            yield {
+              type: 'usage',
+              costMicroUsd: parsed.costMicroUsd,
+              inputTokens: parsed.inputTokens,
+              outputTokens: parsed.outputTokens,
+              cacheReadTokens: parsed.cacheReadTokens,
+              cacheCreationTokens: parsed.cacheCreationTokens,
+            } as RunnerEvent;
           } else if (parsed.type === 'text' && parsed.id === id) {
             yield { type: 'text', text: parsed.text } as RunnerEvent;
             break;

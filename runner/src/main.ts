@@ -2,7 +2,7 @@
  * Runner container entry point.
  *
  * Reads NDJSON from stdin line-by-line (UserMessage).
- * Writes NDJSON to stdout (ReadyMessage | StatusMessage | TextMessage | ErrorMessage).
+ * Writes NDJSON to stdout (ReadyMessage | StatusMessage | UsageMessage | TextMessage | ErrorMessage).
  * All logs go to stderr only — never to stdout.
  *
  * Session-ID persistence: on first turn the SDK emits a system/init message
@@ -181,6 +181,7 @@ export async function runLoop(opts: {
 
       let resultText: string | null = null;
       let turnError: string | null = null;
+      let usageMsg: RunnerToGatewayMessage | null = null;
 
       for await (const event of stream) {
         // Capture session ID from system init
@@ -224,8 +225,21 @@ export async function runLoop(opts: {
           continue;
         }
 
-        // Result (success or error)
+        // Result (success or error). Read cost/usage defensively: the SDK types mark
+        // total_cost_usd/usage as non-optional, but a shape drift that left usage absent
+        // would throw here and turn an otherwise-successful result into an error. Default
+        // to 0 — a turn that ran still happened, it just reports no cost.
         if (event.type === 'result') {
+          const usage = event.usage;
+          usageMsg = {
+            type: 'usage',
+            id,
+            costMicroUsd: Math.round((event.total_cost_usd ?? 0) * 1e6),
+            inputTokens: usage?.input_tokens ?? 0,
+            outputTokens: usage?.output_tokens ?? 0,
+            cacheReadTokens: usage?.cache_read_input_tokens ?? 0,
+            cacheCreationTokens: usage?.cache_creation_input_tokens ?? 0,
+          };
           if (event.subtype === 'success') {
             resultText = event.result;
             // Update session_id from result in case it changed
@@ -272,6 +286,10 @@ export async function runLoop(opts: {
           }
           continue;
         }
+      }
+
+      if (usageMsg !== null) {
+        emit(usageMsg);
       }
 
       if (turnError !== null) {

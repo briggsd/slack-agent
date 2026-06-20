@@ -62,6 +62,7 @@ export interface AuditEvent {
   reasoning: string | null;
   result: string | null;
   cost_tokens: number | null;
+  cost_micro_usd: number | null;
 }
 
 export interface SessionStore {
@@ -119,6 +120,7 @@ export class SqliteSessionStore implements SessionStore {
     string | null,
     string | null,
     number | null,
+    number | null,
   ]>;
   private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
   private readonly stmtListExpired: Database.Statement<[number], SessionRow>;
@@ -173,14 +175,15 @@ export class SqliteSessionStore implements SessionStore {
       string | null,
       string | null,
       number | null,
+      number | null,
     ]>(`
       INSERT INTO audit_events
-        (session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     this.stmtGetAudit = this.db.prepare<[string], AuditEvent>(
-      'SELECT session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens FROM audit_events WHERE session_key = ? ORDER BY id',
+      'SELECT session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd FROM audit_events WHERE session_key = ? ORDER BY id',
     );
 
     this.stmtListExpired = this.db.prepare<[number], SessionRow>(
@@ -234,7 +237,8 @@ export class SqliteSessionStore implements SessionStore {
         summary      TEXT,
         reasoning    TEXT,
         result       TEXT,
-        cost_tokens  INTEGER
+        cost_tokens  INTEGER,
+        cost_micro_usd  INTEGER
       );
 
       CREATE INDEX IF NOT EXISTS audit_by_session ON audit_events (session_key);
@@ -280,6 +284,7 @@ export class SqliteSessionStore implements SessionStore {
       event.reasoning,
       event.result,
       event.cost_tokens,
+      event.cost_micro_usd,
     );
   }
 

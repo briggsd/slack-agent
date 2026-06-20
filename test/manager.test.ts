@@ -930,6 +930,54 @@ describe('SessionManager — audit emission', () => {
     expect(reaped[0]?.summary).toBeNull();
   });
 
+  it('emits a kind:cost audit row when a usage RunnerEvent is received, with no Slack post', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    // Script a single turn that emits a usage event followed by text
+    const factory = new FakeRunnerFactory([
+      [
+        {
+          type: 'usage',
+          costMicroUsd: 12300,
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadTokens: 10,
+          cacheCreationTokens: 20,
+        },
+        { type: 'text', text: 'done' },
+      ],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Exactly one cost audit row
+    const costAudits = store.audits.filter((a) => a.kind === 'cost');
+    expect(costAudits).toHaveLength(1);
+    expect(costAudits[0]?.cost_micro_usd).toBe(12300);
+    // cost_tokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
+    expect(costAudits[0]?.cost_tokens).toBe(180);
+    expect(costAudits[0]?.session_key).toBe('TEAM:C:T');
+    expect(costAudits[0]?.team_id).toBe('TEAM');
+    expect(costAudits[0]?.user_id).toBe('U1');
+    expect(costAudits[0]?.tool).toBeNull();
+
+    // No Slack post triggered by the usage event (silent measurement only)
+    // The text reply updates the placeholder; there must be no extra message posted just for cost
+    const textUpdates = slack.updates.filter((u) => u.text === 'done');
+    expect(textUpdates).toHaveLength(1);
+    // Cost value must not appear in any Slack message
+    expect(slack.updates.every((u) => !u.text.includes('12300'))).toBe(true);
+    expect(slack.posts.every((p) => !p.text.includes('12300'))).toBe(true);
+  });
+
   it('rehydrate emits lifecycle/rehydrated (not a second created) with the stored identity', async () => {
     const slack = new FakeSlackClient();
     const store = new CapturingStore();

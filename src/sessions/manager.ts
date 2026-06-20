@@ -436,6 +436,23 @@ export class SessionManager {
                 summary: event.url,
                 result: 'opened',
               });
+            } else if (event.type === 'usage') {
+              // Slice A: record per-turn cost to the audit ledger. Measurement only — no
+              // enforcement. Silent: no Slack post. Cost is metadata, never message content.
+              this.audit({
+                session_key: session.key,
+                team_id: session.teamId ?? null,
+                user_id: session.requestorUserId ?? null,
+                kind: 'cost',
+                tool: null,
+                result: null,
+                cost_tokens:
+                  event.inputTokens +
+                  event.outputTokens +
+                  event.cacheReadTokens +
+                  event.cacheCreationTokens,
+                cost_micro_usd: event.costMicroUsd,
+              });
             } else if (event.type === 'error') {
               await updatePlaceholder(
                 this.slack,
@@ -553,10 +570,11 @@ export class SessionManager {
    * The cap bounds blast radius if a future caller is careless — it does not license
    * putting message content here.
    */
-  private audit(partial: Omit<AuditEvent, 'ts' | 'summary' | 'reasoning' | 'cost_tokens'> & {
+  private audit(partial: Omit<AuditEvent, 'ts' | 'summary' | 'reasoning' | 'cost_tokens' | 'cost_micro_usd'> & {
     summary?: string | null;
     reasoning?: string | null;
     cost_tokens?: number | null;
+    cost_micro_usd?: number | null;
   }): void {
     const summary =
       typeof partial.summary === 'string'
@@ -568,6 +586,7 @@ export class SessionManager {
       summary,
       reasoning: partial.reasoning ?? null,
       cost_tokens: partial.cost_tokens ?? null,
+      cost_micro_usd: partial.cost_micro_usd ?? null,
     };
     try {
       this.store.recordAudit(event);
