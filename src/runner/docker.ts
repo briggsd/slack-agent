@@ -59,29 +59,19 @@ function toCount(v: unknown): number {
 
 // ── Commit-gate verdict classification ────────────────────────────────────────
 
-/**
- * Keyword vocabulary for resolving a commit gate — mirrors src/oneshot/nodes/plan-gate.ts so
- * the router's gate and the supervised one-shot's gate read the same way to a human. Exact
- * match on the whole reply (trimmed + lowercased).
- */
+/** Commit keywords (exact match on the whole reply, trimmed + lowercased). */
 const GATE_APPROVE = new Set(['approve', 'approved']);
-const GATE_CANCEL = new Set(['cancel', 'abort', 'reject']);
 
 /**
- * Outcome of classifying the requestor's gate reply (the {@link GateResume} the gateway feeds
- * back after its requestor-only check). Either a verdict to send the container, or an abandon
- * that ends the run the same way the one-shot gate does.
- */
-type GateOutcome =
-  | { kind: 'verdict'; message: ApprovalVerdictMessage }
-  | { kind: 'abandon'; reason: string };
-
-/**
- * Map a resumed commit gate to its outcome (mirrors plan-gate.ts's reply handling):
- *   - missing resume / timeout      → abandon ('timed out')
- *   - `approve` / `approved`        → verdict approved:true (the build tail is dispatched in S12)
- *   - `cancel` / `abort` / `reject` → abandon ('cancelled')
- *   - anything else                 → verdict approved:false + the RAW reply as feedback
+ * Map a resumed commit gate to the verdict the container's `submit_spec` tool receives.
+ *
+ * The router NEVER abandons a turn at the gate (decision 2026-06-20): every outcome returns a
+ * verdict so the parked tool always unblocks and the conversation keeps going. This is where
+ * the router diverges from the supervised one-shot `plan-gate.ts`, which still abandons.
+ *   - `approve` / `approved` → approved:true (the build tail is dispatched in S12)
+ *   - any other reply        → approved:false + the RAW reply as feedback (the agent revises)
+ *   - missing resume / timeout → approved:false, no feedback (the turn ends quietly; the
+ *     session idles out via the reaper)
  *
  * The raw reply is passed through untouched: it is untrusted human text the agent must delimit
  * as data when revising, never interpret as instructions.
@@ -89,21 +79,15 @@ type GateOutcome =
 function classifyGateResume(
   resume: GateResume | undefined,
   approvalId: string,
-): GateOutcome {
+): ApprovalVerdictMessage {
   if (resume === undefined || resume.kind === 'timeout') {
-    return { kind: 'abandon', reason: 'timed out' };
+    return { type: 'approval_verdict', id: approvalId, approved: false };
   }
   const norm = resume.text.trim().toLowerCase();
   if (GATE_APPROVE.has(norm)) {
-    return { kind: 'verdict', message: { type: 'approval_verdict', id: approvalId, approved: true } };
+    return { type: 'approval_verdict', id: approvalId, approved: true };
   }
-  if (GATE_CANCEL.has(norm)) {
-    return { kind: 'abandon', reason: 'cancelled' };
-  }
-  return {
-    kind: 'verdict',
-    message: { type: 'approval_verdict', id: approvalId, approved: false, feedback: resume.text },
-  };
+  return { type: 'approval_verdict', id: approvalId, approved: false, feedback: resume.text };
 }
 
 // ── Sanitization helpers ──────────────────────────────────────────────────────
@@ -416,24 +400,16 @@ export class DockerRunner implements SessionRunner {
             // handles (post + requestor-only gate). The resume fed back via next() is the
             // gateway's checked verdict.
             const resume = yield { type: 'await_approval', prompt: parsed.specRef } as RunnerEvent;
-            const outcome = classifyGateResume(resume, approvalId);
-            if (outcome.kind === 'abandon') {
-              // Cancel/timeout — end the run as the one-shot gate does; the drive loop renders
-              // it cleanly and stops driving. No verdict is sent: tearing down the container's
-              // parked tool on a mid-turn abandon is S10b's concern (stdin demux).
-              yield { type: 'abandoned', reason: outcome.reason } as RunnerEvent;
-              return;
-            }
-            // Approval (or requested-changes feedback): answer the container so its parked
-            // tool unblocks and the turn proceeds toward its terminal text/error. If stdin is
-            // gone, fail the turn explicitly — same guard as the initial user_message write —
-            // rather than dropping the verdict, resetting the budget, and waiting a full fresh
-            // turn for a reply the container can never receive.
+            // Always answer the container: the router never abandons at the gate, so the parked
+            // submit_spec tool always unblocks and the conversation continues. If stdin is gone,
+            // fail the turn explicitly — same guard as the initial user_message write — rather
+            // than dropping the verdict, resetting the budget, and waiting a full fresh turn for
+            // a reply the container can never receive.
             if (!self.child.stdin?.writable) {
               yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
               return;
             }
-            const verdict: GatewayToRunnerMessage = outcome.message;
+            const verdict: GatewayToRunnerMessage = classifyGateResume(resume, approvalId);
             self.child.stdin.write(JSON.stringify(verdict) + '\n');
             // Restart the turn budget: wall-clock spent parked at the human gate (which can
             // far exceed turnTimeoutMs) must not count against the post-approval continuation.

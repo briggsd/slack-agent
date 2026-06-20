@@ -857,7 +857,7 @@ describe('DockerRunner — commit gate translation', () => {
     expect(e2.value).toEqual({ type: 'text', text: 'revised' });
   });
 
-  it('a cancel resume yields abandoned(cancelled) and sends NO verdict', async () => {
+  it('a cancel resume writes approval_verdict{approved:false, feedback:"cancel"}; the router never abandons', async () => {
     const { runner, fake } = await makeReadyRunner();
     const iter = runner.send('build a thing')[Symbol.asyncIterator]();
 
@@ -866,13 +866,23 @@ describe('DockerRunner — commit gate translation', () => {
     fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-3', specRef: 'SPEC' }));
     await e1Promise;
 
-    const e2 = await iter.next({ kind: 'reply', text: 'cancel' } satisfies GateResume);
-    expect(e2.value).toEqual({ type: 'abandoned', reason: 'cancelled' });
-    expect((await iter.next()).done).toBe(true);
-    expect(fake.stdinLines.some((l) => l.includes('approval_verdict'))).toBe(false);
+    // "cancel" is not a commit keyword — it's just a decline that keeps the conversation going.
+    const e2Promise = iter.next({ kind: 'reply', text: 'cancel' } satisfies GateResume);
+    await tick();
+    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
+    expect(JSON.parse(verdictLine ?? '{}')).toEqual({
+      type: 'approval_verdict',
+      id: 'appr-3',
+      approved: false,
+      feedback: 'cancel',
+    });
+
+    fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'ok, what next?' }));
+    const e2 = await e2Promise;
+    expect(e2.value).toEqual({ type: 'text', text: 'ok, what next?' });
   });
 
-  it('a timeout resume yields abandoned(timed out) and sends NO verdict', async () => {
+  it('a timeout resume writes approval_verdict{approved:false} with no feedback; the turn ends quietly', async () => {
     const { runner, fake } = await makeReadyRunner();
     const iter = runner.send('build a thing')[Symbol.asyncIterator]();
 
@@ -881,10 +891,18 @@ describe('DockerRunner — commit gate translation', () => {
     fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-4', specRef: 'SPEC' }));
     await e1Promise;
 
-    const e2 = await iter.next({ kind: 'timeout' } satisfies GateResume);
-    expect(e2.value).toEqual({ type: 'abandoned', reason: 'timed out' });
-    expect((await iter.next()).done).toBe(true);
-    expect(fake.stdinLines.some((l) => l.includes('approval_verdict'))).toBe(false);
+    const e2Promise = iter.next({ kind: 'timeout' } satisfies GateResume);
+    await tick();
+    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
+    expect(JSON.parse(verdictLine ?? '{}')).toEqual({
+      type: 'approval_verdict',
+      id: 'appr-4',
+      approved: false,
+    });
+
+    fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'no decision — standing by' }));
+    const e2 = await e2Promise;
+    expect(e2.value).toEqual({ type: 'text', text: 'no decision — standing by' });
   });
 
   it('fails the turn (no silent drop) if stdin is gone when the verdict must be written', async () => {

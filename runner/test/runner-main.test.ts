@@ -683,3 +683,116 @@ describe('runner main — usage measurement', () => {
     expect(output.find((e) => e.type === 'error')).toBeUndefined();
   });
 });
+
+// ── Commit gate: mid-turn stdin demux (S10b) ──────────────────────────────────
+
+/** Poll `probe` until it returns non-null, or throw after `timeoutMs`. */
+async function waitFor<T>(probe: () => T | null, timeoutMs = 1000): Promise<T> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const v = probe();
+    if (v !== null) return v;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error('waitFor timed out');
+}
+
+describe('runner main — commit gate stdin demux', () => {
+  /**
+   * Drives the full round-trip the real container does, but with a fake SDK turn that calls
+   * submitSpec mid-stream: the tool emits request_approval and BLOCKS; the test then writes the
+   * approval_verdict on stdin WHILE the turn is live; the dispatcher must route it to the parked
+   * tool so the turn can finish. Input is written reactively (after request_approval appears)
+   * because a verdict delivered before the gate registers would have no pending gate to match.
+   */
+  async function runGate(
+    decision: { approved: boolean; feedback?: string },
+  ): Promise<{ outputs: CollectedOutput; seenVerdict: { approved: boolean; feedback?: string } | null }> {
+    const input = new PassThrough();
+    const outputs: CollectedOutput = [];
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown): boolean => {
+      const str = typeof chunk === 'string' ? chunk : String(chunk);
+      for (const piece of str.split('\n')) {
+        const t = piece.trim();
+        if (t !== '') {
+          try {
+            outputs.push(JSON.parse(t) as CollectedOutput[0]);
+          } catch {
+            // ignore non-JSON
+          }
+        }
+      }
+      return true;
+    });
+
+    let seenVerdict: { approved: boolean; feedback?: string } | null = null;
+    const sdkQuery: SdkQueryFn = (params) => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield makeSdkInit('sess-1');
+        if (params.submitSpec === undefined) {
+          throw new Error('submitSpec was not wired into the query');
+        }
+        const verdict = await params.submitSpec('SPEC TEXT');
+        seenVerdict = verdict;
+        yield makeSdkResult(
+          verdict.approved ? 'built it' : `revising: ${verdict.feedback ?? '(none)'}`,
+          'sess-1',
+        );
+      },
+    });
+
+    const fs = new InMemoryFs();
+    try {
+      const loopPromise = runLoop({
+        readFile: fs.readFile,
+        writeFile: fs.writeFile,
+        mkdir: fs.mkdir,
+        sdkQuery,
+        listFiles: fs.listFiles,
+        readBinaryFile: fs.readBinaryFile,
+        input,
+      });
+
+      input.push(JSON.stringify({ type: 'user_message', id: 'u1', text: 'do a thing' }) + '\n');
+
+      // Wait until the parked tool has emitted request_approval, then answer it.
+      const req = await waitFor(() => {
+        const r = outputs.find((o) => o.type === 'request_approval') as
+          | { id?: string; specRef?: string }
+          | undefined;
+        return r?.id !== undefined ? r : null;
+      });
+      const line: Record<string, unknown> = {
+        type: 'approval_verdict',
+        id: req.id,
+        approved: decision.approved,
+      };
+      if (decision.feedback !== undefined) line['feedback'] = decision.feedback;
+      input.push(JSON.stringify(line) + '\n');
+      input.push(null); // EOF
+
+      await loopPromise;
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    return { outputs, seenVerdict };
+  }
+
+  it('routes an approving verdict to a submit_spec call parked mid-turn', async () => {
+    const { outputs, seenVerdict } = await runGate({ approved: true });
+
+    const req = outputs.find((o) => o.type === 'request_approval') as { specRef?: string } | undefined;
+    expect(req?.specRef).toBe('SPEC TEXT');
+    expect(seenVerdict).toEqual({ approved: true });
+    expect(outputs.some((o) => o.type === 'text' && o.text === 'built it')).toBe(true);
+    expect(outputs.some((o) => o.type === 'error')).toBe(false);
+  });
+
+  it('routes a not-approved verdict with feedback back into the turn', async () => {
+    const { outputs, seenVerdict } = await runGate({ approved: false, feedback: 'make it faster' });
+
+    expect(seenVerdict).toEqual({ approved: false, feedback: 'make it faster' });
+    expect(outputs.some((o) => o.type === 'text' && o.text === 'revising: make it faster')).toBe(true);
+  });
+});
