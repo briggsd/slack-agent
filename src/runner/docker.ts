@@ -45,6 +45,17 @@ export type SpawnFn = (
   options: SpawnOptions,
 ) => ChildProcess;
 
+// ── Trust-boundary coercion ───────────────────────────────────────────────────
+
+/**
+ * Cost/token fields come from the container — coerce each to a non-negative integer
+ * (missing / non-finite / negative / non-number → 0) so neither the audit ledger nor
+ * the Slice-B SUM cap can be skewed by a misreporting sandbox.
+ */
+function toCount(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0;
+}
+
 // ── Sanitization helpers ──────────────────────────────────────────────────────
 
 /** Make a session key safe for use in Docker container/volume names */
@@ -328,11 +339,11 @@ export class DockerRunner implements SessionRunner {
           } else if (parsed.type === 'usage' && parsed.id === id) {
             yield {
               type: 'usage',
-              costMicroUsd: parsed.costMicroUsd,
-              inputTokens: parsed.inputTokens,
-              outputTokens: parsed.outputTokens,
-              cacheReadTokens: parsed.cacheReadTokens,
-              cacheCreationTokens: parsed.cacheCreationTokens,
+              costMicroUsd: toCount(parsed.costMicroUsd),
+              inputTokens: toCount(parsed.inputTokens),
+              outputTokens: toCount(parsed.outputTokens),
+              cacheReadTokens: toCount(parsed.cacheReadTokens),
+              cacheCreationTokens: toCount(parsed.cacheCreationTokens),
             } as RunnerEvent;
           } else if (parsed.type === 'text' && parsed.id === id) {
             yield { type: 'text', text: parsed.text } as RunnerEvent;

@@ -197,7 +197,18 @@ export class SqliteSessionStore implements SessionStore {
     );
   }
 
+  /**
+   * Read the current column names from audit_events (returns [] when the table does not
+   * exist yet). Called before CREATE TABLE IF NOT EXISTS so a fresh DB sees [] and skips
+   * both the placeholder-drop and the ALTER migration.
+   */
+  private auditColumns(): string[] {
+    const rows = this.db.pragma('table_info(audit_events)') as Array<{ name: string }>;
+    return rows.map((r) => r.name);
+  }
+
   private createSchema(): void {
+    // sessions table + its indexes — unchanged from before this slice.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         session_key      TEXT    PRIMARY KEY,
@@ -219,30 +230,46 @@ export class SqliteSessionStore implements SessionStore {
 
       CREATE INDEX IF NOT EXISTS sessions_last_active_at
         ON sessions (last_active_at);
+    `);
 
-      -- M6 S05 replaced an earlier placeholder audit_events shape (event_type/payload).
-      -- A bare CREATE TABLE IF NOT EXISTS would leave that stale table in place on a dev
-      -- DB created before this slice, so recordAudit's 10-column INSERT would fail at
-      -- runtime. The placeholder was never written to (the gateway only started emitting
-      -- audit rows in this slice), so dropping it loses nothing. sessions is untouched.
-      DROP TABLE IF EXISTS audit_events;
+    // audit_events: durable across restarts (no unconditional DROP).
+    // Read columns BEFORE the CREATE so a fresh DB sees [] and skips both branches below.
+    const auditCols = this.auditColumns();
+
+    // One-time cleanup of the pre-S05 placeholder shape (event_type/payload, no
+    // session_key). The placeholder was never written to, so this is lossless. A real
+    // ledger (one that has a session_key column) is NEVER dropped.
+    if (auditCols.length > 0 && !auditCols.includes('session_key')) {
+      this.db.exec('DROP TABLE audit_events');
+    }
+
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS audit_events (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_key  TEXT    NOT NULL,
-        team_id      TEXT,
-        user_id      TEXT,
-        ts           INTEGER NOT NULL,
-        kind         TEXT    NOT NULL,
-        tool         TEXT,
-        summary      TEXT,
-        reasoning    TEXT,
-        result       TEXT,
-        cost_tokens  INTEGER,
-        cost_micro_usd  INTEGER
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key    TEXT    NOT NULL,
+        team_id        TEXT,
+        user_id        TEXT,
+        ts             INTEGER NOT NULL,
+        kind           TEXT    NOT NULL,
+        tool           TEXT,
+        summary        TEXT,
+        reasoning      TEXT,
+        result         TEXT,
+        cost_tokens    INTEGER,
+        cost_micro_usd INTEGER
       );
+    `);
 
+    // Migrate a post-S05 / pre-Slice-A table that has session_key but not cost_micro_usd.
+    if (auditCols.includes('session_key') && !auditCols.includes('cost_micro_usd')) {
+      this.db.exec('ALTER TABLE audit_events ADD COLUMN cost_micro_usd INTEGER');
+    }
+
+    this.db.exec(`
       CREATE INDEX IF NOT EXISTS audit_by_session ON audit_events (session_key);
       CREATE INDEX IF NOT EXISTS audit_by_team    ON audit_events (team_id);
+      CREATE INDEX IF NOT EXISTS audit_by_user_ts ON audit_events (user_id, ts);
+      CREATE INDEX IF NOT EXISTS audit_by_ts      ON audit_events (ts);
     `);
   }
 

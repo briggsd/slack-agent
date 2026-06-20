@@ -1,9 +1,16 @@
 /**
  * Tests for SqliteSessionStore and the rehydrate-on-reply path in SessionManager.
  *
- * All SQLite access uses ':memory:' — no files on disk, no network.
+ * Most SQLite access uses ':memory:' — no files on disk, no network. The durability
+ * and migration tests deliberately use a real temp-file DB (via fs.mkdtempSync under
+ * os.tmpdir()) so that two independent SqliteSessionStore connections share state and
+ * prove rows survive a restart. Those tests clean up in afterEach.
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import { SqliteSessionStore } from '../src/sessions/store.js';
 import type { SessionStore, AuditEvent } from '../src/sessions/store.js';
 import { SessionManager } from '../src/sessions/manager.js';
@@ -399,6 +406,163 @@ describe('SqliteSessionStore — audit_events', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.kind).toBe('cost');
     expect(rows[0]?.cost_micro_usd).toBeNull();
+  });
+});
+
+// ─── SqliteSessionStore — durability, migration, and indexes ─────────────────
+// These tests use a real temp-file DB so two connections share the same underlying
+// file, proving that rows survive a store close/reopen cycle.
+
+describe('SqliteSessionStore — durability', () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-store-'));
+    dbPath = path.join(tmpDir, 'test.db');
+  });
+
+  afterEach(() => {
+    // Best-effort cleanup of the temp directory
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it('audit rows survive a store close + reopen (no DROP on second open)', () => {
+    const store1 = new SqliteSessionStore(dbPath);
+    store1.recordAudit({
+      session_key: 'DURABLE:K',
+      team_id: null,
+      user_id: null,
+      ts: 1_000,
+      kind: 'lifecycle',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: 'created',
+      cost_tokens: null,
+      cost_micro_usd: null,
+    });
+    store1.close();
+
+    // Open a fresh store on the same file — rows must still be there.
+    const store2 = new SqliteSessionStore(dbPath);
+    const rows = store2.getAuditEvents('DURABLE:K');
+    store2.close();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.result).toBe('created');
+  });
+
+  it('migrates a 10-column audit_events table (pre-cost_micro_usd) and preserves existing rows', () => {
+    // Directly create the old 10-column table — no cost_micro_usd column.
+    const rawDb = new Database(dbPath);
+    rawDb.exec(`
+      CREATE TABLE audit_events (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key  TEXT    NOT NULL,
+        team_id      TEXT,
+        user_id      TEXT,
+        ts           INTEGER NOT NULL,
+        kind         TEXT    NOT NULL,
+        tool         TEXT,
+        summary      TEXT,
+        reasoning    TEXT,
+        result       TEXT,
+        cost_tokens  INTEGER
+      );
+      INSERT INTO audit_events (session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens)
+      VALUES ('OLD:K', 'T1', 'U1', 500, 'lifecycle', null, null, null, 'created', 42);
+    `);
+    rawDb.close();
+
+    // Open via SqliteSessionStore — should migrate and preserve the old row.
+    const store = new SqliteSessionStore(dbPath);
+
+    // Old row is preserved and readable; cost_micro_usd is null (it had no value).
+    const rows = store.getAuditEvents('OLD:K');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.session_key).toBe('OLD:K');
+    expect(rows[0]?.cost_tokens).toBe(42);
+    expect(rows[0]?.cost_micro_usd).toBeNull();
+
+    // New kind:'cost' write with cost_micro_usd round-trips correctly.
+    store.recordAudit({
+      session_key: 'OLD:K',
+      team_id: null,
+      user_id: null,
+      ts: 1_000,
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: 100,
+      cost_micro_usd: 5_000,
+    });
+
+    const allRows = store.getAuditEvents('OLD:K');
+    store.close();
+
+    expect(allRows).toHaveLength(2);
+    const costRow = allRows.find((r) => r.kind === 'cost');
+    expect(costRow?.cost_micro_usd).toBe(5_000);
+  });
+
+  it('replaces pre-S05 placeholder shape (event_type/payload, no session_key) and works normally after', () => {
+    // Simulate the old placeholder table.
+    const rawDb = new Database(dbPath);
+    rawDb.exec(`
+      CREATE TABLE audit_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type  TEXT NOT NULL,
+        payload     TEXT
+      );
+    `);
+    rawDb.close();
+
+    // Open via SqliteSessionStore — the placeholder table should be replaced.
+    const store = new SqliteSessionStore(dbPath);
+
+    // Normal audit write must work after the replacement.
+    store.recordAudit({
+      session_key: 'POST:PLACEHOLDER',
+      team_id: null,
+      user_id: null,
+      ts: 200,
+      kind: 'lifecycle',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: 'created',
+      cost_tokens: null,
+      cost_micro_usd: null,
+    });
+
+    const rows = store.getAuditEvents('POST:PLACEHOLDER');
+    store.close();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.result).toBe('created');
+  });
+
+  it('creates audit_by_user_ts and audit_by_ts indexes after open', () => {
+    const store = new SqliteSessionStore(dbPath);
+
+    // Query sqlite_master for index names on audit_events.
+    const rawDb = new Database(dbPath);
+    const indexRows = rawDb.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='audit_events'",
+    ).all() as Array<{ name: string }>;
+    rawDb.close();
+    store.close();
+
+    const indexNames = indexRows.map((r) => r.name);
+    expect(indexNames).toContain('audit_by_user_ts');
+    expect(indexNames).toContain('audit_by_ts');
   });
 });
 

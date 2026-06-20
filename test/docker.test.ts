@@ -316,6 +316,85 @@ describe('DockerRunner — send/receive', () => {
   });
 });
 
+// ── Trust-boundary coercion for usage fields ─────────────────────────────────
+
+describe('DockerRunner — usage field coercion at trust boundary', () => {
+  it('coerces bad usage fields (negative, string, missing, non-finite) to 0', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const gen = runner.send('coerce me');
+    const iter = gen[Symbol.asyncIterator]();
+
+    const e1Promise = iter.next();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sent = JSON.parse(fake.stdinLines[0] ?? '{}') as { type: string; id: string };
+
+    // Emit a usage message with malformed fields, then text to terminate the turn.
+    fake.writeOut(JSON.stringify({
+      type: 'usage',
+      id: sent.id,
+      costMicroUsd: -5,          // negative → 0
+      inputTokens: 'x',          // non-number → 0
+      outputTokens: undefined,   // missing (serialises as absent) → 0
+      cacheReadTokens: Infinity, // JSON.stringify(Infinity) → null, so non-number → 0
+      cacheCreationTokens: -0.1, // negative → 0
+    }));
+    fake.writeOut(JSON.stringify({ type: 'text', id: sent.id, text: 'ok' }));
+
+    const e1 = await e1Promise;
+    expect(e1.value).toMatchObject({
+      type: 'usage',
+      costMicroUsd: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
+
+    const e2 = await iter.next();
+    expect(e2.value).toEqual({ type: 'text', text: 'ok' });
+    expect((await iter.next()).done).toBe(true);
+  });
+
+  it('passes through well-formed usage fields and rounds fractional values', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const gen = runner.send('good usage');
+    const iter = gen[Symbol.asyncIterator]();
+
+    const e1Promise = iter.next();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sent = JSON.parse(fake.stdinLines[0] ?? '{}') as { type: string; id: string };
+
+    fake.writeOut(JSON.stringify({
+      type: 'usage',
+      id: sent.id,
+      costMicroUsd: 1.6,       // rounds to 2
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 200,
+    }));
+    fake.writeOut(JSON.stringify({ type: 'text', id: sent.id, text: 'done' }));
+
+    const e1 = await e1Promise;
+    expect(e1.value).toMatchObject({
+      type: 'usage',
+      costMicroUsd: 2,          // 1.6 rounded
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 200,
+    });
+
+    const e2 = await iter.next();
+    expect(e2.value).toEqual({ type: 'text', text: 'done' });
+    expect((await iter.next()).done).toBe(true);
+  });
+});
+
 // ── Partial line buffering ────────────────────────────────────────────────────
 
 describe('DockerRunner — NDJSON framing with chunk splits', () => {
