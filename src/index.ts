@@ -143,6 +143,7 @@ async function main(): Promise<void> {
     ...(volumeReaper !== undefined && { volumeReaper }),
     volumeTtlMs: config.VOLUME_TTL_MS,
     gcIntervalMs: config.VOLUME_GC_INTERVAL_MS,
+    spendCaps: config.spendCaps,
   });
 
   await app.start();

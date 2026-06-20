@@ -89,6 +89,12 @@ export interface SessionStore {
   deleteSession(key: string): void;
   /** Close the underlying database handle. */
   close(): void;
+  /** Σ cost_micro_usd for a session (lifetime). 0 when none. */
+  sumCostByTask(sessionKey: string): number;
+  /** Σ cost_micro_usd for a user since `sinceMs` (rolling window). 0 when none. */
+  sumCostByUserSince(userId: string, sinceMs: number): number;
+  /** Σ cost_micro_usd across all sessions since `sinceMs`. 0 when none. */
+  sumCostGlobalSince(sinceMs: number): number;
 }
 
 // ─── SQLite implementation ────────────────────────────────────────────────────
@@ -125,6 +131,9 @@ export class SqliteSessionStore implements SessionStore {
   private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
   private readonly stmtListExpired: Database.Statement<[number], SessionRow>;
   private readonly stmtDeleteSession: Database.Statement<[string]>;
+  private readonly stmtSumByTask: Database.Statement<[string], { total: number }>;
+  private readonly stmtSumByUserSince: Database.Statement<[string, number], { total: number }>;
+  private readonly stmtSumGlobalSince: Database.Statement<[number], { total: number }>;
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
@@ -194,6 +203,18 @@ export class SqliteSessionStore implements SessionStore {
 
     this.stmtDeleteSession = this.db.prepare<[string]>(
       'DELETE FROM sessions WHERE session_key = ?',
+    );
+
+    this.stmtSumByTask = this.db.prepare<[string], { total: number }>(
+      'SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM audit_events WHERE session_key = ?',
+    );
+
+    this.stmtSumByUserSince = this.db.prepare<[string, number], { total: number }>(
+      'SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM audit_events WHERE user_id = ? AND ts > ?',
+    );
+
+    this.stmtSumGlobalSince = this.db.prepare<[number], { total: number }>(
+      'SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM audit_events WHERE ts > ?',
     );
   }
 
@@ -327,6 +348,18 @@ export class SqliteSessionStore implements SessionStore {
     this.stmtDeleteSession.run(key);
   }
 
+  sumCostByTask(sessionKey: string): number {
+    return this.stmtSumByTask.get(sessionKey)?.total ?? 0;
+  }
+
+  sumCostByUserSince(userId: string, sinceMs: number): number {
+    return this.stmtSumByUserSince.get(userId, sinceMs)?.total ?? 0;
+  }
+
+  sumCostGlobalSince(sinceMs: number): number {
+    return this.stmtSumGlobalSince.get(sinceMs)?.total ?? 0;
+  }
+
   close(): void {
     this.db.close();
   }
@@ -345,4 +378,7 @@ export class NoopSessionStore implements SessionStore {
   listExpired(_cutoffMs: number): SessionRow[] { return []; }
   deleteSession(_key: string): void { /* no-op */ }
   close(): void { /* no-op */ }
+  sumCostByTask(_sessionKey: string): number { return 0; }
+  sumCostByUserSince(_userId: string, _sinceMs: number): number { return 0; }
+  sumCostGlobalSince(_sinceMs: number): number { return 0; }
 }

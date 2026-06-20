@@ -169,3 +169,80 @@ describe('GATE_TIMEOUT_MS config', () => {
     expect(() => loadConfig()).toThrow(/GATE_TIMEOUT_MS/);
   });
 });
+
+describe('spendCaps config (Slice B1)', () => {
+  // Each test in this suite mutates a set of env vars and restores them in afterEach.
+  const CAP_VARS = [
+    'SPEND_CAP_PER_TASK_USD',
+    'SPEND_CAP_PER_USER_24H_USD',
+    'SPEND_CAP_GLOBAL_24H_USD',
+  ] as const;
+  const REQUIRED = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of [...CAP_VARS, ...REQUIRED]) saved[key] = process.env[key];
+    process.env['SLACK_BOT_TOKEN'] = 'xoxb-test';
+    process.env['SLACK_APP_TOKEN'] = 'xapp-test';
+    // Remove all three cap vars so each test starts clean
+    for (const key of CAP_VARS) delete process.env[key];
+  });
+
+  afterEach(() => {
+    for (const key of [...CAP_VARS, ...REQUIRED]) {
+      const val = saved[key];
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  });
+
+  it('defaults: unset vars → generous defaults in micro-USD', async () => {
+    const { loadConfig } = await import('../src/config.js');
+    const cfg = loadConfig();
+    // $20 default per-task → 20_000_000 micro-USD
+    expect(cfg.spendCaps.perTaskMicroUsd).toBe(20_000_000);
+    // $100 default per-user-24h → 100_000_000 micro-USD
+    expect(cfg.spendCaps.perUser24hMicroUsd).toBe(100_000_000);
+    // $400 default global-24h → 400_000_000 micro-USD
+    expect(cfg.spendCaps.perGlobal24hMicroUsd).toBe(400_000_000);
+  });
+
+  it('explicit 0 → 0 (cap disabled)', async () => {
+    process.env['SPEND_CAP_PER_TASK_USD'] = '0';
+    process.env['SPEND_CAP_PER_USER_24H_USD'] = '0';
+    process.env['SPEND_CAP_GLOBAL_24H_USD'] = '0';
+    const { loadConfig } = await import('../src/config.js');
+    const cfg = loadConfig();
+    expect(cfg.spendCaps.perTaskMicroUsd).toBe(0);
+    expect(cfg.spendCaps.perUser24hMicroUsd).toBe(0);
+    expect(cfg.spendCaps.perGlobal24hMicroUsd).toBe(0);
+  });
+
+  it('negative dollar values are clamped to 0', async () => {
+    process.env['SPEND_CAP_PER_TASK_USD'] = '-5';
+    process.env['SPEND_CAP_PER_USER_24H_USD'] = '-100';
+    process.env['SPEND_CAP_GLOBAL_24H_USD'] = '-0.01';
+    const { loadConfig } = await import('../src/config.js');
+    const cfg = loadConfig();
+    expect(cfg.spendCaps.perTaskMicroUsd).toBe(0);
+    expect(cfg.spendCaps.perUser24hMicroUsd).toBe(0);
+    expect(cfg.spendCaps.perGlobal24hMicroUsd).toBe(0);
+  });
+
+  it('converts dollar values to integer micro-USD correctly', async () => {
+    process.env['SPEND_CAP_PER_TASK_USD'] = '1.5';    // → 1_500_000
+    process.env['SPEND_CAP_PER_USER_24H_USD'] = '10'; // → 10_000_000
+    process.env['SPEND_CAP_GLOBAL_24H_USD'] = '0.01'; // → 10_000
+    const { loadConfig } = await import('../src/config.js');
+    const cfg = loadConfig();
+    expect(cfg.spendCaps.perTaskMicroUsd).toBe(1_500_000);
+    expect(cfg.spendCaps.perUser24hMicroUsd).toBe(10_000_000);
+    expect(cfg.spendCaps.perGlobal24hMicroUsd).toBe(10_000);
+  });
+
+  it('rejects a non-numeric cap value', async () => {
+    process.env['SPEND_CAP_PER_TASK_USD'] = 'unlimited';
+    const { loadConfig } = await import('../src/config.js');
+    expect(() => loadConfig()).toThrow(/SPEND_CAP_PER_TASK_USD/);
+  });
+});

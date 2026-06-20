@@ -68,6 +68,11 @@ export function volumeNameFor(sessionKey: string): string {
   return `slackbot-ws-${sanitizeKey(sessionKey)}`;
 }
 
+/** Anti-poison ceiling on a single turn's recorded cost (micro-USD, ~$20). Far above any
+ *  real turn; a value past it is a misreport, so we clamp rather than trust it. NOT a
+ *  policy knob — the configurable caps live in the gateway. */
+const PER_TURN_COST_CEILING_MICRO_USD = 20_000_000;
+
 /** Hard cap on a single `docker volume rm` so a wedged daemon can't stall the GC sweep. */
 const VOLUME_RM_TIMEOUT_MS = 30_000;
 
@@ -339,7 +344,7 @@ export class DockerRunner implements SessionRunner {
           } else if (parsed.type === 'usage' && parsed.id === id) {
             yield {
               type: 'usage',
-              costMicroUsd: toCount(parsed.costMicroUsd),
+              costMicroUsd: Math.min(toCount(parsed.costMicroUsd), PER_TURN_COST_CEILING_MICRO_USD),
               inputTokens: toCount(parsed.inputTokens),
               outputTokens: toCount(parsed.outputTokens),
               cacheReadTokens: toCount(parsed.cacheReadTokens),
