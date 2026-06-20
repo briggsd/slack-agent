@@ -14,6 +14,10 @@ export type RunnerEvent =
   // AND records an audit event. NOT a protocol/wire change — this event never crosses the
   // container boundary; it is synthesised by the open-pr node and handled in the drain loop.
   | { type: 'pr_opened'; url: string }
+  // per-turn cost + tokens, emitted just before the terminal text/error (and on
+  // error/abandoned turns too — they still cost). Recorded to the audit ledger;
+  // never acted on as control. Does NOT terminate the stream.
+  | { type: 'usage'; costMicroUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number }
   | { type: 'error'; message: string };
 
 /**

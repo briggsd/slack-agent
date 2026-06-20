@@ -543,3 +543,143 @@ describe('runner main — file detection', () => {
     expect(fileEvents).toHaveLength(0);
   });
 });
+
+// ── Usage / cost measurement tests ───────────────────────────────────────────
+
+describe('runner main — usage measurement', () => {
+  it('emits a usage event with correct costMicroUsd for a success result with nonzero cost', async () => {
+    const sdk = new FakeAgentSdk([
+      [
+        makeSdkInit('sess-1'),
+        {
+          ...makeSdkResult('hello', 'sess-1'),
+          total_cost_usd: 0.0123,
+          usage: {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 20,
+            cache_read_input_tokens: 10,
+            server_tool_use: { web_search_requests: 0 },
+          },
+        } as SDKMessage,
+      ],
+    ]);
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'msg-1', text: 'hello' })],
+      sdk,
+    );
+
+    const usageEvent = output.find((e) => e.type === 'usage');
+    expect(usageEvent).toBeDefined();
+    expect(usageEvent?.id).toBe('msg-1');
+    // 0.0123 * 1e6 = 12300
+    expect((usageEvent as { costMicroUsd?: number })?.costMicroUsd).toBe(12300);
+    expect((usageEvent as { inputTokens?: number })?.inputTokens).toBe(100);
+    expect((usageEvent as { outputTokens?: number })?.outputTokens).toBe(50);
+    expect((usageEvent as { cacheCreationTokens?: number })?.cacheCreationTokens).toBe(20);
+    expect((usageEvent as { cacheReadTokens?: number })?.cacheReadTokens).toBe(10);
+  });
+
+  it('usage event is emitted before the terminal text event (ordering check)', async () => {
+    const sdk = new FakeAgentSdk([
+      [
+        makeSdkInit('sess-1'),
+        {
+          ...makeSdkResult('answer', 'sess-1'),
+          total_cost_usd: 0.001,
+        } as SDKMessage,
+      ],
+    ]);
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'msg-1', text: 'hello' })],
+      sdk,
+    );
+
+    const usageIdx = output.findIndex((e) => e.type === 'usage');
+    const textIdx = output.findIndex((e) => e.type === 'text');
+    expect(usageIdx).toBeGreaterThanOrEqual(0);
+    expect(textIdx).toBeGreaterThan(usageIdx);
+  });
+
+  it('emits a usage event for an error result (errors still cost money)', async () => {
+    const sdk = new FakeAgentSdk([
+      [
+        makeSdkInit('sess-1'),
+        {
+          ...makeSdkResultError(['something went wrong']),
+          total_cost_usd: 0.005,
+          usage: {
+            input_tokens: 30,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 5,
+            server_tool_use: { web_search_requests: 0 },
+          },
+        } as SDKMessage,
+      ],
+    ]);
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'msg-err', text: 'fail' })],
+      sdk,
+    );
+
+    const usageEvent = output.find((e) => e.type === 'usage');
+    expect(usageEvent).toBeDefined();
+    expect(usageEvent?.id).toBe('msg-err');
+    expect((usageEvent as { costMicroUsd?: number })?.costMicroUsd).toBe(5000);
+
+    // usage must appear before the error event
+    const usageIdx = output.findIndex((e) => e.type === 'usage');
+    const errorIdx = output.findIndex((e) => e.type === 'error');
+    expect(usageIdx).toBeGreaterThanOrEqual(0);
+    expect(errorIdx).toBeGreaterThan(usageIdx);
+  });
+
+  it('does not emit a usage event when no result event is received from the SDK', async () => {
+    // SDK never emits a result — simulates a crash before result
+    const sdk = new FakeAgentSdk([[makeSdkInit('sess-1')]]);
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'msg-1', text: 'hello' })],
+      sdk,
+    );
+
+    const usageEvents = output.filter((e) => e.type === 'usage');
+    expect(usageEvents).toHaveLength(0);
+    // Should still emit an error (no result received)
+    const errorEvent = output.find((e) => e.type === 'error');
+    expect(errorEvent).toBeDefined();
+  });
+
+  it('emits a zero-cost usage event (not an error) when the SDK result omits usage', async () => {
+    // Defensive path: the SDK types mark `usage` non-optional, but a shape drift that
+    // dropped it must not turn an otherwise-successful result into an error. Build a
+    // result with `usage` removed (no `any`, no @ts-ignore — a Record + delete).
+    const base = makeSdkResult('survived', 'sess-1');
+    const resultWithoutUsage = { ...base } as Record<string, unknown>;
+    delete resultWithoutUsage.usage;
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), resultWithoutUsage as unknown as SDKMessage],
+    ]);
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'msg-1', text: 'hi' })],
+      sdk,
+    );
+
+    // The successful result still produced its text...
+    const textEvent = output.find((e) => e.type === 'text');
+    expect((textEvent as { text?: string })?.text).toBe('survived');
+    // ...plus a usage event with zeroed token counts (no crash).
+    const usageEvent = output.find((e) => e.type === 'usage');
+    expect(usageEvent).toBeDefined();
+    expect((usageEvent as { inputTokens?: number })?.inputTokens).toBe(0);
+    expect((usageEvent as { outputTokens?: number })?.outputTokens).toBe(0);
+    expect((usageEvent as { cacheReadTokens?: number })?.cacheReadTokens).toBe(0);
+    // And no error was emitted.
+    expect(output.find((e) => e.type === 'error')).toBeUndefined();
+  });
+});

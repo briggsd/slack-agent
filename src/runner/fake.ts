@@ -28,9 +28,17 @@ export class FakeRunner implements SessionRunner {
     const idx = this.turnIndex++;
     const turn = this.script[idx];
 
-    // Default behaviour (no script): emit one status then final echo text
+    // Default behaviour (no script): emit one status, then usage, then final echo text
     const defaultEvents: RunnerEvent[] = [
       { type: 'status', text: 'processing…' },
+      {
+        type: 'usage',
+        costMicroUsd: 1000,
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      },
       { type: 'text', text: `Echo: ${message}` },
     ];
 

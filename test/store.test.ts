@@ -227,6 +227,7 @@ describe('SqliteSessionStore — audit_events', () => {
       reasoning: null,
       result: 'created',
       cost_tokens: null,
+      cost_micro_usd: null,
     };
     store.recordAudit(event);
 
@@ -243,6 +244,7 @@ describe('SqliteSessionStore — audit_events', () => {
     expect(row?.reasoning).toBeNull();
     expect(row?.result).toBe('created');
     expect(row?.cost_tokens).toBeNull();
+    expect(row?.cost_micro_usd).toBeNull();
   });
 
   it('getAuditEvents returns empty array for unknown session key', () => {
@@ -261,6 +263,7 @@ describe('SqliteSessionStore — audit_events', () => {
       reasoning: null,
       result: 'created',
       cost_tokens: null,
+      cost_micro_usd: null,
     });
     store.recordAudit({
       session_key: 'K2',
@@ -273,6 +276,7 @@ describe('SqliteSessionStore — audit_events', () => {
       reasoning: null,
       result: 'created',
       cost_tokens: null,
+      cost_micro_usd: null,
     });
 
     expect(store.getAuditEvents('K1')).toHaveLength(1);
@@ -288,6 +292,7 @@ describe('SqliteSessionStore — audit_events', () => {
       summary: null,
       reasoning: null,
       cost_tokens: null,
+      cost_micro_usd: null,
     };
     store.recordAudit({ ...base, ts: 100, kind: 'lifecycle', tool: 'session', result: 'created' });
     store.recordAudit({ ...base, ts: 200, kind: 'approval', tool: 'plan-gate', result: 'requested' });
@@ -313,6 +318,7 @@ describe('SqliteSessionStore — audit_events', () => {
       reasoning: null,
       result: 'opened',
       cost_tokens: null,
+      cost_micro_usd: null,
     });
 
     const rows = store.getAuditEvents('S:C:T');
@@ -335,6 +341,7 @@ describe('SqliteSessionStore — audit_events', () => {
       reasoning: null,
       result: null,
       cost_tokens: null,
+      cost_micro_usd: null,
     });
 
     const rows = store.getAuditEvents('NULL:TEST');
@@ -345,6 +352,53 @@ describe('SqliteSessionStore — audit_events', () => {
     expect(rows[0]?.reasoning).toBeNull();
     expect(rows[0]?.result).toBeNull();
     expect(rows[0]?.cost_tokens).toBeNull();
+    expect(rows[0]?.cost_micro_usd).toBeNull();
+  });
+
+  it('round-trips a kind:cost AuditEvent with cost_micro_usd value', () => {
+    store.recordAudit({
+      session_key: 'COST:TEST',
+      team_id: 'TEAM1',
+      user_id: 'U1',
+      ts: 1_700_000_001_000,
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: 165,
+      cost_micro_usd: 12300,
+    });
+
+    const rows = store.getAuditEvents('COST:TEST');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe('cost');
+    expect(rows[0]?.cost_tokens).toBe(165);
+    expect(rows[0]?.cost_micro_usd).toBe(12300);
+    expect(rows[0]?.team_id).toBe('TEAM1');
+    expect(rows[0]?.user_id).toBe('U1');
+    expect(rows[0]?.tool).toBeNull();
+  });
+
+  it('round-trips a kind:cost AuditEvent with cost_micro_usd = null', () => {
+    store.recordAudit({
+      session_key: 'COST:NULL',
+      team_id: null,
+      user_id: null,
+      ts: 2_000,
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: null,
+    });
+
+    const rows = store.getAuditEvents('COST:NULL');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe('cost');
+    expect(rows[0]?.cost_micro_usd).toBeNull();
   });
 });
 
