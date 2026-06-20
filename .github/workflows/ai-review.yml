@@ -1,0 +1,106 @@
+# Automated AI code review on every PR, via the ai-code-review-factory
+# (@briggsd/code-reviewer). Advisory and non-blocking: it posts a summary comment and
+# never fails the build — the gateway's gate (ci.yml) stays the only required check.
+#
+# Two jobs:
+#   - dry-run     : runtime `dummy`, read-only, no secrets — safe for fork PRs; validates the
+#                   install/fetch/artifact plumbing without spending a model turn.
+#   - publish     : runtime `pi`, same-repo PRs only — the real model-backed review; posts the
+#                   summary comment. Needs Node >= 22.19, the @earendil-works/pi-coding-agent CLI,
+#                   and the ANTHROPIC_API_KEY repo secret (provider defaults to anthropic via
+#                   the conventions in .ai-review.json). The key/pi runtime never run for forks.
+#
+# Reviewer conventions live in the repo-root .ai-review.json (auto-discovered).
+# The action is pinned to v0.3.1's commit SHA (a git tag is mutable; the privileged publish job
+# holds pull-requests:write + ANTHROPIC_API_KEY, so the code it runs is SHA-pinned). The CLI
+# installs from the v0.3.1 release tarball, and the Pi CLI is pinned to 0.79.2 (validated locally).
+
+name: AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  AI_REVIEW_PACKAGE: https://github.com/briggsd/code-reviewer/releases/download/v0.3.1/briggsd-code-reviewer-0.3.1.tgz
+
+jobs:
+  dry-run:
+    name: AI review (dry run)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository config
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run AI review (no write-back)
+        uses: briggsd/code-reviewer@8456cd2f7b8ffc5c380dbec1c668fb869cbcaa17 # v0.3.1
+        env:
+          AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
+        with:
+          package-source: ${{ env.AI_REVIEW_PACKAGE }}
+          provider: github
+          repo: ${{ github.repository }}
+          change-id: ${{ github.event.pull_request.number }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          runtime: dummy
+          output-dir: .ai-review
+          ci-exit: "false"
+
+      - name: Upload review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-${{ github.event.pull_request.number }}
+          path: .ai-review
+          include-hidden-files: true
+
+  publish-summary:
+    name: AI review (pi + publish summary)
+    runs-on: ubuntu-latest
+    needs: dry-run
+    # Trusted, same-repo PRs only — the model key and the pi runtime never run for forks.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out repository config
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Pi requires Node >= 22.19; ensure it regardless of the runner's default.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # --ignore-scripts: don't run a third-party package's lifecycle scripts in CI.
+      - name: Install the Pi CLI
+        run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.79.2
+
+      - name: Run AI review (pi) and publish summary
+        uses: briggsd/code-reviewer@8456cd2f7b8ffc5c380dbec1c668fb869cbcaa17 # v0.3.1
+        env:
+          AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        with:
+          package-source: ${{ env.AI_REVIEW_PACKAGE }}
+          provider: github
+          repo: ${{ github.repository }}
+          change-id: ${{ github.event.pull_request.number }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          runtime: pi
+          output-dir: .ai-review
+          publish-summary: "true"
+          ci-exit: "false"
