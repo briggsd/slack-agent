@@ -14,7 +14,7 @@ import { createInterface } from 'readline';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type {
-  GatewayToRunnerMessage,
+  UserMessage,
   RunnerToGatewayMessage,
 } from './protocol.js';
 
@@ -129,7 +129,10 @@ export async function runLoop(opts: {
     const line = rawLine.trim();
     if (line === '') continue;
 
-    let msg: GatewayToRunnerMessage;
+    // Inbound is only ever a user_message today (the guard below enforces it). Typed as
+    // UserMessage, not the full GatewayToRunnerMessage union, so the `text` destructure stays
+    // sound now that the union also carries the text-less approval_verdict (consumed in S10b).
+    let msg: UserMessage;
     try {
       const parsed: unknown = JSON.parse(line);
       if (
@@ -141,7 +144,7 @@ export async function runLoop(opts: {
       ) {
         throw new Error('unexpected message shape');
       }
-      msg = parsed as GatewayToRunnerMessage;
+      msg = parsed as UserMessage;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log(`malformed input line: ${message}`);
