@@ -429,7 +429,13 @@ export class DockerRunner implements SessionRunner {
               yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
               return;
             }
-            const verdict: GatewayToRunnerMessage = classifyGateResume(resume, approvalId);
+            // `resume` is `GateResume | BuildOutcome | undefined` (widened TNext); the
+            // docker runner only ever yields `await_approval` (not `run_build`), so the
+            // resume here is always a GateResume or undefined. Cast to the narrower type.
+            const verdict: GatewayToRunnerMessage = classifyGateResume(
+              resume as GateResume | undefined,
+              approvalId,
+            );
             self.child.stdin.write(JSON.stringify(verdict) + '\n');
             // Restart the turn budget: wall-clock spent parked at the human gate (which can
             // far exceed turnTimeoutMs) must not count against the post-approval continuation.
@@ -636,10 +642,11 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
   }
 
   // profile is threaded through for future facets; currently ignored (M4 S02 seam only)
-  async create(sessionKey: string, _profile: Profile): Promise<SessionRunner> {
+  async create(sessionKey: string, _profile: Profile, opts?: { nameSuffix?: string }): Promise<SessionRunner> {
     const safe = sanitizeKey(sessionKey);
-    const containerName = `slackbot-${safe}`;
-    const volumeName = volumeNameFor(sessionKey);
+    const suffix = opts?.nameSuffix !== undefined ? `-${opts.nameSuffix}` : '';
+    const containerName = `slackbot-${safe}${suffix}`;
+    const volumeName = volumeNameFor(sessionKey);   // UNCHANGED — shared volume
 
     const args: string[] = [
       'run',

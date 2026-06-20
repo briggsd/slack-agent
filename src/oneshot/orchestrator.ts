@@ -8,6 +8,7 @@
 
 import type { SessionRunner, RunnerEvent, RunnerStream } from '../runner/types.js';
 import type { CredentialBroker, CredentialLease } from '../broker/types.js';
+import type { GitHost } from '../broker/types.js';
 import type { GitNodeExecutor } from './git-node.js';
 import { parseOneShotTask } from './parse.js';
 import { volumeNameFor } from '../runner/docker.js';
@@ -23,6 +24,7 @@ export class OneShotOrchestrator implements SessionRunner {
   private readonly taskId: string;
   private readonly volume: string;
   private readonly blueprintId: string;
+  private readonly explicitTask: { host: GitHost; repo: string; instruction: string } | undefined;
 
   constructor(
     inner: SessionRunner,
@@ -31,6 +33,7 @@ export class OneShotOrchestrator implements SessionRunner {
     sessionKey: string,
     taskId?: string,
     blueprintId: string = REPO_ONESHOT_PROFILE_ID,
+    explicitTask?: { host: GitHost; repo: string; instruction: string },
   ) {
     this.inner = inner;
     this.broker = broker;
@@ -39,21 +42,26 @@ export class OneShotOrchestrator implements SessionRunner {
     // Mirror docker.ts correlation id style
     this.taskId = taskId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     this.blueprintId = blueprintId;
+    this.explicitTask = explicitTask;
   }
 
   async *send(message: string): RunnerStream {
     const self = this;
 
-    const parsed = parseOneShotTask(message);
-    if (parsed === null) {
-      yield {
-        type: 'error',
-        message: 'Invalid task format. Expected: <host>:<owner>/<repo> <instruction>',
-      } satisfies RunnerEvent;
-      return;
+    let host: GitHost, repo: string, instruction: string;
+    if (this.explicitTask !== undefined) {
+      ({ host, repo, instruction } = this.explicitTask);
+    } else {
+      const parsed = parseOneShotTask(message);
+      if (parsed === null) {
+        yield {
+          type: 'error',
+          message: 'Invalid task format. Expected: <host>:<owner>/<repo> <instruction>',
+        } satisfies RunnerEvent;
+        return;
+      }
+      ({ host, repo, instruction } = parsed);
     }
-
-    const { host, repo, instruction } = parsed;
     const branch = `slackbot/oneshot-${self.taskId}`;
     // Stable workdir derived from the repo slug (ALL slashes → dashes, so GitLab
     // subgroups collapse to one path segment). The slug is already validated safe

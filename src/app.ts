@@ -9,7 +9,7 @@
  */
 import { SessionManager } from './sessions/manager.js';
 import type { SessionStore } from './sessions/store.js';
-import type { RunnerFactory, VolumeReaper } from './runner/types.js';
+import type { RunnerFactory, VolumeReaper, BuildRunnerFactory } from './runner/types.js';
 import type { SlackClientLike } from './slack/responder.js';
 import type { BoltAppLike } from './slack/listener.js';
 import { registerSlackHandlers } from './slack/listener.js';
@@ -27,6 +27,7 @@ export interface GatewayDeps {
   volumeTtlMs?: number;
   gcIntervalMs?: number;
   spendCaps?: SpendCapsConfig;
+  buildRunnerFactory?: BuildRunnerFactory;
 }
 
 export function buildGateway(deps: GatewayDeps): { sessions: SessionManager } {
@@ -40,6 +41,7 @@ export function buildGateway(deps: GatewayDeps): { sessions: SessionManager } {
     ...(deps.volumeTtlMs !== undefined && { volumeTtlMs: deps.volumeTtlMs }),
     ...(deps.gcIntervalMs !== undefined && { gcIntervalMs: deps.gcIntervalMs }),
     ...(deps.spendCaps !== undefined && { spendCaps: deps.spendCaps }),
+    ...(deps.buildRunnerFactory !== undefined && { buildRunnerFactory: deps.buildRunnerFactory }),
   });
   registerSlackHandlers(deps.app, {
     sessions,

@@ -1,10 +1,20 @@
-import type { RunnerFactory, SessionRunner, GateResume, VolumeReaper } from '../runner/types.js';
+import type { RunnerFactory, SessionRunner, RunnerStream, GateResume, VolumeReaper, BuildRunnerFactory, BuildOutcome } from '../runner/types.js';
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
 import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
 import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
 import type { SessionStore, AuditEvent } from './store.js';
 import { NoopSessionStore } from './store.js';
 import type { SpendCapsConfig } from '../config.js';
+
+/**
+ * The outcome of a `driveToThread` run — used by both the router drain path
+ * (ignored) and `runBuild` (to translate into a `BuildOutcome`).
+ */
+type DriveOutcome =
+  | { type: 'pr_opened'; url: string }
+  | { type: 'abandoned'; reason: string }
+  | { type: 'error'; message: string }
+  | { type: 'completed' };
 
 /** Cap on an audit `summary` — metadata only, never a transcript (see {@link SessionManager.audit}). */
 const AUDIT_SUMMARY_MAX_CHARS = 512;
@@ -67,6 +77,7 @@ export class SessionManager {
   private readonly gcIntervalMs: number;
   private readonly spendCaps: SpendCapsConfig;
   private readonly now: () => number;
+  private readonly buildRunnerFactory: BuildRunnerFactory | undefined;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private gcRunning = false;
 
@@ -88,6 +99,9 @@ export class SessionManager {
     spendCaps?: SpendCapsConfig;
     /** Clock injectable for testable 24h windows. Default: () => Date.now(). */
     now?: () => number;
+    /** Factory for build tail runners (DispatchingRunnerFactory). Required when the
+     *  router emits `run_build`; a missing value is a programming error. */
+    buildRunnerFactory?: BuildRunnerFactory;
   }) {
     this.idleTimeoutMs = opts.idleTimeoutMs;
     this.gateTimeoutMs = opts.gateTimeoutMs ?? 15 * 60 * 1000;
@@ -99,6 +113,7 @@ export class SessionManager {
     this.gcIntervalMs = opts.gcIntervalMs ?? 60 * 60 * 1000;
     this.spendCaps = opts.spendCaps ?? DISABLED_CAPS;
     this.now = opts.now ?? (() => Date.now());
+    this.buildRunnerFactory = opts.buildRunnerFactory;
 
     // Start the GC timer only when a reaper is provided.
     if (this.volumeReaper !== undefined) {
@@ -495,6 +510,162 @@ export class SessionManager {
     await session.runner.dispose();
   }
 
+  /**
+   * Drive a runner stream to completion, handling all events and returning a
+   * `DriveOutcome` that summarises the terminal state. Used by both the router
+   * drain path (outcome ignored) and `runBuild` (outcome converted to a
+   * `BuildOutcome`).
+   */
+  private async driveToThread(
+    iterator: RunnerStream,
+    placeholder: Placeholder | null,
+    session: Session,
+    item: QueueItem,
+  ): Promise<DriveOutcome> {
+    let captured: DriveOutcome = { type: 'completed' };
+    // Helper: skip updatePlaceholder when no placeholder was posted (e.g. postPlaceholder failed).
+    const tryUpdate = async (text: string): Promise<void> => {
+      if (placeholder !== null) {
+        await updatePlaceholder(this.slack, placeholder, text);
+      }
+    };
+    try {
+      let resume: GateResume | BuildOutcome | undefined;
+      while (true) {
+        const result = await iterator.next(resume);
+        resume = undefined;
+        if (result.done === true) break;
+        const event = result.value;
+        if (event.type === 'status') {
+          await tryUpdate(`_${event.text}_`);
+        } else if (event.type === 'file') {
+          try {
+            await this.slack.uploadFile({
+              channel: item.channel,
+              thread_ts: item.threadTs,
+              filename: event.name,
+              data: event.data,
+            });
+          } catch (uploadErr: unknown) {
+            const uploadMsg =
+              uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+            console.error(
+              `[session] file upload failed in ${session.key} (${event.name}): ${uploadMsg}`,
+            );
+            await tryUpdate(`:x: Failed to upload file ${event.name}: ${uploadMsg}`);
+          }
+        } else if (event.type === 'text') {
+          await tryUpdate(event.text);
+        } else if (event.type === 'await_approval') {
+          // Park: post the plan, wait for the next thread reply (or a timeout), and
+          // feed the result back into the run on the next `next()`.
+          resume = await this.awaitApproval(session, placeholder, event.prompt);
+        } else if (event.type === 'run_build') {
+          // Park: drive a fresh build tail runner and feed the BuildOutcome back.
+          resume = await this.runBuild(session, item, event);
+        } else if (event.type === 'abandoned') {
+          // A gate deliberately ended the run (cancel/timeout). Post a clean, non-error
+          // line and stop driving — the `finally` below calls iterator.return(), which
+          // unwinds the run's own `finally` blocks (notably the orchestrator's lease
+          // revoke). No downstream nodes (branch/push/open-pr) run.
+          await tryUpdate(`:no_entry_sign: Plan abandoned (${event.reason}) — nothing was pushed.`);
+
+          // Audit: abandoned (metadata only — reason is 'cancelled' or 'timed out').
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            kind: event.reason === 'cancelled' ? 'correction' : 'approval',
+            tool: 'plan-gate',
+            result: event.reason === 'cancelled' ? 'cancelled' : 'timeout',
+          });
+
+          captured = { type: 'abandoned', reason: event.reason };
+          break;
+        } else if (event.type === 'pr_opened') {
+          // Post the PR URL to Slack (same user-facing text as before the refactor).
+          await tryUpdate(`Opened PR: ${event.url}`);
+
+          // Audit: PR opened (action event; PR URL is metadata, not message content).
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            kind: 'action',
+            tool: 'open-pr',
+            summary: event.url,
+            result: 'opened',
+          });
+
+          captured = { type: 'pr_opened', url: event.url };
+          // Don't break — let the loop drain to done
+        } else if (event.type === 'usage') {
+          // Slice A: record per-turn cost to the audit ledger. Measurement only — no
+          // enforcement. Silent: no Slack post. Cost is metadata, never message content.
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            kind: 'cost',
+            tool: null,
+            result: null,
+            cost_tokens:
+              event.inputTokens +
+              event.outputTokens +
+              event.cacheReadTokens +
+              event.cacheCreationTokens,
+            cost_micro_usd: event.costMicroUsd,
+          });
+        } else if (event.type === 'error') {
+          await tryUpdate(`:x: Error: ${event.message}`);
+          captured = { type: 'error', message: event.message };
+        }
+      }
+    } finally {
+      // The manual drive loop doesn't auto-close the generator the way `for await`
+      // does. Call return() on every exit (normal, error, abandonment) so the run's
+      // own `finally` blocks run — notably the orchestrator revoking its credential
+      // lease. A no-op on an already-completed generator.
+      try {
+        await iterator.return();
+      } catch {
+        // best-effort cleanup — must not mask the turn's real outcome
+      }
+    }
+    return captured;
+  }
+
+  /**
+   * Run a build tail for the given `run_build` event. Mirrors `awaitApproval`'s
+   * shape but drives a fresh tail runner synchronously (no parking) and returns
+   * the outcome as data for the coordinator to reason over.
+   */
+  private async runBuild(
+    session: Session,
+    item: QueueItem,
+    event: { repo: string; volume: string },
+  ): Promise<BuildOutcome> {
+    const buildFactory = this.buildRunnerFactory;
+    if (buildFactory === undefined) {
+      throw new Error(
+        '[session] run_build fired but buildRunnerFactory is not configured — this is a programming error',
+      );
+    }
+    const placeholder = await postPlaceholder(this.slack, item.channel, item.threadTs);
+    const runner = await buildFactory.createBuildRunner(session.key, event.repo);
+    try {
+      const outcome = await this.driveToThread(runner.send(''), placeholder, session, item);
+      if (outcome.type === 'pr_opened') return { ok: true, prUrl: outcome.url };
+      if (outcome.type === 'error') return { ok: false, reason: outcome.message };
+      if (outcome.type === 'abandoned') return { ok: false, reason: outcome.reason };
+      return { ok: false, reason: 'build finished without opening a PR' };
+    } catch (err: unknown) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    } finally {
+      await runner.dispose();   // ALWAYS dispose the tail container, both paths
+    }
+  }
+
   private async drain(session: Session): Promise<void> {
     if (session.draining) return;
     session.draining = true;
@@ -537,123 +708,10 @@ export class SessionManager {
           item.threadTs,
         );
 
-        // Drive the run manually (not `for await`) so a gate's reply can be fed back
-        // via `next(resume)`. `resume` is undefined for every event except resuming a
-        // parked `await_approval`; conversational runs never yield one, so this is
-        // behaviourally identical to the old loop for them. A RunnerStream is its own
-        // async iterator, so no `[Symbol.asyncIterator]()` is needed.
+        // Drive the run manually via driveToThread. The router turn ignores the
+        // return value — it's only used when runBuild calls driveToThread for the tail.
         const iterator = session.runner.send(item.message);
-        let resume: GateResume | undefined;
-        try {
-          while (true) {
-            const result = await iterator.next(resume);
-            resume = undefined;
-            if (result.done === true) break;
-            const event = result.value;
-            if (event.type === 'status') {
-              await updatePlaceholder(this.slack, placeholder, `_${event.text}_`);
-            } else if (event.type === 'file') {
-              try {
-                await this.slack.uploadFile({
-                  channel: item.channel,
-                  thread_ts: item.threadTs,
-                  filename: event.name,
-                  data: event.data,
-                });
-              } catch (uploadErr: unknown) {
-                const uploadMsg =
-                  uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
-                console.error(
-                  `[session] file upload failed in ${session.key} (${event.name}): ${uploadMsg}`,
-                );
-                await updatePlaceholder(
-                  this.slack,
-                  placeholder,
-                  `:x: Failed to upload file ${event.name}: ${uploadMsg}`,
-                );
-              }
-            } else if (event.type === 'text') {
-              await updatePlaceholder(this.slack, placeholder, event.text);
-            } else if (event.type === 'await_approval') {
-              // Park: post the plan, wait for the next thread reply (or a timeout), and
-              // feed the result back into the run on the next `next()`.
-              resume = await this.awaitApproval(session, placeholder, event.prompt);
-            } else if (event.type === 'abandoned') {
-              // A gate deliberately ended the run (cancel/timeout). Post a clean, non-error
-              // line and stop driving — the `finally` below calls iterator.return(), which
-              // unwinds the run's own `finally` blocks (notably the orchestrator's lease
-              // revoke). No downstream nodes (branch/push/open-pr) run.
-              await updatePlaceholder(
-                this.slack,
-                placeholder,
-                `:no_entry_sign: Plan abandoned (${event.reason}) — nothing was pushed.`,
-              );
-
-              // Audit: abandoned (metadata only — reason is 'cancelled' or 'timed out').
-              this.audit({
-                session_key: session.key,
-                team_id: session.teamId ?? null,
-                user_id: session.requestorUserId ?? null,
-                kind: event.reason === 'cancelled' ? 'correction' : 'approval',
-                tool: 'plan-gate',
-                result: event.reason === 'cancelled' ? 'cancelled' : 'timeout',
-              });
-
-              break;
-            } else if (event.type === 'pr_opened') {
-              // Post the PR URL to Slack (same user-facing text as before the refactor).
-              await updatePlaceholder(
-                this.slack,
-                placeholder,
-                `Opened PR: ${event.url}`,
-              );
-
-              // Audit: PR opened (action event; PR URL is metadata, not message content).
-              this.audit({
-                session_key: session.key,
-                team_id: session.teamId ?? null,
-                user_id: session.requestorUserId ?? null,
-                kind: 'action',
-                tool: 'open-pr',
-                summary: event.url,
-                result: 'opened',
-              });
-            } else if (event.type === 'usage') {
-              // Slice A: record per-turn cost to the audit ledger. Measurement only — no
-              // enforcement. Silent: no Slack post. Cost is metadata, never message content.
-              this.audit({
-                session_key: session.key,
-                team_id: session.teamId ?? null,
-                user_id: session.requestorUserId ?? null,
-                kind: 'cost',
-                tool: null,
-                result: null,
-                cost_tokens:
-                  event.inputTokens +
-                  event.outputTokens +
-                  event.cacheReadTokens +
-                  event.cacheCreationTokens,
-                cost_micro_usd: event.costMicroUsd,
-              });
-            } else if (event.type === 'error') {
-              await updatePlaceholder(
-                this.slack,
-                placeholder,
-                `:x: Error: ${event.message}`,
-              );
-            }
-          }
-        } finally {
-          // The manual drive loop doesn't auto-close the generator the way `for await`
-          // does. Call return() on every exit (normal, error, abandonment) so the run's
-          // own `finally` blocks run — notably the orchestrator revoking its credential
-          // lease. A no-op on an already-completed generator.
-          try {
-            await iterator.return();
-          } catch {
-            // best-effort cleanup — must not mask the turn's real outcome
-          }
-        }
+        await this.driveToThread(iterator, placeholder, session, item);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[session] error processing message in ${session.key}: ${msg}`);

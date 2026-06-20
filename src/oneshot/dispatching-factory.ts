@@ -9,14 +9,14 @@
  * For 'conversational' profiles: delegates directly to the base factory.
  */
 
-import type { RunnerFactory, SessionRunner } from '../runner/types.js';
+import type { RunnerFactory, SessionRunner, BuildRunnerFactory } from '../runner/types.js';
 import type { Profile } from '../profiles/registry.js';
 import { getProfile } from '../profiles/registry.js';
 import type { CredentialBroker } from '../broker/types.js';
 import type { GitNodeExecutor } from './git-node.js';
 import { OneShotOrchestrator } from './orchestrator.js';
 
-export class DispatchingRunnerFactory implements RunnerFactory {
+export class DispatchingRunnerFactory implements RunnerFactory, BuildRunnerFactory {
   private readonly agentFactory: RunnerFactory;
   private readonly broker: CredentialBroker;
   private readonly gitNodes: GitNodeExecutor;
@@ -31,14 +31,27 @@ export class DispatchingRunnerFactory implements RunnerFactory {
     this.gitNodes = gitNodes;
   }
 
-  async create(sessionKey: string, profile: Profile): Promise<SessionRunner> {
+  async create(sessionKey: string, profile: Profile, opts?: { nameSuffix?: string }): Promise<SessionRunner> {
     if (profile.mode === 'one-shot') {
       // Create the inner agent runner using the BASE factory with the conversational
       // profile — never the dispatching factory, never the one-shot profile.
       // This avoids dispatch recursion.
-      const inner = await this.agentFactory.create(sessionKey, getProfile('conversational'));
+      const inner = await this.agentFactory.create(sessionKey, getProfile('conversational'), opts);
       return new OneShotOrchestrator(inner, this.broker, this.gitNodes, sessionKey, undefined, profile.id);
     }
-    return this.agentFactory.create(sessionKey, profile);
+    return this.agentFactory.create(sessionKey, profile, opts);
+  }
+
+  async createBuildRunner(sessionKey: string, repo: string): Promise<SessionRunner> {
+    // Fresh inner container on the SHARED volume, distinct name so it can co-exist with the router.
+    const inner = await this.agentFactory.create(sessionKey, getProfile('conversational'), { nameSuffix: 'build' });
+    const instruction =
+      'Implement the approved spec.\n\n' +
+      'The approved spec is at /workspace/SPEC.md. Read it and implement it in the repository ' +
+      'working tree, committing your changes before you finish. Note any deviations in your final summary.';
+    return new OneShotOrchestrator(
+      inner, this.broker, this.gitNodes, sessionKey,
+      undefined, 'build-tail', { host: 'github', repo, instruction },
+    );
   }
 }
