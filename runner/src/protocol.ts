@@ -17,7 +17,7 @@
 
 // ── Gateway → Runner ──────────────────────────────────────────────────────────
 
-export type GatewayToRunnerMessage = UserMessage | ApprovalVerdictMessage | CloneResultMessage;
+export type GatewayToRunnerMessage = UserMessage | ApprovalVerdictMessage | CloneResultMessage | BuildResultMessage;
 
 export type UserMessage = {
   type: 'user_message';
@@ -60,6 +60,22 @@ export type CloneResultMessage = {
   error?: string;   // present iff !ok
 };
 
+/**
+ * The gateway's result of a build the runner requested via a {@link RequestBuildMessage}.
+ * Sent after the build tail completes (the gateway runs a fresh implementer container on the
+ * session's shared volume, via S12a's engine). `id` echoes the `request_build` this answers.
+ * `prUrl` is the opened PR URL (present iff `ok`). `reason` is a short diagnostic
+ * (present iff `!ok`, token-free). (`exactOptionalPropertyTypes` is on — `prUrl` and `reason`
+ * are genuinely optional, never `undefined`-valued.)
+ */
+export type BuildResultMessage = {
+  type: 'build_result';
+  id: string;       // echoes the request_build this answers
+  ok: boolean;
+  prUrl?: string;   // present iff ok
+  reason?: string;  // present iff !ok — short, token-free
+};
+
 // ── Runner → Gateway ──────────────────────────────────────────────────────────
 
 export type RunnerToGatewayMessage =
@@ -70,6 +86,7 @@ export type RunnerToGatewayMessage =
   | UsageMessage
   | RequestApprovalMessage
   | RequestCloneMessage
+  | RequestBuildMessage
   | ErrorMessage;
 
 /** Emitted once when the runner is ready to accept input. */
@@ -124,13 +141,12 @@ export type UsageMessage = {
 /**
  * The runner asks the human to commit — the router's commit gate (design/0007 decision 5).
  *
- * Raised from INSIDE a turn: the agent calls its `submit_spec` tool, which emits this line
- * and blocks until the gateway answers with an {@link ApprovalVerdictMessage} bearing the same
- * `id`. The gateway parks the turn, posts `specRef`, and runs its requestor-only approval check
- * before replying — raising the gate is the model raising its hand, not approving itself. `id`
- * is the runner's own approval-correlation id (distinct from the turn id; a turn could raise
- * more than one gate). `specRef` is the spec the human approves — a text blob in this slice; a
- * `/workspace` path arrives with S11.
+ * Raised from INSIDE a turn: the agent calls its `build_spec` tool (phase ①), which emits this
+ * line and blocks until the gateway answers with an {@link ApprovalVerdictMessage} bearing the
+ * same `id`. The gateway parks the turn, posts `specRef`, and runs its requestor-only approval
+ * check before replying — raising the gate is the model raising its hand, not approving itself.
+ * `id` is the runner's own approval-correlation id (distinct from the turn id; a turn could raise
+ * more than one gate). `specRef` is the spec the human approves — a `/workspace` path (S11+).
  */
 export type RequestApprovalMessage = {
   type: 'request_approval';
@@ -152,6 +168,22 @@ export type RequestCloneMessage = {
   type: 'request_clone';
   id: string;    // the runner's own clone-correlation id
   repo: string;  // "owner/name"
+};
+
+/**
+ * The runner requests a build of an approved spec (the router's build gate, design/0007 decision 5
+ * extension). Raised from INSIDE a turn: the agent calls its `build_spec` tool (phase ②, after
+ * approval), which emits this line and blocks until the gateway answers with a
+ * {@link BuildResultMessage} bearing the same `id`. The gateway services the build via S12a's
+ * engine — a fresh implementer container on the session's shared volume — and returns the PR URL
+ * (or a failure reason). The credential never enters the agent env (the build tail mints its own
+ * lease). `id` is the runner's own build-correlation id (distinct from the turn id). `repo` is
+ * the "owner/name" slug the coordinator wants built.
+ */
+export type RequestBuildMessage = {
+  type: 'request_build';
+  id: string;    // the runner's own build-correlation id
+  repo: string;  // "owner/name" — the cloned repo the coordinator wants built
 };
 
 /** Per-message failure. The runner remains usable after an error. */

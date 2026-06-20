@@ -11,7 +11,7 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess, SpawnOptions } from 'child_process';
-import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory, VolumeReaper, GateResume } from './types.js';
+import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory, VolumeReaper, GateResume, BuildOutcome } from './types.js';
 import type { Profile } from '../profiles/registry.js';
 import type {
   RunnerToGatewayMessage,
@@ -19,6 +19,7 @@ import type {
   ApprovalVerdictMessage,
   CloneResultMessage,
   RequestCloneMessage,
+  RequestBuildMessage,
 } from './protocol.js';
 import type { CloneService } from './clone-service.js';
 import type { CloneOutcome } from './clone-service.js';
@@ -67,7 +68,7 @@ function toCount(v: unknown): number {
 const GATE_APPROVE = new Set(['approve', 'approved']);
 
 /**
- * Map a resumed commit gate to the verdict the container's `submit_spec` tool receives.
+ * Map a resumed commit gate to the verdict the container's `build_spec` tool (phase ①) receives.
  *
  * The router NEVER abandons a turn at the gate (decision 2026-06-20): every outcome returns a
  * verdict so the parked tool always unblocks and the conversation keeps going. This is where
@@ -399,7 +400,7 @@ export class DockerRunner implements SessionRunner {
             break;
           } else if (parsed.type === 'request_approval') {
             // The container raised a commit gate from inside the turn (the router's commit;
-            // S10b emits this from the `submit_spec` tool). Not gated on `id === id`: this
+            // S10b emits this from the `build_spec` tool, phase ①). Not gated on `id === id`: this
             // carries its own approval-correlation id, distinct from the turn id. Treat the
             // line as data — validate shape, never execute it.
             if (typeof parsed.id !== 'string') {
@@ -421,7 +422,7 @@ export class DockerRunner implements SessionRunner {
             // gateway's checked verdict.
             const resume = yield { type: 'await_approval', prompt: parsed.specRef } as RunnerEvent;
             // Always answer the container: the router never abandons at the gate, so the parked
-            // submit_spec tool always unblocks and the conversation continues. If stdin is gone,
+            // build_spec tool (phase ①) always unblocks and the conversation continues. If stdin is gone,
             // fail the turn explicitly — same guard as the initial user_message write — rather
             // than dropping the verdict, resetting the budget, and waiting a full fresh turn for
             // a reply the container can never receive.
@@ -489,6 +490,37 @@ export class DockerRunner implements SessionRunner {
             // The clone is gateway-side work (lease + ephemeral git container), not the agent's —
             // give the post-clone continuation a fresh turn budget rather than charging it the
             // clone's wall-clock, the same reasoning the approval branch resets `deadline`.
+            deadline = Date.now() + turnTimeoutMs;
+            continue;
+          } else if (parsed.type === 'request_build') {
+            // The container's build_spec tool asked the gateway to run the build tail (S12a). Validate as
+            // data; hand it to the manager via a run_build event and read back the BuildOutcome resume —
+            // DockerRunner must NOT run the build itself (the manager/factory owns that).
+            if (typeof parsed.id !== 'string') {
+              console.error('[gateway] malformed request_build: missing id — skipping');
+              continue;
+            }
+            const buildId = parsed.id;
+            if (typeof parsed.repo !== 'string') {
+              const fallback: GatewayToRunnerMessage = { type: 'build_result', id: buildId, ok: false, reason: 'malformed request' };
+              if (self.child.stdin?.writable) self.child.stdin.write(JSON.stringify(fallback) + '\n');
+              continue;
+            }
+            const buildRepo = parsed.repo;
+            // Yield up to the manager (runBuild), which runs the tail and feeds back a BuildOutcome via next().
+            const resume = yield { type: 'run_build', repo: buildRepo } as RunnerEvent;
+            if (!self.child.stdin?.writable) {
+              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              return;
+            }
+            const outcome = resume as BuildOutcome | undefined;   // the run_build yield only ever resumes with a BuildOutcome
+            const buildResult: GatewayToRunnerMessage =
+              outcome !== undefined && outcome.ok
+                ? { type: 'build_result', id: buildId, ok: true, prUrl: outcome.prUrl }
+                : { type: 'build_result', id: buildId, ok: false, reason: outcome !== undefined && !outcome.ok ? outcome.reason : 'build failed' };
+            self.child.stdin.write(JSON.stringify(buildResult) + '\n');
+            // The build is gateway-side work (a fresh container building to a PR), not the agent's — give the
+            // post-build continuation a fresh turn budget, the same reasoning the approval/clone branches use.
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
