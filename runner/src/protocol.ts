@@ -22,7 +22,8 @@ export type GatewayToRunnerMessage =
   | ApprovalVerdictMessage
   | CloneResultMessage
   | BuildResultMessage
-  | PublishResultMessage;
+  | PublishResultMessage
+  | RunChecksResultMessage;
 
 export type UserMessage = {
   type: 'user_message';
@@ -97,6 +98,32 @@ export type PublishResultMessage = {
   reason?: string;  // present iff !ok — short, token-free
 };
 
+export type CheckKind = 'lint' | 'test';
+export type RunChecksKind = CheckKind | 'all';
+
+export type RunChecksResult = {
+  kind: CheckKind;
+  exitCode: number;
+  skipped: boolean;
+  output: string;
+};
+
+/**
+ * The gateway's result of deterministic project checks the runner requested via a
+ * {@link RequestRunChecksMessage}. `id` echoes the `request_run_checks` this answers.
+ * `ok:true` means the requested checks ran; a non-zero check exit is returned as data in
+ * `results`, not as a protocol failure. `reason` is a short diagnostic for malformed input or
+ * gateway infrastructure/service failures. (`exactOptionalPropertyTypes` is on — `results` and
+ * `reason` are genuinely optional, never `undefined`-valued.)
+ */
+export type RunChecksResultMessage = {
+  type: 'run_checks_result';
+  id: string;                 // echoes the request_run_checks this answers
+  ok: boolean;
+  results?: RunChecksResult[]; // present iff ok
+  reason?: string;            // present iff !ok — short, token-free
+};
+
 // ── Runner → Gateway ──────────────────────────────────────────────────────────
 
 export type RunnerToGatewayMessage =
@@ -109,6 +136,7 @@ export type RunnerToGatewayMessage =
   | RequestCloneMessage
   | RequestBuildMessage
   | RequestPublishMessage
+  | RequestRunChecksMessage
   | ErrorMessage;
 
 /** Emitted once when the runner is ready to accept input. */
@@ -224,6 +252,20 @@ export type RequestPublishMessage = {
   repo: string;   // "owner/name" — the verified repo candidate to publish
   title?: string; // optional PR title override
   body?: string;  // optional PR body override
+};
+
+/**
+ * The runner requests deterministic project checks for a local candidate. Raised from INSIDE a
+ * turn: the agent calls the `run_checks` tool, which emits this line and blocks until the gateway
+ * answers with a {@link RunChecksResultMessage} bearing the same `id`. The gateway services checks
+ * inline on the session volume, verifies the repo binding first, and injects no credentials.
+ * `kind` defaults to "all" when omitted; "all" runs lint then test in that order.
+ */
+export type RequestRunChecksMessage = {
+  type: 'request_run_checks';
+  id: string;             // the runner's own checks-correlation id
+  repo: string;           // "owner/name" — the local candidate to check
+  kind?: RunChecksKind;   // omitted means "all"
 };
 
 /** Per-message failure. The runner remains usable after an error. */
