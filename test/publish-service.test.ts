@@ -15,7 +15,7 @@ describe('RealPublishService', () => {
     const gitNodes = new FakeGitNodeExecutor();
     const svc = new RealPublishService(broker, gitNodes);
 
-    for (const bad of ['../etc/passwd', 'owner', 'owner/repo/extra', 'owner/re po', '']) {
+    for (const bad of ['../etc/passwd', '../repo', 'owner/..', './repo', 'owner/.', 'owner', 'owner/repo/extra', 'owner/re po', '']) {
       const outcome = await svc.publish({ repo: bad, volume: 'vol' });
       expect(outcome.ok).toBe(false);
     }

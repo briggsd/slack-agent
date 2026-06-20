@@ -11,15 +11,13 @@ import type { CredentialBroker, CredentialLease } from '../broker/types.js';
 import type { GitNodeExecutor } from './git-node.js';
 import { branchForTask, taskIdFromWorkspaceVolume, workdirForRepo } from './orchestrator.js';
 import { composePrBodyFromParts, titleFromInstruction } from './nodes/open-pr.js';
-
-/**
- * A strict "owner/name" slug. Publish targets are model-provided and untrusted, then used to
- * derive the local workdir and broker lease. Reject traversal, extra segments, and URL/path
- * metacharacters before leasing or running git.
- */
-const SAFE_REPO_SLUG = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+import { isSafeRepoSlug } from './parse.js';
 
 const FALLBACK_TITLE_SOURCE = 'Publish verified changes';
+
+function isSafeOwnerRepoSlug(repo: string): boolean {
+  return repo.split('/').length === 2 && isSafeRepoSlug(repo);
+}
 
 function cleanOptionalText(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
@@ -34,7 +32,7 @@ export class RealPublishService implements PublishService {
   ) {}
 
   async publish(req: PublishServiceRequest): Promise<PublishOutcome> {
-    if (!SAFE_REPO_SLUG.test(req.repo)) {
+    if (!isSafeOwnerRepoSlug(req.repo)) {
       return { ok: false, reason: 'invalid repo (expected "owner/name")' };
     }
 
@@ -77,12 +75,14 @@ export class RealPublishService implements PublishService {
 
       try {
         const { url } = await this.gitNodes.openChangeRequest({
-          lease,
-          repo: req.repo,
-          head: branch,
-          base: 'main',
-          title,
-          body,
+        lease,
+        repo: req.repo,
+        head: branch,
+        // DockerGitNodeExecutor resolves the repo's actual default branch; this is a fallback
+        // for fakes and any executor that chooses to honor the interface field directly.
+        base: 'main',
+        title,
+        body,
         });
         return { ok: true, prUrl: url };
       } catch {
