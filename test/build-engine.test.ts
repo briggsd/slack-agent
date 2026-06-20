@@ -115,14 +115,16 @@ describe('S12a — createBuildRunner runs the build-tail blueprint', () => {
     expect(gitNodes.clones).toHaveLength(0);
 
     // Branch was created on workdir derived from repo slug
+    const expectedBranch = `slackbot/oneshot-${sanitizeKey(TEST_SESSION_KEY)}`;
     expect(gitNodes.branches).toHaveLength(1);
+    expect(gitNodes.branches[0]?.branch).toBe(expectedBranch);
     expect(gitNodes.branches[0]?.workdir).toBe('/workspace/acme-widgets');
     expect(gitNodes.branches[0]?.volume).toBe(volumeNameFor(TEST_SESSION_KEY));
 
     // Push happened
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.pushes[0]?.repo).toBe('acme/widgets');
-    expect(gitNodes.pushes[0]?.branch).toContain('slackbot/oneshot-');
+    expect(gitNodes.pushes[0]?.branch).toBe(expectedBranch);
     expect(gitNodes.pushes[0]?.volume).toBe(volumeNameFor(TEST_SESSION_KEY));
 
     // PR was opened

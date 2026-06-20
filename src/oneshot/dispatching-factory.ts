@@ -14,7 +14,7 @@ import type { Profile } from '../profiles/registry.js';
 import { getProfile } from '../profiles/registry.js';
 import type { CredentialBroker } from '../broker/types.js';
 import type { GitNodeExecutor } from './git-node.js';
-import { OneShotOrchestrator } from './orchestrator.js';
+import { OneShotOrchestrator, taskIdForSessionKey } from './orchestrator.js';
 
 export class DispatchingRunnerFactory implements RunnerFactory, BuildRunnerFactory {
   private readonly agentFactory: RunnerFactory;
@@ -51,7 +51,7 @@ export class DispatchingRunnerFactory implements RunnerFactory, BuildRunnerFacto
       'working tree, committing your changes before you finish. Note any deviations in your final summary.';
     return new OneShotOrchestrator(
       inner, this.broker, this.gitNodes, sessionKey,
-      undefined, 'build-tail', { host: 'github', repo, instruction },
+      taskIdForSessionKey(sessionKey), 'build-tail', { host: 'github', repo, instruction },
     );
   }
 }

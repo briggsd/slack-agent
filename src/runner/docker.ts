@@ -20,9 +20,12 @@ import type {
   CloneResultMessage,
   RequestCloneMessage,
   RequestBuildMessage,
+  PublishResultMessage,
 } from './protocol.js';
 import type { CloneService } from './clone-service.js';
 import type { CloneOutcome } from './clone-service.js';
+import type { PublishService } from './publish-service.js';
+import type { PublishOutcome, PublishServiceRequest } from './publish-service.js';
 
 // ── Config types ──────────────────────────────────────────────────────────────
 
@@ -123,6 +126,7 @@ export class DockerRunner implements SessionRunner {
   private readonly escalation: { containerName: string; spawnFn: SpawnFn } | null;
   private readonly cloneService?: CloneService;
   private readonly volume?: string;
+  private readonly publishService?: PublishService;
   private disposed = false;
 
   /** Buffer for partial stdout data (NDJSON framing — may receive split chunks) */
@@ -147,12 +151,14 @@ export class DockerRunner implements SessionRunner {
     escalation?: { containerName: string; spawnFn: SpawnFn },
     cloneService?: CloneService,
     volume?: string,
+    publishService?: PublishService,
   ) {
     this.child = child;
     this.config = config;
     this.escalation = escalation ?? null;
     if (cloneService !== undefined) this.cloneService = cloneService;
     if (volume !== undefined) this.volume = volume;
+    if (publishService !== undefined) this.publishService = publishService;
 
     // A broken pipe (container died mid-write) must not crash the gateway
     child.stdin?.on('error', () => {});
@@ -524,6 +530,60 @@ export class DockerRunner implements SessionRunner {
             // post-build continuation a fresh turn budget, the same reasoning the approval/clone branches use.
             deadline = Date.now() + turnTimeoutMs;
             continue;
+          } else if (parsed.type === 'request_publish') {
+            // The container requested publication of a verified local candidate. Validate the
+            // line as data; service it inline via the credentialed gateway seam. The PR body and
+            // title are passed as data to the service and must never be logged here.
+            if (typeof parsed.id !== 'string') {
+              console.error('[gateway] malformed request_publish: missing id — skipping');
+              continue;
+            }
+            const publishId = parsed.id;
+            const title = (parsed as { title?: unknown }).title;
+            const body = (parsed as { body?: unknown }).body;
+            if (
+              typeof parsed.repo !== 'string' ||
+              (title !== undefined && typeof title !== 'string') ||
+              (body !== undefined && typeof body !== 'string')
+            ) {
+              const fallback: GatewayToRunnerMessage = {
+                type: 'publish_result',
+                id: publishId,
+                ok: false,
+                reason: 'malformed request',
+              };
+              if (self.child.stdin?.writable) {
+                self.child.stdin.write(JSON.stringify(fallback) + '\n');
+              }
+              continue;
+            }
+            const publishReq: PublishServiceRequest = {
+              repo: parsed.repo,
+              volume: self.volume ?? '',
+              ...(title !== undefined ? { title } : {}),
+              ...(body !== undefined ? { body } : {}),
+            };
+            yield { type: 'status', text: `publishing ${publishReq.repo}…` } as RunnerEvent;
+
+            let publishOutcome: PublishOutcome;
+            if (self.publishService !== undefined && self.volume !== undefined) {
+              publishOutcome = await self.publishService.publish(publishReq);
+            } else {
+              publishOutcome = { ok: false, reason: 'publish unavailable' };
+            }
+
+            if (!self.child.stdin?.writable) {
+              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              return;
+            }
+            const publishResult: PublishResultMessage = publishOutcome.ok
+              ? { type: 'publish_result', id: publishId, ok: true, prUrl: publishOutcome.prUrl }
+              : { type: 'publish_result', id: publishId, ok: false, reason: publishOutcome.reason };
+            self.child.stdin.write(JSON.stringify(publishResult satisfies GatewayToRunnerMessage) + '\n');
+            // Publishing is gateway-side work (lease + push + PR), not the agent's — give the
+            // post-publish continuation a fresh turn budget.
+            deadline = Date.now() + turnTimeoutMs;
+            continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
             yield { type: 'error', message: parsed.message } as RunnerEvent;
             break;
@@ -598,11 +658,18 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
   private readonly config: DockerRunnerConfig;
   private readonly spawnFn: SpawnFn;
   private readonly cloneService?: CloneService;
+  private readonly publishService?: PublishService;
 
-  constructor(config: DockerRunnerConfig, spawnFn: SpawnFn = nodeSpawn, cloneService?: CloneService) {
+  constructor(
+    config: DockerRunnerConfig,
+    spawnFn: SpawnFn = nodeSpawn,
+    cloneService?: CloneService,
+    publishService?: PublishService,
+  ) {
     this.config = config;
     this.spawnFn = spawnFn;
     if (cloneService !== undefined) this.cloneService = cloneService;
+    if (publishService !== undefined) this.publishService = publishService;
   }
 
   /** Remove the Docker volume backing `sessionKey`. Resolves true when the volume is
@@ -702,7 +769,7 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
     const runner = new DockerRunner(child, this.config, {
       containerName,
       spawnFn: this.spawnFn,
-    }, this.cloneService, volumeName);
+    }, this.cloneService, volumeName, this.publishService);
 
     await DockerRunner.waitReady(runner, this.config.readyTimeoutMs);
 
