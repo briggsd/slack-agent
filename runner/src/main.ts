@@ -132,9 +132,9 @@ const COMMIT_SYSTEM_PROMPT_ADDITION =
   'When your plan is ready and the user wants it built, call the build_spec tool (its full name ' +
   'is mcp__commit__build_spec) with the "owner/name" repo you cloned. It reads /workspace/SPEC.md ' +
   '(write your plan there first), asks the human to approve, and on approval runs the build in a ' +
-  'fresh sandbox and opens a PR — you do not write code or open the PR yourself. It returns the PR ' +
-  'URL, or the failure reason to revise and try again. If it returns not-approved, revise and call ' +
-  'it again, or keep discussing.';
+  'fresh sandbox to produce a local candidate — you do not write code, push, or open a PR yourself. ' +
+  'It returns candidate-ready confirmation, or the failure reason to revise and try again. If it ' +
+  'returns not-approved, revise and call it again, or keep discussing.';
 
 const CLONE_SYSTEM_PROMPT_ADDITION =
   'To investigate a repository, call the clone_repo tool (mcp__commit__clone_repo) with the ' +
@@ -188,7 +188,7 @@ export async function runBuildSpec(
   }
   const outcome = await requestBuild(repo);
   return outcome.ok
-    ? `BUILD COMPLETE. Opened PR: ${outcome.prUrl}. Tell the user and offer next steps.`
+    ? 'BUILD COMPLETE. Local candidate ready in the session worktree. The coordinator must verify it before using publish or open_pr. Tell the user and offer next steps.'
     : `BUILD DID NOT COMPLETE: ${outcome.reason}. Revise the spec and call build_spec again, or discuss with the user.`;
 }
 
@@ -742,8 +742,8 @@ function buildCommitMcpServer(
     'build_spec',
     'Get human approval for your plan and then build it. Reads /workspace/SPEC.md — write your ' +
       'plan there first. Pass the "owner/name" repo you cloned. Blocks while the human reviews; on ' +
-      'approval it runs the build in a fresh sandbox and opens a PR, then returns the PR URL (or the ' +
-      'failure reason). Do not write code or open a PR yourself — this tool does it.',
+      'approval it runs the build in a fresh sandbox and returns a local candidate ready for ' +
+      'verification (or the failure reason). Do not write code, push, or open a PR yourself — this tool does not publish.',
     { repo: z.string().describe('Repository slug in "owner/name" format — the repo you cloned.') },
     async (args) => {
       const text = await runBuildSpec(args.repo, readFile, submitSpec, requestBuild);

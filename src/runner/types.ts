@@ -39,10 +39,11 @@ export type GateResume =
 /**
  * The outcome of a build tail run. Fed back into the coordinator run via
  * `next(buildOutcome)` after `runBuild` completes (symmetric to GateResume for
- * the await_approval gate). Gateway-internal: never crosses the wire in this slice.
+ * the await_approval gate). Success means the local candidate is ready on the
+ * shared volume; publication is an explicit later step. Gateway-internal only.
  */
 export type BuildOutcome =
-  | { ok: true; prUrl: string }
+  | { ok: true }
   | { ok: false; reason: string };  // short, token-free
 
 /**

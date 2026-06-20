@@ -660,10 +660,9 @@ export class SessionManager {
     try {
       runner = await buildFactory.createBuildRunner(session.key, event.repo);
       const outcome = await this.driveToThread(runner.send(''), placeholder, session, item);
-      if (outcome.type === 'pr_opened') return { ok: true, prUrl: outcome.url };
       if (outcome.type === 'error') return { ok: false, reason: outcome.message };
       if (outcome.type === 'abandoned') return { ok: false, reason: outcome.reason };
-      return { ok: false, reason: 'build finished without opening a PR' };
+      return { ok: true };
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
       // Surface the failure on the build placeholder so it isn't stranded in 'thinking'.

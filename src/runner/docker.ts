@@ -523,10 +523,10 @@ export class DockerRunner implements SessionRunner {
             const outcome = resume as BuildOutcome | undefined;   // the run_build yield only ever resumes with a BuildOutcome
             const buildResult: GatewayToRunnerMessage =
               outcome !== undefined && outcome.ok
-                ? { type: 'build_result', id: buildId, ok: true, prUrl: outcome.prUrl }
+                ? { type: 'build_result', id: buildId, ok: true }
                 : { type: 'build_result', id: buildId, ok: false, reason: outcome !== undefined && !outcome.ok ? outcome.reason : 'build failed' };
             self.child.stdin.write(JSON.stringify(buildResult) + '\n');
-            // The build is gateway-side work (a fresh container building to a PR), not the agent's — give the
+            // The build is gateway-side work (a fresh container producing a local candidate), not the agent's — give the
             // post-build continuation a fresh turn budget, the same reasoning the approval/clone branches use.
             deadline = Date.now() + turnTimeoutMs;
             continue;

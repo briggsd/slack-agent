@@ -30,9 +30,9 @@ describe('BuildCoordinator', () => {
     expect(resolved).toBe(false);
 
     // Deliver the result
-    const msg: BuildResultMessage = { type: 'build_result', id, ok: true, prUrl: 'https://github.com/owner/repo/pull/1' };
+    const msg: BuildResultMessage = { type: 'build_result', id, ok: true };
     expect(c.handleResult(msg)).toBe(true);
-    await expect(p).resolves.toEqual({ ok: true, prUrl: 'https://github.com/owner/repo/pull/1' });
+    await expect(p).resolves.toEqual({ ok: true });
   });
 
   it('handleResult with ok:false resolves with the reason', async () => {
@@ -45,15 +45,29 @@ describe('BuildCoordinator', () => {
     await expect(p).resolves.toEqual({ ok: false, reason: 'tests failed' });
   });
 
-  it('ok:true without prUrl falls back to empty string', async () => {
+  it('ok:true without prUrl resolves as candidate-ready success', async () => {
     const ids: string[] = [];
     const c = new BuildCoordinator((_repo, id) => ids.push(id));
     const p = c.requestBuild('owner/repo');
 
-    // ok:true but no prUrl (gateway sends a minimal result)
     const msg: BuildResultMessage = { type: 'build_result', id: ids[0] ?? '', ok: true };
     c.handleResult(msg);
-    await expect(p).resolves.toEqual({ ok: true, prUrl: '' });
+    await expect(p).resolves.toEqual({ ok: true });
+  });
+
+  it('ok:true with a legacy prUrl still resolves as candidate-ready success', async () => {
+    const ids: string[] = [];
+    const c = new BuildCoordinator((_repo, id) => ids.push(id));
+    const p = c.requestBuild('owner/repo');
+
+    const msg: BuildResultMessage = {
+      type: 'build_result',
+      id: ids[0] ?? '',
+      ok: true,
+      prUrl: 'https://github.com/owner/repo/pull/1',
+    };
+    c.handleResult(msg);
+    await expect(p).resolves.toEqual({ ok: true });
   });
 
   it('ok:false without reason falls back to "build failed"', async () => {
@@ -78,10 +92,10 @@ describe('BuildCoordinator', () => {
     const p = c.requestBuild('owner/repo');
     const id = ids[0] ?? '';
 
-    const msg: BuildResultMessage = { type: 'build_result', id, ok: true, prUrl: 'https://github.com/owner/repo/pull/1' };
+    const msg: BuildResultMessage = { type: 'build_result', id, ok: true };
     expect(c.handleResult(msg)).toBe(true);
     expect(c.handleResult(msg)).toBe(false); // duplicate — already settled
-    await expect(p).resolves.toEqual({ ok: true, prUrl: 'https://github.com/owner/repo/pull/1' });
+    await expect(p).resolves.toEqual({ ok: true });
   });
 
   it('failAllPending resolves every pending build as ok:false+shutting down', async () => {
@@ -114,9 +128,9 @@ describe('BuildCoordinator', () => {
 
     const [id1, id2] = ids as [string, string];
     c.handleResult({ type: 'build_result', id: id2, ok: false, reason: 'compile error' });
-    c.handleResult({ type: 'build_result', id: id1, ok: true, prUrl: 'https://github.com/owner/repo1/pull/1' });
+    c.handleResult({ type: 'build_result', id: id1, ok: true });
 
-    await expect(p1).resolves.toEqual({ ok: true, prUrl: 'https://github.com/owner/repo1/pull/1' });
+    await expect(p1).resolves.toEqual({ ok: true });
     await expect(p2).resolves.toEqual({ ok: false, reason: 'compile error' });
   });
 
@@ -131,7 +145,7 @@ describe('BuildCoordinator', () => {
     expect(emitted[1]?.id).toBe('build-2');
 
     // Resolve both
-    c.handleResult({ type: 'build_result', id: 'build-1', ok: true, prUrl: 'https://pr/1' });
+    c.handleResult({ type: 'build_result', id: 'build-1', ok: true });
     c.handleResult({ type: 'build_result', id: 'build-2', ok: false, reason: 'failed' });
 
     const o1 = await p1 as BuildOutcome;
