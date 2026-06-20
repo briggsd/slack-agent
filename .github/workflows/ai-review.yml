@@ -2,14 +2,17 @@
 # (@briggsd/code-reviewer). Advisory and non-blocking: it posts a summary comment and
 # never fails the build — the gateway's gate (ci.yml) stays the only required check.
 #
-# Phase 1 (this file): runtime `dummy` — validates install, diff fetch, artifact upload, and
-# summary publishing with NO model credentials and no cost. Once a PR shows the dry run and the
-# published summary working, switch the publish job to `runtime: pi` (needs Node >= 22.19, the
-# @earendil-works/pi-coding-agent CLI, and an ANTHROPIC_API_KEY repo secret — see the factory's
-# docs/user/ci-templates.md "Enabling the Pi runtime").
+# Two jobs:
+#   - dry-run     : runtime `dummy`, read-only, no secrets — safe for fork PRs; validates the
+#                   install/fetch/artifact plumbing without spending a model turn.
+#   - publish     : runtime `pi`, same-repo PRs only — the real model-backed review; posts the
+#                   summary comment. Needs Node >= 22.19, the @earendil-works/pi-coding-agent CLI,
+#                   and the ANTHROPIC_API_KEY repo secret (provider defaults to anthropic via
+#                   the conventions in .ai-review.json). The key/pi runtime never run for forks.
 #
 # Reviewer conventions live in the repo-root .ai-review.json (auto-discovered).
-# The action ref + package tarball are pinned to the immutable v0.3.1 release.
+# The action ref + package tarball are pinned to the immutable v0.3.1 release; the Pi CLI is
+# pinned to 0.79.2 (the version validated locally).
 
 name: AI Review
 
@@ -61,10 +64,10 @@ jobs:
           include-hidden-files: true
 
   publish-summary:
-    name: AI review (publish summary)
+    name: AI review (pi + publish summary)
     runs-on: ubuntu-latest
     needs: dry-run
-    # Same-repo PRs only — fork PRs never get the write token.
+    # Trusted, same-repo PRs only — the model key and the pi runtime never run for forks.
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
@@ -75,17 +78,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Publish AI review summary
+      # Pi requires Node >= 22.19; ensure it regardless of the runner's default.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # --ignore-scripts: don't run a third-party package's lifecycle scripts in CI.
+      - name: Install the Pi CLI
+        run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.79.2
+
+      - name: Run AI review (pi) and publish summary
         uses: briggsd/code-reviewer@v0.3.1
         env:
           AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
           package-source: ${{ env.AI_REVIEW_PACKAGE }}
           provider: github
           repo: ${{ github.repository }}
           change-id: ${{ github.event.pull_request.number }}
           head-sha: ${{ github.event.pull_request.head.sha }}
-          runtime: dummy
+          runtime: pi
           output-dir: .ai-review
           publish-summary: "true"
           ci-exit: "false"
