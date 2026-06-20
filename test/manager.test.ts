@@ -3,6 +3,7 @@ import { SessionManager } from '../src/sessions/manager.js';
 import { FakeRunnerFactory, FakeRunner } from '../src/runner/fake.js';
 import type { TurnScript } from '../src/runner/fake.js';
 import type {
+  ApprovalControl,
   RunnerEvent,
   RunnerStream,
   SessionRunner,
@@ -44,6 +45,44 @@ class GateRunnerFactory implements RunnerFactory {
   async create(sessionKey: string, _profile: Profile): Promise<SessionRunner> {
     this.runner = new GateRunner(sessionKey);
     return this.runner;
+  }
+}
+
+class BuildSpecGateRunner implements SessionRunner {
+  public sendCount = 0;
+  public approvals: Array<ApprovalControl | undefined> = [];
+  public messages: string[] = [];
+
+  constructor(readonly sessionKey: string) {}
+
+  async *send(message: string, opts?: { approval?: ApprovalControl }): RunnerStream {
+    this.sendCount++;
+    this.messages.push(message);
+    this.approvals.push(opts?.approval);
+    if (this.sendCount === 1) {
+      yield { type: 'approval_requested', approvalId: 'appr-build-1', prompt: 'SPEC: do the thing', specRef: 'SPEC: do the thing' };
+      yield { type: 'text', text: 'APPROVAL REQUESTED' };
+      return;
+    }
+    const approval = opts?.approval;
+    yield {
+      type: 'text',
+      text: approval?.approved
+        ? `resumed:${message}:approved`
+        : `resumed:${message}:${approval?.feedback ?? 'rejected'}`,
+    };
+  }
+
+  async dispose(): Promise<void> {}
+}
+
+class BuildSpecGateRunnerFactory implements RunnerFactory {
+  public runners: BuildSpecGateRunner[] = [];
+
+  async create(sessionKey: string, _profile: Profile): Promise<SessionRunner> {
+    const runner = new BuildSpecGateRunner(sessionKey);
+    this.runners.push(runner);
+    return runner;
   }
 }
 
@@ -480,6 +519,192 @@ describe('SessionManager — approval gate (await_approval)', () => {
 
     expect(factory.runner?.received).toEqual({ kind: 'timeout' });
     expect(slack.updates.some((u) => u.text === 'resumed:timeout')).toBe(true);
+  });
+});
+
+describe('SessionManager — build_spec approval_requested', () => {
+  it('lets the first turn finish, then the requestor reply starts a second turn with approval control', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new BuildSpecGateRunnerFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'build this',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(factory.runners).toHaveLength(1);
+    expect(factory.runners[0]?.sendCount).toBe(1);
+    expect(factory.runners[0]?.approvals[0]).toBeUndefined();
+    expect(slack.updates.some((u) => u.text.includes('SPEC: do the thing'))).toBe(true);
+    expect(slack.updates.some((u) => u.text.includes('APPROVAL REQUESTED'))).toBe(true);
+    expect(slack.updates.some((u) => u.text.includes('no approval timeout'))).toBe(false);
+    expect(slack.updates.some((u) => u.text.includes('Reply `approve` to build this SPEC'))).toBe(true);
+    expect(slack.updates.some((u) => u.text.includes('`reject` or `cancel` to abort'))).toBe(true);
+    expect(slack.updates.some((u) => u.text.includes('very late replies may start a new turn'))).toBe(true);
+
+    const accepted = await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    expect(accepted).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(factory.runners[0]?.sendCount).toBe(2);
+    expect(factory.runners[0]?.messages[1]).toBe('approve');
+    expect(factory.runners[0]?.approvals[1]).toEqual({
+      id: 'appr-build-1',
+      specRef: 'SPEC: do the thing',
+      approved: true,
+    });
+    expect(slack.updates.some((u) => u.text === 'resumed:approve:approved')).toBe(true);
+  });
+
+  it('can recreate the runner while approval is pending, then consume the requestor reply on the next turn', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new BuildSpecGateRunnerFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 20,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'build this',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 50)); // allow idle reap of the runner only
+
+    expect(manager.has('TEAM:C:T')).toBe(true);
+    expect(factory.runners).toHaveLength(1);
+
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'needs more detail',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(factory.runners).toHaveLength(2);
+    expect(factory.runners[1]?.approvals[0]).toEqual({
+      id: 'appr-build-1',
+      specRef: 'SPEC: do the thing',
+      approved: false,
+      feedback: 'needs more detail',
+    });
+    expect(factory.runners[1]?.messages[0]).toBe('needs more detail');
+  });
+
+  it('checks spend caps before a build_spec approval reply starts the resume turn', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new BuildSpecGateRunnerFactory();
+    const store = new CapturingStore();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      spendCaps: { perTaskMicroUsd: 3_000_000, perUser24hMicroUsd: 0, perGlobal24hMicroUsd: 0 },
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'build this',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(factory.runners[0]?.sendCount).toBe(1);
+
+    store.recordAudit({
+      session_key: 'TEAM:C:T',
+      team_id: 'TEAM',
+      user_id: 'U-REQ',
+      ts: Date.now(),
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: 5_000_000,
+    });
+
+    const accepted = await manager.enqueueExisting('TEAM:C:T', {
+      message: 'approve',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    expect(accepted).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(factory.runners[0]?.sendCount).toBe(1);
+    expect(slack.posts.some((p) => p.text.includes('reached its budget'))).toBe(true);
+    const capAudits = store.audits.filter((a) => a.kind === 'correction' && a.tool === 'spend-cap');
+    expect(capAudits).toHaveLength(1);
+    expect(capAudits[0]?.result).toBe('rejected:task');
+    const resolved = store.audits.filter(
+      (a) => a.kind === 'approval' && a.tool === 'build_spec' && a.result === 'resolved',
+    );
+    expect(resolved).toHaveLength(0);
+  });
+
+  it('bounds in-memory retention after reaping a runner with pending build_spec approval', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new BuildSpecGateRunnerFactory();
+    const store = new CapturingStore();
+    const manager = new SessionManager({
+      idleTimeoutMs: 10,
+      pendingApprovalRetentionMs: 35,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'build this',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 25));
+
+    expect(manager.has('TEAM:C:T')).toBe(true);
+    expect(store.get('TEAM:C:T')?.status).toBe('active');
+    expect(
+      store.audits.filter((a) => a.kind === 'lifecycle' && a.tool === 'session' && a.result === 'reaped'),
+    ).toHaveLength(0);
+
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(manager.has('TEAM:C:T')).toBe(false);
+    expect(store.get('TEAM:C:T')?.status).toBe('reaped');
+    expect(factory.runners).toHaveLength(1);
+    const reaped = store.audits.filter(
+      (a) => a.kind === 'lifecycle' && a.tool === 'session' && a.result === 'reaped',
+    );
+    expect(reaped).toHaveLength(1);
+    expect(reaped[0]?.team_id).toBe('TEAM');
+    expect(reaped[0]?.user_id).toBe('U-REQ');
   });
 });
 

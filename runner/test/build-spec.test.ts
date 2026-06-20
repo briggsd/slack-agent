@@ -8,12 +8,12 @@
 import { describe, it, expect } from 'vitest';
 import { runBuildSpec } from '../src/main.js';
 import type { ReadFileFn } from '../src/main.js';
-import type { Verdict } from '../src/approval.js';
+import type { ApprovalResult } from '../src/approval.js';
 import type { BuildOutcome } from '../src/build.js';
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 
-function makeSubmitSpec(verdict: Verdict): { fn: (specRef: string) => Promise<Verdict>; calls: string[] } {
+function makeSubmitSpec(verdict: ApprovalResult): { fn: (specRef: string) => Promise<ApprovalResult>; calls: string[] } {
   const calls: string[] = [];
   return {
     fn: async (specRef: string) => {
@@ -40,7 +40,7 @@ function makeRequestBuild(outcome: BuildOutcome): { fn: (repo: string) => Promis
 describe('runBuildSpec', () => {
   it('null spec → "write SPEC.md first"; submitSpec and requestBuild NOT called', async () => {
     const readFile: ReadFileFn = async () => null;
-    const submit = makeSubmitSpec({ approved: true });
+    const submit = makeSubmitSpec({ status: 'approved' });
     const build = makeRequestBuild({ ok: true });
 
     const result = await runBuildSpec('owner/repo', readFile, submit.fn, build.fn);
@@ -53,7 +53,7 @@ describe('runBuildSpec', () => {
 
   it('empty spec → "write SPEC.md first"; submitSpec and requestBuild NOT called', async () => {
     const readFile: ReadFileFn = async () => '   ';
-    const submit = makeSubmitSpec({ approved: true });
+    const submit = makeSubmitSpec({ status: 'approved' });
     const build = makeRequestBuild({ ok: true });
 
     const result = await runBuildSpec('owner/repo', readFile, submit.fn, build.fn);
@@ -63,9 +63,23 @@ describe('runBuildSpec', () => {
     expect(build.calls).toHaveLength(0);
   });
 
-  it('not-approved verdict without feedback → text contains NOT APPROVED; requestBuild NOT called', async () => {
+  it('requested verdict → text tells the coordinator to end the turn and ask for a reply; requestBuild NOT called', async () => {
     const readFile: ReadFileFn = async () => 'My plan';
-    const submit = makeSubmitSpec({ approved: false });
+    const submit = makeSubmitSpec({ status: 'requested' });
+    const build = makeRequestBuild({ ok: true });
+
+    const result = await runBuildSpec('owner/repo', readFile, submit.fn, build.fn);
+
+    expect(result).toContain('APPROVAL REQUESTED');
+    expect(result).toContain('End your turn now');
+    expect(result).toContain('call build_spec again');
+    expect(submit.calls).toHaveLength(1);
+    expect(build.calls).toHaveLength(0);
+  });
+
+  it('rejected verdict without feedback → text contains NOT APPROVED; requestBuild NOT called', async () => {
+    const readFile: ReadFileFn = async () => 'My plan';
+    const submit = makeSubmitSpec({ status: 'rejected' });
     const build = makeRequestBuild({ ok: true });
 
     const result = await runBuildSpec('owner/repo', readFile, submit.fn, build.fn);
@@ -77,9 +91,9 @@ describe('runBuildSpec', () => {
     expect(build.calls).toHaveLength(0);
   });
 
-  it('not-approved verdict with feedback → text contains NOT APPROVED and feedback in delimited tag; requestBuild NOT called', async () => {
+  it('rejected verdict with feedback → text contains NOT APPROVED and feedback in delimited tag; requestBuild NOT called', async () => {
     const readFile: ReadFileFn = async () => 'My plan';
-    const submit = makeSubmitSpec({ approved: false, feedback: 'needs more detail' });
+    const submit = makeSubmitSpec({ status: 'rejected', feedback: 'needs more detail' });
     const build = makeRequestBuild({ ok: true });
 
     const result = await runBuildSpec('owner/repo', readFile, submit.fn, build.fn);
@@ -95,7 +109,7 @@ describe('runBuildSpec', () => {
 
   it('approved + build ok → calls requestBuild with the repo, text requires verification before publish', async () => {
     const readFile: ReadFileFn = async () => 'My plan';
-    const submit = makeSubmitSpec({ approved: true });
+    const submit = makeSubmitSpec({ status: 'approved' });
     const build = makeRequestBuild({ ok: true });
 
     const result = await runBuildSpec('owner/repo', readFile, submit.fn, build.fn);
@@ -117,7 +131,7 @@ describe('runBuildSpec', () => {
 
   it('approved + build !ok → calls requestBuild with the repo, text contains failure reason', async () => {
     const readFile: ReadFileFn = async () => 'My plan';
-    const submit = makeSubmitSpec({ approved: true });
+    const submit = makeSubmitSpec({ status: 'approved' });
     const build = makeRequestBuild({ ok: false, reason: 'CI failed: 3 tests red' });
 
     const result = await runBuildSpec('owner/repo', readFile, submit.fn, build.fn);
@@ -135,7 +149,7 @@ describe('runBuildSpec', () => {
       if (path === '/workspace/SPEC.md') return 'The spec content';
       return null;
     };
-    const submit = makeSubmitSpec({ approved: false });
+    const submit = makeSubmitSpec({ status: 'requested' });
     const build = makeRequestBuild({ ok: false, reason: 'unreachable' });
 
     await runBuildSpec('owner/repo', readFile, submit.fn, build.fn);
@@ -145,7 +159,7 @@ describe('runBuildSpec', () => {
 
   it('repo slug is passed through to requestBuild exactly as provided', async () => {
     const readFile: ReadFileFn = async () => 'spec';
-    const submit = makeSubmitSpec({ approved: true });
+    const submit = makeSubmitSpec({ status: 'approved' });
     const build = makeRequestBuild({ ok: true });
 
     await runBuildSpec('myorg/my-repo', readFile, submit.fn, build.fn);

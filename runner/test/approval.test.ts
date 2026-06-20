@@ -1,5 +1,5 @@
 /**
- * Unit tests for the container-side commit gate (runner/src/approval.ts).
+ * Unit tests for runner/src/approval.ts.
  * Pure and deterministic — no SDK, no stdio, no Docker.
  */
 
@@ -7,74 +7,165 @@ import { describe, it, expect } from 'vitest';
 import { ApprovalCoordinator, parseInbound } from '../src/approval.js';
 import type { BuildResultMessage } from '../src/protocol.js';
 
-describe('ApprovalCoordinator', () => {
-  it('emits request_approval and resolves when the matching verdict arrives', async () => {
-    const emitted: Array<{ specRef: string; id: string }> = [];
-    const c = new ApprovalCoordinator((specRef, id) => emitted.push({ specRef, id }));
+function makeCoordinator() {
+  const emitted: Array<{ specRef: string; id: string }> = [];
+  let stateFile: string | null = null;
+  let mkdirCalls = 0;
+  const coordinator = new ApprovalCoordinator(
+    (specRef, id) => emitted.push({ specRef, id }),
+    async () => stateFile,
+    async (data) => {
+      stateFile = data;
+    },
+    async () => {
+      mkdirCalls++;
+    },
+  );
+  return {
+    coordinator,
+    emitted,
+    getStateFile: () => stateFile,
+    setStateFile: (data: string | null) => {
+      stateFile = data;
+    },
+    getMkdirCalls: () => mkdirCalls,
+  };
+}
 
-    const p = c.requestApproval('SPEC A');
+describe('ApprovalCoordinator', () => {
+  it('first request emits request_approval and returns requested', async () => {
+    const { coordinator, emitted, getMkdirCalls } = makeCoordinator();
+
+    await expect(coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'requested' });
+
     expect(emitted).toHaveLength(1);
     expect(emitted[0]?.specRef).toBe('SPEC A');
+    expect(emitted[0]?.id).toMatch(/^appr-/);
+    expect(getMkdirCalls()).toBe(1);
+  });
+
+  it('same spec while still pending re-emits the existing request', async () => {
+    const { coordinator, emitted } = makeCoordinator();
+
+    await coordinator.requestApproval('SPEC A');
     const id = emitted[0]?.id ?? '';
-    expect(id).toMatch(/^appr-/);
+    await expect(coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'requested' });
 
-    expect(c.handleVerdict({ type: 'approval_verdict', id, approved: true })).toBe(true);
-    await expect(p).resolves.toEqual({ approved: true });
+    expect(emitted).toEqual([
+      { specRef: 'SPEC A', id },
+      { specRef: 'SPEC A', id },
+    ]);
   });
 
-  it('carries feedback through on a not-approved verdict', async () => {
-    const ids: string[] = [];
-    const c = new ApprovalCoordinator((_s, id) => ids.push(id));
-    const p = c.requestApproval('SPEC');
-    c.handleVerdict({ type: 'approval_verdict', id: ids[0] ?? '', approved: false, feedback: 'make it faster' });
-    await expect(p).resolves.toEqual({ approved: false, feedback: 'make it faster' });
+  it('same spec consumes an approved verdict exactly once', async () => {
+    const { coordinator, emitted, getStateFile } = makeCoordinator();
+
+    await coordinator.requestApproval('SPEC A');
+    const id = emitted[0]?.id ?? '';
+    await expect(coordinator.handleVerdict({ type: 'approval_verdict', id, specRef: 'SPEC A', approved: true })).resolves.toBe(true);
+    await expect(coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'approved' });
+    await expect(coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'requested' });
+
+    expect(getStateFile()).toContain('"status":"requested"');
+    expect(emitted).toHaveLength(2);
   });
 
-  it('ignores an unknown or already-settled id (returns false, never throws)', async () => {
-    const ids: string[] = [];
-    const c = new ApprovalCoordinator((_s, id) => ids.push(id));
-    const p = c.requestApproval('SPEC');
-    const id = ids[0] ?? '';
+  it('same spec consumes rejected feedback exactly once', async () => {
+    const { coordinator, emitted } = makeCoordinator();
 
-    expect(c.handleVerdict({ type: 'approval_verdict', id: 'appr-999', approved: true })).toBe(false);
-    expect(c.handleVerdict({ type: 'approval_verdict', id, approved: true })).toBe(true);
-    // A duplicate delivery of the same id is a no-op.
-    expect(c.handleVerdict({ type: 'approval_verdict', id, approved: false })).toBe(false);
-    await expect(p).resolves.toEqual({ approved: true });
+    await coordinator.requestApproval('SPEC A');
+    const id = emitted[0]?.id ?? '';
+    await coordinator.handleVerdict({ type: 'approval_verdict', id, specRef: 'SPEC A', approved: false, feedback: 'make it faster' });
+
+    await expect(coordinator.requestApproval('SPEC A')).resolves.toEqual({
+      status: 'rejected',
+      feedback: 'make it faster',
+    });
+    await expect(coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'requested' });
   });
 
-  it('gives concurrent gates distinct ids that resolve independently', async () => {
-    const ids: string[] = [];
-    const c = new ApprovalCoordinator((_s, id) => ids.push(id));
-    const p1 = c.requestApproval('A');
-    const p2 = c.requestApproval('B');
-    expect(ids[0]).not.toBe(ids[1]);
+  it('a changed spec starts a fresh approval request', async () => {
+    const { coordinator, emitted } = makeCoordinator();
 
-    c.handleVerdict({ type: 'approval_verdict', id: ids[1] ?? '', approved: true });
-    c.handleVerdict({ type: 'approval_verdict', id: ids[0] ?? '', approved: false, feedback: 'no' });
-    await expect(p1).resolves.toEqual({ approved: false, feedback: 'no' });
-    await expect(p2).resolves.toEqual({ approved: true });
+    await coordinator.requestApproval('SPEC A');
+    await expect(coordinator.requestApproval('SPEC B')).resolves.toEqual({ status: 'requested' });
+
+    expect(emitted).toHaveLength(2);
+    expect(emitted[1]?.specRef).toBe('SPEC B');
   });
 
-  it('failAllPending resolves every parked gate as not-approved (shutdown unblock)', async () => {
-    const ids: string[] = [];
-    const c = new ApprovalCoordinator((_s, id) => ids.push(id));
-    const p1 = c.requestApproval('A');
-    const p2 = c.requestApproval('B');
-    c.failAllPending();
-    await expect(p1).resolves.toEqual({ approved: false });
-    await expect(p2).resolves.toEqual({ approved: false });
+  it('persists requested state so a new coordinator instance can accept a trusted gateway verdict', async () => {
+    const first = makeCoordinator();
+    await first.coordinator.requestApproval('SPEC A');
+
+    const second = makeCoordinator();
+    second.setStateFile(first.getStateFile());
+    const id = first.emitted[0]?.id ?? '';
+    await expect(second.coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'requested' });
+    expect(second.emitted).toEqual([{ specRef: 'SPEC A', id }]);
+
+    await expect(second.coordinator.handleVerdict({ type: 'approval_verdict', id, specRef: 'SPEC A', approved: true })).resolves.toBe(true);
+
+    await expect(second.coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'approved' });
   });
 
-  it('after draining, a new requestApproval resolves immediately and emits nothing (no hang)', async () => {
-    const emitted: string[] = [];
-    const c = new ApprovalCoordinator((_s, id) => emitted.push(id));
-    c.failAllPending(); // stdin closed
+  it('rejects a verdict whose trusted specRef does not match the pending request', async () => {
+    const { coordinator, emitted } = makeCoordinator();
 
-    // An agent that re-calls submit_spec after a not-approved verdict must not park forever.
-    const p = c.requestApproval('post-drain spec');
-    await expect(p).resolves.toEqual({ approved: false });
-    expect(emitted).toHaveLength(0); // no request_approval emitted that nobody could answer
+    await coordinator.requestApproval('SPEC A');
+    const id = emitted[0]?.id ?? '';
+
+    await expect(
+      coordinator.handleVerdict({ type: 'approval_verdict', id, specRef: 'SPEC B', approved: true }),
+    ).resolves.toBe(false);
+    await expect(
+      coordinator.handleVerdict({ type: 'approval_verdict', id, specRef: 'SPEC A', approved: true }),
+    ).resolves.toBe(true);
+    await expect(coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'approved' });
+  });
+
+  it('does not trust a forged approved verdict loaded from the agent-writable state file', async () => {
+    const { coordinator, emitted, setStateFile } = makeCoordinator();
+    setStateFile(JSON.stringify({
+      version: 1,
+      status: 'approved',
+      id: 'appr-1',
+      specRef: 'SPEC A',
+    }));
+
+    await expect(coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'requested' });
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.specRef).toBe('SPEC A');
+  });
+
+  it('does not persist trusted verdicts to the agent-writable state file', async () => {
+    const { coordinator, emitted, getStateFile } = makeCoordinator();
+    await coordinator.requestApproval('SPEC A');
+    const id = emitted[0]?.id ?? '';
+    await coordinator.handleVerdict({ type: 'approval_verdict', id, specRef: 'SPEC A', approved: true });
+
+    expect(getStateFile()).toContain('"status":"requested"');
+    await expect(coordinator.requestApproval('SPEC A')).resolves.toEqual({ status: 'approved' });
+    expect(getStateFile()).toBe(JSON.stringify({ version: 1, status: 'idle' }));
+  });
+
+  it('ignores an unknown or stale verdict id', async () => {
+    const { coordinator, emitted } = makeCoordinator();
+
+    await coordinator.requestApproval('SPEC A');
+    const id = emitted[0]?.id ?? '';
+
+    await expect(coordinator.handleVerdict({ type: 'approval_verdict', id: 'appr-999', specRef: 'SPEC A', approved: true })).resolves.toBe(false);
+    await expect(coordinator.handleVerdict({ type: 'approval_verdict', id, specRef: 'SPEC A', approved: true })).resolves.toBe(true);
+    await expect(coordinator.handleVerdict({ type: 'approval_verdict', id, specRef: 'SPEC A', approved: false })).resolves.toBe(false);
+  });
+
+  it('after draining, a new requestApproval resolves rejected and emits nothing', async () => {
+    const { coordinator, emitted } = makeCoordinator();
+    coordinator.failAllPending();
+
+    await expect(coordinator.requestApproval('post-drain spec')).resolves.toEqual({ status: 'rejected' });
+    expect(emitted).toHaveLength(0);
   });
 });
 
@@ -87,15 +178,15 @@ describe('parseInbound', () => {
   });
 
   it('parses an approval_verdict with and without feedback', () => {
-    expect(parseInbound(JSON.stringify({ type: 'approval_verdict', id: 'a1', approved: true }))).toEqual({
+    expect(parseInbound(JSON.stringify({ type: 'approval_verdict', id: 'a1', specRef: 'SPEC A', approved: true }))).toEqual({
       kind: 'verdict',
-      msg: { type: 'approval_verdict', id: 'a1', approved: true },
+      msg: { type: 'approval_verdict', id: 'a1', specRef: 'SPEC A', approved: true },
     });
     expect(
-      parseInbound(JSON.stringify({ type: 'approval_verdict', id: 'a1', approved: false, feedback: 'x' })),
+      parseInbound(JSON.stringify({ type: 'approval_verdict', id: 'a1', specRef: 'SPEC A', approved: false, feedback: 'x' })),
     ).toEqual({
       kind: 'verdict',
-      msg: { type: 'approval_verdict', id: 'a1', approved: false, feedback: 'x' },
+      msg: { type: 'approval_verdict', id: 'a1', specRef: 'SPEC A', approved: false, feedback: 'x' },
     });
   });
 
@@ -103,11 +194,10 @@ describe('parseInbound', () => {
     expect(parseInbound('not json').kind).toBe('bad');
     expect(parseInbound(JSON.stringify({ type: 'user_message', id: 1, text: 'x' })).kind).toBe('bad');
     expect(parseInbound(JSON.stringify({ type: 'approval_verdict', id: 'a', approved: 'yes' })).kind).toBe('bad');
+    expect(parseInbound(JSON.stringify({ type: 'approval_verdict', id: 'a', approved: true })).kind).toBe('bad');
     expect(parseInbound(JSON.stringify({ type: 'whatever' })).kind).toBe('bad');
   });
 });
-
-// ── parseInbound — build_result case ──────────────────────────────────────────
 
 describe('parseInbound — build_result', () => {
   it('parses a well-formed legacy build_result with ok:true and prUrl', () => {

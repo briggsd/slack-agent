@@ -1,4 +1,4 @@
-import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory } from './types.js';
+import type { RunnerEvent, RunnerStream, SessionRunner, RunnerFactory, RunnerSendOptions } from './types.js';
 import type { Profile } from '../profiles/registry.js';
 
 export type ScriptedEvent = RunnerEvent;
@@ -17,14 +17,16 @@ export class FakeRunner implements SessionRunner {
   private turnIndex = 0;
   public disposed = false;
   public sends: string[] = [];
+  public sendOptions: Array<RunnerSendOptions | undefined> = [];
 
   constructor(sessionKey: string, script: TurnScript[] = []) {
     this.sessionKey = sessionKey;
     this.script = script;
   }
 
-  send(message: string): RunnerStream {
+  send(message: string, opts?: RunnerSendOptions): RunnerStream {
     this.sends.push(message);
+    this.sendOptions.push(opts);
     const idx = this.turnIndex++;
     const turn = this.script[idx];
 
