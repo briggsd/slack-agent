@@ -430,9 +430,10 @@ export class DockerRunner implements SessionRunner {
               yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
               return;
             }
-            // `resume` is `GateResume | BuildOutcome | undefined` (widened TNext); the
-            // docker runner only ever yields `await_approval` (not `run_build`), so the
-            // resume here is always a GateResume or undefined. Cast to the narrower type.
+            // `resume` is `GateResume | BuildOutcome | undefined` (widened TNext). The manager
+            // pairs each yield with the resume type for that yield: an `await_approval` yield is
+            // resumed with a `GateResume`, a `run_build` yield (below) with a `BuildOutcome`. This
+            // is the approval yield, so its resume is always a GateResume (or undefined) — cast it.
             const verdict: GatewayToRunnerMessage = classifyGateResume(
               resume as GateResume | undefined,
               approvalId,
