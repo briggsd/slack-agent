@@ -93,7 +93,7 @@ describe('runBuildSpec', () => {
     expect(build.calls).toHaveLength(0);
   });
 
-  it('approved + build ok → calls requestBuild with the repo, text says the local candidate is ready', async () => {
+  it('approved + build ok → calls requestBuild with the repo, text requires verification before publish', async () => {
     const readFile: ReadFileFn = async () => 'My plan';
     const submit = makeSubmitSpec({ approved: true });
     const build = makeRequestBuild({ ok: true });
@@ -102,8 +102,14 @@ describe('runBuildSpec', () => {
 
     expect(result).toContain('BUILD COMPLETE');
     expect(result).toContain('Local candidate ready');
+    expect(result).toContain('inspect the candidate diff');
+    expect(result).toContain('read changed files');
+    expect(result).toContain('run_checks');
     expect(result).toContain('publish or open_pr');
+    expect(result).toContain('Publish only after');
+    expect(result).toContain('report honestly');
     expect(result).not.toContain('Opened PR');
+    expect(result).not.toContain('offer next steps');
     expect(submit.calls).toHaveLength(1);
     expect(build.calls).toHaveLength(1);
     expect(build.calls[0]).toBe('owner/repo');

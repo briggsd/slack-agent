@@ -35,6 +35,9 @@ describe('runChecks', () => {
     expect(r.calls).toEqual([{ repo: 'owner/repo', kind: 'all' }]);
     expect(text).toContain('RUN CHECKS COMPLETE');
     expect(text).toContain('Requested kind: all');
+    expect(text).toContain('non-zero exitCode is red');
+    expect(text).toContain('skipped true is inconclusive and not green');
+    expect(text).toContain('green claim');
     expect(text).toContain('CHECK lint');
     expect(text).toContain('exitCode: 1');
     expect(text).toContain('skipped: false');
