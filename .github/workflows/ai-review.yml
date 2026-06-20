@@ -11,8 +11,9 @@
 #                   the conventions in .ai-review.json). The key/pi runtime never run for forks.
 #
 # Reviewer conventions live in the repo-root .ai-review.json (auto-discovered).
-# The action ref + package tarball are pinned to the immutable v0.3.1 release; the Pi CLI is
-# pinned to 0.79.2 (the version validated locally).
+# The action is pinned to v0.3.1's commit SHA (a git tag is mutable; the privileged publish job
+# holds pull-requests:write + ANTHROPIC_API_KEY, so the code it runs is SHA-pinned). The CLI
+# installs from the v0.3.1 release tarball, and the Pi CLI is pinned to 0.79.2 (validated locally).
 
 name: AI Review
 
@@ -42,7 +43,7 @@ jobs:
           persist-credentials: false
 
       - name: Run AI review (no write-back)
-        uses: briggsd/code-reviewer@v0.3.1
+        uses: briggsd/code-reviewer@8456cd2f7b8ffc5c380dbec1c668fb869cbcaa17 # v0.3.1
         env:
           AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
         with:
@@ -89,7 +90,7 @@ jobs:
         run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.79.2
 
       - name: Run AI review (pi) and publish summary
-        uses: briggsd/code-reviewer@v0.3.1
+        uses: briggsd/code-reviewer@8456cd2f7b8ffc5c380dbec1c668fb869cbcaa17 # v0.3.1
         env:
           AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
