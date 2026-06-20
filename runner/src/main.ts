@@ -20,6 +20,8 @@ import type {
 } from './protocol.js';
 import { ApprovalCoordinator, parseInbound } from './approval.js';
 import type { Verdict } from './approval.js';
+import { CloneCoordinator } from './clone.js';
+import type { CloneOutcome } from './clone.js';
 
 // ── Injectable seams for testing ──────────────────────────────────────────────
 
@@ -52,6 +54,12 @@ export type SdkQueryFn = (params: {
    * mid-turn stdin demux. Omitted only by callers that don't wire the gate.
    */
   submitSpec?: (specRef: string) => Promise<Verdict>;
+  /**
+   * Bound at the runner so the SDK's `clone_repo` tool can request a credentialed clone. The
+   * real query wraps this in an in-process MCP tool; the test fake calls it directly. Omitted
+   * only by callers that don't wire clone support.
+   */
+  cloneRepo?: (repo: string) => Promise<CloneOutcome>;
   options?: {
     resume?: string;
     cwd?: string;
@@ -106,9 +114,29 @@ const WORKSPACE_SYSTEM_PROMPT_ADDITION =
  */
 const COMMIT_SYSTEM_PROMPT_ADDITION =
   'Before you take an action that needs human sign-off (writing code, opening a PR, running a ' +
-  'build), call the submit_spec tool (its full name is mcp__commit__submit_spec) with the full ' +
-  'plan and wait for the verdict. Proceed only if it returns approved; otherwise revise from the ' +
-  'feedback and resubmit, or keep discussing.';
+  'build), call the submit_spec tool (its full name is mcp__commit__submit_spec) and wait for the ' +
+  'verdict. It reads /workspace/SPEC.md — write your plan there first. Proceed only if it returns ' +
+  'approved; otherwise revise and resubmit, or keep discussing.';
+
+const CLONE_SYSTEM_PROMPT_ADDITION =
+  'To investigate a repository, call the clone_repo tool (mcp__commit__clone_repo) with the ' +
+  '"owner/name" slug. It returns the local path where the tree landed; use Grep/Glob/Read there. ' +
+  'Write your spec to /workspace/SPEC.md. The cloned tree is investigation-only — do not edit it; ' +
+  'write only /workspace/SPEC.md. When ready, call submit_spec (which reads /workspace/SPEC.md).';
+
+// ── Spec-file helper ─────────────────────────────────────────────────────────
+
+/**
+ * Read /workspace/SPEC.md inside the container and return its content as the
+ * approval specRef. Exported so it can be tested without the real SDK.
+ */
+export async function readSpecForApproval(readFile: ReadFileFn): Promise<string | null> {
+  const content = await readFile('/workspace/SPEC.md');
+  if (content === null || content.trim() === '') {
+    return null;
+  }
+  return content;
+}
 
 // ── Stdout helpers (one line per event, no content logged) ───────────────────
 
@@ -146,6 +174,12 @@ export async function runLoop(opts: {
     emit({ type: 'request_approval', id: gateId, specRef }),
   );
 
+  // The clone coordinator. `clone_repo` calls cloneCoordinator.requestClone mid-turn; inbound
+  // clone_result lines are routed to cloneCoordinator.handleResult by the dispatcher below.
+  const cloneCoordinator = new CloneCoordinator((repo, cloneId) =>
+    emit({ type: 'request_clone', id: cloneId, repo }),
+  );
+
   // Signal readiness
   emit({ type: 'ready' });
 
@@ -177,6 +211,12 @@ export async function runLoop(opts: {
       }
       return;
     }
+    if (parsed.kind === 'clone_result') {
+      if (!cloneCoordinator.handleResult(parsed.msg)) {
+        log(`clone_result for unknown id ${parsed.msg.id} — ignored`);
+      }
+      return;
+    }
     if (parsed.kind === 'user') {
       turnQueue.push(parsed.msg);
       signal();
@@ -187,12 +227,14 @@ export async function runLoop(opts: {
   });
   rl.on('close', () => {
     inputClosed = true;
-    // Unblock any tool still parked on a verdict that will never come, so shutdown completes.
+    // Unblock any tool still parked on a verdict or clone result that will never come.
     coordinator.failAllPending();
+    cloneCoordinator.failAllPending();
     signal();
   });
 
   const submitSpec = (specRef: string): Promise<Verdict> => coordinator.requestApproval(specRef);
+  const cloneRepo = (repo: string): Promise<CloneOutcome> => cloneCoordinator.requestClone(repo);
 
   // Drain turns serially. A turn holds the loop until its SDK stream completes; verdicts for
   // an in-flight gate are delivered concurrently by the listener above, not from here.
@@ -216,7 +258,9 @@ export async function runLoop(opts: {
       mkdir,
       listFiles,
       readBinaryFile,
+      readFile,
       submitSpec,
+      cloneRepo,
     });
   }
 }
@@ -234,7 +278,9 @@ async function processTurn(
     mkdir: MkdirFn;
     listFiles: ListFilesFn;
     readBinaryFile: ReadBinaryFileFn;
+    readFile: ReadFileFn;
     submitSpec: (specRef: string) => Promise<Verdict>;
+    cloneRepo: (repo: string) => Promise<CloneOutcome>;
   },
 ): Promise<string | null> {
   const { id, text } = msg;
@@ -247,6 +293,7 @@ async function processTurn(
     const stream = deps.sdkQuery({
       prompt: text,
       submitSpec: deps.submitSpec,
+      cloneRepo: deps.cloneRepo,
       options: {
         ...(currentSessionId !== null ? { resume: currentSessionId } : {}),
         cwd: WORKSPACE_DIR,
@@ -258,7 +305,7 @@ async function processTurn(
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
-          append: `${WORKSPACE_SYSTEM_PROMPT_ADDITION}\n\n${COMMIT_SYSTEM_PROMPT_ADDITION}`,
+          append: `${WORKSPACE_SYSTEM_PROMPT_ADDITION}\n\n${COMMIT_SYSTEM_PROMPT_ADDITION}\n\n${CLONE_SYSTEM_PROMPT_ADDITION}`,
         },
       },
     });
@@ -555,20 +602,35 @@ async function realReadBinaryFile(path: string): Promise<Buffer | null> {
 }
 
 /**
- * Build the in-process MCP server that exposes the commit gate as the `submit_spec` tool. The
- * tool surfaces to the model as `mcp__commit__submit_spec`; its handler raises the gate via the
- * injected submitSpec and returns the human's verdict as the tool result. `alwaysLoad` keeps it
- * out of deferred tool search so the agent can always reach it.
+ * Build the in-process MCP server that exposes the commit gate as the `submit_spec` tool and
+ * the clone tool as `clone_repo`. `submit_spec` reads /workspace/SPEC.md (via the injected
+ * readFile seam) then raises the gate via the injected submitSpec callback. `clone_repo` calls
+ * the injected cloneRepo callback which in turn emits a `request_clone` to the gateway. Both
+ * tools surface to the model under the `mcp__commit__` prefix. `alwaysLoad` keeps them out of
+ * deferred tool search so the agent can always reach them.
  */
-function buildCommitMcpServer(submitSpec: (specRef: string) => Promise<Verdict>) {
+function buildCommitMcpServer(
+  submitSpec: (specRef: string) => Promise<Verdict>,
+  readFile: ReadFileFn,
+  cloneRepo: (repo: string) => Promise<CloneOutcome>,
+) {
   const submitSpecTool = tool(
     'submit_spec',
-    'Submit the finalized spec or plan for the human to approve before you build, write code, ' +
-      'or open a PR. Pass the full spec text as `spec`. Blocks until the human responds and ' +
-      'returns whether they approved plus any feedback. Do not act on the plan until it returns approved.',
-    { spec: z.string().describe('The full spec/plan text to show the human for approval.') },
-    async (args) => {
-      const verdict = await submitSpec(args.spec);
+    'Submit the finalized plan for the human to approve before you build, write code, or open a ' +
+      'PR. Reads /workspace/SPEC.md — write your plan there first. Blocks until the human responds ' +
+      'and returns whether they approved plus any feedback. Do not act until it returns approved.',
+    {},
+    async (_args) => {
+      const specRef = await readSpecForApproval(readFile);
+      if (specRef === null) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: 'No spec found. Write your plan to /workspace/SPEC.md first, then call submit_spec.',
+          }],
+        };
+      }
+      const verdict = await submitSpec(specRef);
       // Wrap the requestor's raw reply in a tag and treat it as data, never instructions — the
       // same delimited-as-data discipline the one-shot plan node uses for gate feedback.
       const resultText = verdict.approved
@@ -582,10 +644,26 @@ function buildCommitMcpServer(submitSpec: (specRef: string) => Promise<Verdict>)
       return { content: [{ type: 'text' as const, text: resultText }] };
     },
   );
+
+  const cloneRepoTool = tool(
+    'clone_repo',
+    'Clone a repository to the session volume for investigation. Pass the "owner/name" slug. ' +
+      'Returns the local path where the tree landed. Read the tree there with Grep/Glob/Read. ' +
+      'Investigation-only: do not edit the cloned tree; write only /workspace/SPEC.md.',
+    { repo: z.string().describe('Repository slug in "owner/name" format.') },
+    async (args) => {
+      const outcome = await cloneRepo(args.repo);
+      if (outcome.ok) {
+        return { content: [{ type: 'text' as const, text: `Cloned to ${outcome.workdir}` }] };
+      }
+      return { content: [{ type: 'text' as const, text: `Clone failed: ${outcome.error}` }] };
+    },
+  );
+
   return createSdkMcpServer({
     name: 'commit',
     version: '0.0.0',
-    tools: [submitSpecTool],
+    tools: [submitSpecTool, cloneRepoTool],
     alwaysLoad: true,
   });
 }
@@ -593,6 +671,7 @@ function buildCommitMcpServer(submitSpec: (specRef: string) => Promise<Verdict>)
 function realSdkQuery(params: {
   prompt: string;
   submitSpec?: (specRef: string) => Promise<Verdict>;
+  cloneRepo?: (repo: string) => Promise<CloneOutcome>;
   options?: {
     resume?: string;
     cwd?: string;
@@ -608,9 +687,12 @@ function realSdkQuery(params: {
   };
 }): AsyncIterable<SDKMessage> {
   const opts = params.options;
+  // submit_spec and clone_repo are always wired together by runLoop, and the commit MCP
+  // server hosts both. Both-or-nothing: never half-load the server (which would silently
+  // drop submit_spec) if only one callback were ever passed.
   const mcpServers =
-    params.submitSpec !== undefined
-      ? { commit: buildCommitMcpServer(params.submitSpec) }
+    params.submitSpec !== undefined && params.cloneRepo !== undefined
+      ? { commit: buildCommitMcpServer(params.submitSpec, realReadFile, params.cloneRepo) }
       : undefined;
   if (opts !== undefined) {
     return query({

@@ -206,9 +206,10 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
 
     // git args (the entrypoint is git, so no leading 'git'). The credential helper
     // reads $GIT_TOKEN from the container env — no token in argv.
-    const gitArgs = [
+    const gitArgs: string[] = [
       '-c', `credential.helper=${helper}`,
       'clone',
+      ...(req.shallow === true ? ['--depth', '1', '--single-branch'] : []),
       cloneUrl,
       req.workdir,
     ];

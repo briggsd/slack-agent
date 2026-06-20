@@ -13,6 +13,8 @@ export interface CloneRequest {
   workdir: string;
   /** Docker volume name to mount at /workspace (e.g. slackbot-ws-<sanitized-key>). */
   volume: string;
+  /** When true, clone with --depth 1 --single-branch (investigation clones). */
+  shallow?: boolean;
 }
 
 export interface PushRequest {

@@ -17,7 +17,7 @@
 
 // ── Gateway → Runner ──────────────────────────────────────────────────────────
 
-export type GatewayToRunnerMessage = UserMessage | ApprovalVerdictMessage;
+export type GatewayToRunnerMessage = UserMessage | ApprovalVerdictMessage | CloneResultMessage;
 
 export type UserMessage = {
   type: 'user_message';
@@ -44,6 +44,22 @@ export type ApprovalVerdictMessage = {
   feedback?: string;
 };
 
+/**
+ * The gateway's result of a credentialed clone the runner requested via a
+ * {@link RequestCloneMessage}. Sent immediately after the clone completes (inline,
+ * no human hop). `id` echoes the `request_clone` this answers. `workdir` is the
+ * local path inside the container where the tree landed (present iff `ok`). `error`
+ * is a short diagnostic (present iff `!ok`). (`exactOptionalPropertyTypes` is on —
+ * `workdir` and `error` are genuinely optional, never `undefined`-valued.)
+ */
+export type CloneResultMessage = {
+  type: 'clone_result';
+  id: string;
+  ok: boolean;
+  workdir?: string; // present iff ok
+  error?: string;   // present iff !ok
+};
+
 // ── Runner → Gateway ──────────────────────────────────────────────────────────
 
 export type RunnerToGatewayMessage =
@@ -53,6 +69,7 @@ export type RunnerToGatewayMessage =
   | TextMessage
   | UsageMessage
   | RequestApprovalMessage
+  | RequestCloneMessage
   | ErrorMessage;
 
 /** Emitted once when the runner is ready to accept input. */
@@ -119,6 +136,22 @@ export type RequestApprovalMessage = {
   type: 'request_approval';
   id: string;
   specRef: string;
+};
+
+/**
+ * The runner requests a credentialed clone of a repository (the router's investigation gate,
+ * design/0007 decision 5 extension). Raised from INSIDE a turn: the agent calls its
+ * `clone_repo` tool, which emits this line and blocks until the gateway answers with a
+ * {@link CloneResultMessage} bearing the same `id`. The gateway services the clone inline
+ * (no human hop) — it mints a READ lease, clones via a git container, revokes the lease,
+ * and returns the local path where the tree landed. The credential never enters the agent env.
+ * `id` is the runner's own clone-correlation id (distinct from the turn id). `repo` is the
+ * "owner/name" slug the agent wants to investigate.
+ */
+export type RequestCloneMessage = {
+  type: 'request_clone';
+  id: string;    // the runner's own clone-correlation id
+  repo: string;  // "owner/name"
 };
 
 /** Per-message failure. The runner remains usable after an error. */

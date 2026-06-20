@@ -17,7 +17,11 @@ import type {
   RunnerToGatewayMessage,
   GatewayToRunnerMessage,
   ApprovalVerdictMessage,
+  CloneResultMessage,
+  RequestCloneMessage,
 } from './protocol.js';
+import type { CloneService } from './clone-service.js';
+import type { CloneOutcome } from './clone-service.js';
 
 // ── Config types ──────────────────────────────────────────────────────────────
 
@@ -116,6 +120,8 @@ export class DockerRunner implements SessionRunner {
   private readonly child: ChildProcess;
   private readonly config: DockerRunnerConfig;
   private readonly escalation: { containerName: string; spawnFn: SpawnFn } | null;
+  private readonly cloneService?: CloneService;
+  private readonly volume?: string;
   private disposed = false;
 
   /** Buffer for partial stdout data (NDJSON framing — may receive split chunks) */
@@ -138,10 +144,14 @@ export class DockerRunner implements SessionRunner {
     child: ChildProcess,
     config: DockerRunnerConfig,
     escalation?: { containerName: string; spawnFn: SpawnFn },
+    cloneService?: CloneService,
+    volume?: string,
   ) {
     this.child = child;
     this.config = config;
     this.escalation = escalation ?? null;
+    if (cloneService !== undefined) this.cloneService = cloneService;
+    if (volume !== undefined) this.volume = volume;
 
     // A broken pipe (container died mid-write) must not crash the gateway
     child.stdin?.on('error', () => {});
@@ -392,8 +402,18 @@ export class DockerRunner implements SessionRunner {
             // S10b emits this from the `submit_spec` tool). Not gated on `id === id`: this
             // carries its own approval-correlation id, distinct from the turn id. Treat the
             // line as data — validate shape, never execute it.
-            if (typeof parsed.id !== 'string' || typeof parsed.specRef !== 'string') {
-              continue; // malformed control line — skip, like any bad message
+            if (typeof parsed.id !== 'string') {
+              // No usable id — can't correlate; skip with a log
+              console.error('[gateway] malformed request_approval: missing id — skipping');
+              continue;
+            }
+            if (typeof parsed.specRef !== 'string') {
+              // Have an id but spec is malformed — unblock the parked tool
+              const fallback: GatewayToRunnerMessage = { type: 'approval_verdict', id: parsed.id, approved: false };
+              if (self.child.stdin?.writable) {
+                self.child.stdin.write(JSON.stringify(fallback) + '\n');
+              }
+              continue;
             }
             const approvalId = parsed.id;
             // Park: surface the spec as the `await_approval` event the drive loop already
@@ -414,6 +434,50 @@ export class DockerRunner implements SessionRunner {
             // Restart the turn budget: wall-clock spent parked at the human gate (which can
             // far exceed turnTimeoutMs) must not count against the post-approval continuation.
             deadline = Date.now() + turnTimeoutMs;
+            continue;
+          } else if (parsed.type === 'request_clone') {
+            // The container requested a credentialed clone (the credential never enters the agent env).
+            // Validate the line as data; service it inline — no human hop, no deadline reset.
+            if (typeof parsed.id !== 'string') {
+              // No usable id — can't correlate
+              console.error('[gateway] malformed request_clone: missing id — skipping');
+              continue;
+            }
+            const cloneId = parsed.id;
+            if (typeof parsed.repo !== 'string') {
+              // Have an id but malformed — unblock the parked tool
+              const fallback: GatewayToRunnerMessage = {
+                type: 'clone_result',
+                id: cloneId,
+                ok: false,
+                error: 'malformed request',
+              };
+              if (self.child.stdin?.writable) {
+                self.child.stdin.write(JSON.stringify(fallback) + '\n');
+              }
+              continue;
+            }
+            const cloneRepo = parsed.repo;
+            // User-visible progress
+            yield { type: 'status', text: `cloning ${cloneRepo}…` } as RunnerEvent;
+
+            // Service the clone (or return unavailable if no service is wired)
+            let cloneOutcome: CloneOutcome;
+            if (self.cloneService !== undefined && self.volume !== undefined) {
+              cloneOutcome = await self.cloneService.clone({ repo: cloneRepo, volume: self.volume });
+            } else {
+              cloneOutcome = { ok: false, error: 'clone unavailable' };
+            }
+
+            // Write the result back to the container
+            if (!self.child.stdin?.writable) {
+              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              return;
+            }
+            const cloneResult: GatewayToRunnerMessage = cloneOutcome.ok
+              ? { type: 'clone_result', id: cloneId, ok: true, workdir: cloneOutcome.workdir }
+              : { type: 'clone_result', id: cloneId, ok: false, error: cloneOutcome.error };
+            self.child.stdin.write(JSON.stringify(cloneResult) + '\n');
             continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
             yield { type: 'error', message: parsed.message } as RunnerEvent;
@@ -488,10 +552,12 @@ export class DockerRunner implements SessionRunner {
 export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
   private readonly config: DockerRunnerConfig;
   private readonly spawnFn: SpawnFn;
+  private readonly cloneService?: CloneService;
 
-  constructor(config: DockerRunnerConfig, spawnFn: SpawnFn = nodeSpawn) {
+  constructor(config: DockerRunnerConfig, spawnFn: SpawnFn = nodeSpawn, cloneService?: CloneService) {
     this.config = config;
     this.spawnFn = spawnFn;
+    if (cloneService !== undefined) this.cloneService = cloneService;
   }
 
   /** Remove the Docker volume backing `sessionKey`. Resolves true when the volume is
@@ -590,7 +656,7 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
     const runner = new DockerRunner(child, this.config, {
       containerName,
       spawnFn: this.spawnFn,
-    });
+    }, this.cloneService, volumeName);
 
     await DockerRunner.waitReady(runner, this.config.readyTimeoutMs);
 
