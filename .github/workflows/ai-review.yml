@@ -94,6 +94,10 @@ jobs:
         env:
           AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional remote telemetry mirror. Default-off: unset ⇒ empty ⇒ no remote leg.
+          # Wired only on this real (runtime: pi) job so dummy dry-run events never pollute the fleet backend.
+          AI_REVIEW_LOKI_URL: ${{ secrets.AI_REVIEW_LOKI_URL || vars.AI_REVIEW_LOKI_URL }}
+          AI_REVIEW_LOKI_BASIC_AUTH: ${{ secrets.AI_REVIEW_LOKI_BASIC_AUTH }}
         with:
           package-source: ${{ env.AI_REVIEW_PACKAGE }}
           provider: github
