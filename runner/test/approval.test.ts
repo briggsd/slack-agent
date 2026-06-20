@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { ApprovalCoordinator, parseInbound } from '../src/approval.js';
+import type { BuildResultMessage } from '../src/protocol.js';
 
 describe('ApprovalCoordinator', () => {
   it('emits request_approval and resolves when the matching verdict arrives', async () => {
@@ -103,5 +104,72 @@ describe('parseInbound', () => {
     expect(parseInbound(JSON.stringify({ type: 'user_message', id: 1, text: 'x' })).kind).toBe('bad');
     expect(parseInbound(JSON.stringify({ type: 'approval_verdict', id: 'a', approved: 'yes' })).kind).toBe('bad');
     expect(parseInbound(JSON.stringify({ type: 'whatever' })).kind).toBe('bad');
+  });
+});
+
+// ── parseInbound — build_result case ──────────────────────────────────────────
+
+describe('parseInbound — build_result', () => {
+  it('parses a well-formed build_result with ok:true and prUrl', () => {
+    const result = parseInbound(
+      JSON.stringify({ type: 'build_result', id: 'build-1', ok: true, prUrl: 'https://github.com/owner/repo/pull/1' }),
+    );
+    expect(result).toEqual({
+      kind: 'build_result',
+      msg: { type: 'build_result', id: 'build-1', ok: true, prUrl: 'https://github.com/owner/repo/pull/1' } satisfies BuildResultMessage,
+    });
+  });
+
+  it('parses a well-formed build_result with ok:false and reason', () => {
+    const result = parseInbound(
+      JSON.stringify({ type: 'build_result', id: 'build-2', ok: false, reason: 'tests failed' }),
+    );
+    expect(result).toEqual({
+      kind: 'build_result',
+      msg: { type: 'build_result', id: 'build-2', ok: false, reason: 'tests failed' } satisfies BuildResultMessage,
+    });
+  });
+
+  it('parses ok:true without prUrl (prUrl absent in parsed msg)', () => {
+    const result = parseInbound(
+      JSON.stringify({ type: 'build_result', id: 'build-3', ok: true }),
+    );
+    expect(result.kind).toBe('build_result');
+    if (result.kind === 'build_result') {
+      expect(result.msg.ok).toBe(true);
+      expect(result.msg.id).toBe('build-3');
+      expect('prUrl' in result.msg).toBe(false);
+    }
+  });
+
+  it('parses ok:false without reason (reason absent in parsed msg)', () => {
+    const result = parseInbound(
+      JSON.stringify({ type: 'build_result', id: 'build-4', ok: false }),
+    );
+    expect(result.kind).toBe('build_result');
+    if (result.kind === 'build_result') {
+      expect(result.msg.ok).toBe(false);
+      expect('reason' in result.msg).toBe(false);
+    }
+  });
+
+  it('flags missing id as bad', () => {
+    const result = parseInbound(JSON.stringify({ type: 'build_result', ok: true }));
+    expect(result.kind).toBe('bad');
+  });
+
+  it('flags missing ok as bad', () => {
+    const result = parseInbound(JSON.stringify({ type: 'build_result', id: 'build-1' }));
+    expect(result.kind).toBe('bad');
+  });
+
+  it('flags non-boolean ok as bad', () => {
+    const result = parseInbound(JSON.stringify({ type: 'build_result', id: 'build-1', ok: 'true' }));
+    expect(result.kind).toBe('bad');
+  });
+
+  it('flags non-string id as bad', () => {
+    const result = parseInbound(JSON.stringify({ type: 'build_result', id: 42, ok: true }));
+    expect(result.kind).toBe('bad');
   });
 });

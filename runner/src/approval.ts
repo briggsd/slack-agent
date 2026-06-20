@@ -1,7 +1,7 @@
 /**
  * Container-side commit gate (router; design/0007 decision 5, S10b).
  *
- * The `submit_spec` tool calls {@link ApprovalCoordinator.requestApproval} from inside a live
+ * The `build_spec` tool calls {@link ApprovalCoordinator.requestApproval} from inside a live
  * SDK turn. That emits a `request_approval` line to the gateway and blocks on a promise. The
  * runner's stdin dispatcher routes the gateway's `approval_verdict` back in via
  * {@link ApprovalCoordinator.handleVerdict}, which resolves the promise — so the tool returns
@@ -9,7 +9,7 @@
  * takes an emit callback and is driven by parsed messages, so it unit-tests offline.
  */
 
-import type { ApprovalVerdictMessage, CloneResultMessage, UserMessage } from './protocol.js';
+import type { ApprovalVerdictMessage, BuildResultMessage, CloneResultMessage, UserMessage } from './protocol.js';
 
 /** The human's decision on a submitted spec, as the tool sees it. */
 export type Verdict = { approved: boolean; feedback?: string };
@@ -32,7 +32,7 @@ export class ApprovalCoordinator {
    * on the verdict.
    *
    * Once {@link failAllPending} has drained (stdin closed), resolve immediately as not-approved
-   * instead of parking — otherwise an agent that calls `submit_spec` AGAIN after a not-approved
+   * instead of parking — otherwise an agent that calls `build_spec` AGAIN after a not-approved
    * verdict (the tool result tells it to "revise and resubmit") would emit a `request_approval`
    * no one can answer and hang the turn forever.
    */
@@ -82,6 +82,7 @@ export type InboundParsed =
   | { kind: 'user'; msg: UserMessage }
   | { kind: 'verdict'; msg: ApprovalVerdictMessage }
   | { kind: 'clone_result'; msg: CloneResultMessage }
+  | { kind: 'build_result'; msg: BuildResultMessage }
   | { kind: 'bad'; error: string };
 
 /**
@@ -134,6 +135,24 @@ export function parseInbound(line: string): InboundParsed {
       msg = { type: 'clone_result', id, ok: false };
     }
     return { kind: 'clone_result', msg };
+  }
+  if (obj['type'] === 'build_result') {
+    if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
+      return { kind: 'bad', error: 'unexpected build_result shape' };
+    }
+    const ok = obj['ok'];
+    const id = obj['id'];
+    let msg: BuildResultMessage;
+    if (ok && typeof obj['prUrl'] === 'string') {
+      msg = { type: 'build_result', id, ok: true, prUrl: obj['prUrl'] };
+    } else if (ok) {
+      msg = { type: 'build_result', id, ok: true };
+    } else if (typeof obj['reason'] === 'string') {
+      msg = { type: 'build_result', id, ok: false, reason: obj['reason'] };
+    } else {
+      msg = { type: 'build_result', id, ok: false };
+    }
+    return { kind: 'build_result', msg };
   }
   return { kind: 'bad', error: 'unknown message type' };
 }
