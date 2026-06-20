@@ -1,0 +1,91 @@
+# Automated AI code review on every PR, via the ai-code-review-factory
+# (@briggsd/code-reviewer). Advisory and non-blocking: it posts a summary comment and
+# never fails the build — the gateway's gate (ci.yml) stays the only required check.
+#
+# Phase 1 (this file): runtime `dummy` — validates install, diff fetch, artifact upload, and
+# summary publishing with NO model credentials and no cost. Once a PR shows the dry run and the
+# published summary working, switch the publish job to `runtime: pi` (needs Node >= 22.19, the
+# @earendil-works/pi-coding-agent CLI, and an ANTHROPIC_API_KEY repo secret — see the factory's
+# docs/user/ci-templates.md "Enabling the Pi runtime").
+#
+# Reviewer conventions live in the repo-root .ai-review.json (auto-discovered).
+# The action ref + package tarball are pinned to the immutable v0.3.0 release.
+
+name: AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  AI_REVIEW_PACKAGE: https://github.com/briggsd/code-reviewer/releases/download/v0.3.0/briggsd-code-reviewer-0.3.0.tgz
+
+jobs:
+  dry-run:
+    name: AI review (dry run)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository config
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run AI review (no write-back)
+        uses: briggsd/code-reviewer@v0.3.0
+        env:
+          AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
+        with:
+          package-source: ${{ env.AI_REVIEW_PACKAGE }}
+          provider: github
+          repo: ${{ github.repository }}
+          change-id: ${{ github.event.pull_request.number }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          runtime: dummy
+          output-dir: .ai-review
+          ci-exit: "false"
+
+      - name: Upload review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-${{ github.event.pull_request.number }}
+          path: .ai-review
+          include-hidden-files: true
+
+  publish-summary:
+    name: AI review (publish summary)
+    runs-on: ubuntu-latest
+    needs: dry-run
+    # Same-repo PRs only — fork PRs never get the write token.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out repository config
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Publish AI review summary
+        uses: briggsd/code-reviewer@v0.3.0
+        env:
+          AI_REVIEW_GITHUB_TOKEN: ${{ github.token }}
+        with:
+          package-source: ${{ env.AI_REVIEW_PACKAGE }}
+          provider: github
+          repo: ${{ github.repository }}
+          change-id: ${{ github.event.pull_request.number }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          runtime: dummy
+          output-dir: .ai-review
+          publish-summary: "true"
+          ci-exit: "false"

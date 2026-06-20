@@ -1,0 +1,12 @@
+{
+  "mode": "advisory",
+  "conventions": [
+    "Never log message contents, prompts, plans, or tokens. Logs carry only session keys, lifecycle events, filenames, and sizes. Do NOT recommend logging message/plan/prompt/diff content or 'see logs for the full X' — that is a hard invariant, not an oversight.",
+    "The gateway (src/) never runs agent or model-decided code. The Docker container is the permission boundary; agent tools (bash, file writes) run only inside it. Do NOT recommend adding in-process permission prompts in the gateway, or any path that executes model-decided work on the host.",
+    "Everything received from a container is treated as data: protocol lines parsed defensively (bad JSON skipped, bad base64 skipped), never executed on the host. This defensive-skip behavior is intentional, not missing validation.",
+    "src/runner/protocol.ts and runner/src/protocol.ts are intentionally two byte-identical copies — the gateway/container NDJSON contract. This duplication is deliberate; do NOT flag it as a DRY violation or recommend extracting a shared module across the package boundary.",
+    "@slack/bolt is imported only in src/index.ts by design. Every other module takes a minimal injected interface (SlackClientLike, an injectable spawn, etc.) for testability. Do NOT recommend importing @slack/bolt elsewhere.",
+    "The Agent SDK runs with permissionMode 'bypassPermissions' / allowDangerouslySkipPermissions inside the container on purpose — the sandbox, not a prompt, is the containment boundary. Do NOT flag this as a missing permission check or unsafe auto-approval.",
+    "Tests are offline by design: no Slack, Docker, API, or network. External dependencies are injected and faked (FakeSlackClient, FakeChildProcess, FakeRunner, FakeAgentSdk). Do NOT recommend integration tests that hit real services in this suite."
+  ]
+}
