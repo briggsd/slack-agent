@@ -4,6 +4,7 @@ import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
 import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
 import type { SessionStore, AuditEvent } from './store.js';
 import { NoopSessionStore } from './store.js';
+import type { SpendCapsConfig } from '../config.js';
 
 /** Cap on an audit `summary` — metadata only, never a transcript (see {@link SessionManager.audit}). */
 const AUDIT_SUMMARY_MAX_CHARS = 512;
@@ -44,6 +45,16 @@ interface Session {
   pendingApproval: { resolve: (resume: GateResume) => void } | null;
 }
 
+/** One rolling-window day in ms — the per-user/global cap window. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** All-zero caps (every cap disabled) — used as the default when callers don't supply caps. */
+const DISABLED_CAPS: SpendCapsConfig = {
+  perTaskMicroUsd: 0,
+  perUser24hMicroUsd: 0,
+  perGlobal24hMicroUsd: 0,
+};
+
 export class SessionManager {
   private sessions = new Map<string, Session>();
   private readonly idleTimeoutMs: number;
@@ -54,6 +65,8 @@ export class SessionManager {
   private readonly volumeReaper: VolumeReaper | undefined;
   private readonly volumeTtlMs: number;
   private readonly gcIntervalMs: number;
+  private readonly spendCaps: SpendCapsConfig;
+  private readonly now: () => number;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private gcRunning = false;
 
@@ -71,6 +84,10 @@ export class SessionManager {
     volumeTtlMs?: number;
     /** Interval for the GC sweep in ms (default 1 hour). */
     gcIntervalMs?: number;
+    /** Rolling dollar caps enforced at admission and pre-dispatch. All-zero = disabled (default). */
+    spendCaps?: SpendCapsConfig;
+    /** Clock injectable for testable 24h windows. Default: () => Date.now(). */
+    now?: () => number;
   }) {
     this.idleTimeoutMs = opts.idleTimeoutMs;
     this.gateTimeoutMs = opts.gateTimeoutMs ?? 15 * 60 * 1000;
@@ -80,6 +97,8 @@ export class SessionManager {
     this.volumeReaper = opts.volumeReaper;
     this.volumeTtlMs = opts.volumeTtlMs ?? 7 * 24 * 60 * 60 * 1000;
     this.gcIntervalMs = opts.gcIntervalMs ?? 60 * 60 * 1000;
+    this.spendCaps = opts.spendCaps ?? DISABLED_CAPS;
+    this.now = opts.now ?? (() => Date.now());
 
     // Start the GC timer only when a reaper is provided.
     if (this.volumeReaper !== undefined) {
@@ -164,9 +183,131 @@ export class SessionManager {
   }
 
   /**
+   * Check all configured spend caps for a session/user. Returns which cap was breached,
+   * `'error'` if a SUM query threw, or `null` if all (enabled) caps pass.
+   *
+   * Fails CLOSED: a cost guardrail that can't verify spend must not let it run unbounded,
+   * so any store error refuses the turn (the caller posts an honest "couldn't verify"
+   * message). Disabled caps (0) never touch the store, so a deployment with caps off is
+   * never affected by a DB error here.
+   */
+  private checkCaps(
+    sessionKey: string,
+    userId: string | undefined,
+  ): 'task' | 'user' | 'global' | 'error' | null {
+    const caps = this.spendCaps;
+    try {
+      if (caps.perTaskMicroUsd > 0 && this.store.sumCostByTask(sessionKey) >= caps.perTaskMicroUsd) {
+        return 'task';
+      }
+      if (caps.perUser24hMicroUsd > 0 && userId !== undefined) {
+        const since = this.now() - DAY_MS;
+        if (this.store.sumCostByUserSince(userId, since) >= caps.perUser24hMicroUsd) return 'user';
+      }
+      if (caps.perGlobal24hMicroUsd > 0) {
+        const since = this.now() - DAY_MS;
+        if (this.store.sumCostGlobalSince(since) >= caps.perGlobal24hMicroUsd) return 'global';
+      }
+      return null;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[session] cap check failed for ${sessionKey} — failing closed: ${msg}`);
+      return 'error';
+    }
+  }
+
+  /**
+   * Format micro-USD as a dollar string (e.g. "$20.00").
+   */
+  private static formatUsd(microUsd: number): string {
+    return `$${(microUsd / 1e6).toFixed(2)}`;
+  }
+
+  /**
+   * Build the honest budget-exceeded message for each cap type.
+   * Never includes message content — only aggregate dollar amounts.
+   */
+  private capMessage(
+    cap: 'task' | 'user' | 'global' | 'error',
+    userId: string | undefined,
+    sessionKey: string,
+  ): string {
+    const caps = this.spendCaps;
+    if (cap === 'error') {
+      // Fail-closed: a budget check that errored. Don't touch the store again (it just
+      // threw) and don't quote a limit — this isn't a known breach.
+      return `:no_entry_sign: Couldn't verify the spend budget right now — nothing was started. Please try again in a moment.`;
+    }
+    if (cap === 'task') {
+      return `:no_entry_sign: This thread reached its budget (${SessionManager.formatUsd(caps.perTaskMicroUsd)}) — nothing was pushed. Start a new thread to continue.`;
+    }
+    if (cap === 'user') {
+      let spent = 0;
+      try {
+        if (userId !== undefined) {
+          const since = this.now() - DAY_MS;
+          spent = this.store.sumCostByUserSince(userId, since);
+        }
+      } catch {
+        // best-effort — omit the "you're at $X" detail if the query fails
+      }
+      return `:no_entry_sign: You've reached your daily spend limit (${SessionManager.formatUsd(caps.perUser24hMicroUsd)} / 24h; you're at ${SessionManager.formatUsd(spent)}). It frees up gradually as usage ages out — try again later.`;
+    }
+    // global
+    void sessionKey; // referenced only for symmetry
+    return `:no_entry_sign: The workspace daily spend limit (${SessionManager.formatUsd(caps.perGlobal24hMicroUsd)} / 24h) is reached — try again later.`;
+  }
+
+  /**
+   * Post the honest budget message and record the enforcement action. Shared by the four
+   * cap seams (three admission paths + the mid-task drain stop) so the post+audit shape
+   * can't drift between them. `action` is 'rejected' (admission) or 'abandoned' (mid-task).
+   * Metadata only — never message content.
+   */
+  private rejectForCap(
+    cap: 'task' | 'user' | 'global' | 'error',
+    action: 'rejected' | 'abandoned',
+    ctx: {
+      sessionKey: string;
+      channel: string;
+      threadTs: string;
+      userId: string | undefined;
+      teamId: string | undefined;
+    },
+  ): void {
+    const text = this.capMessage(cap, ctx.userId, ctx.sessionKey);
+    void this.slack
+      .postMessage({ channel: ctx.channel, thread_ts: ctx.threadTs, text })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[session] failed to post cap notice for ${ctx.sessionKey}: ${msg}`);
+      });
+    this.audit({
+      session_key: ctx.sessionKey,
+      team_id: ctx.teamId ?? null,
+      user_id: ctx.userId ?? null,
+      kind: 'correction',
+      tool: 'spend-cap',
+      result: `${action}:${cap}`,
+    });
+  }
+
+  /**
    * Enqueue a message for a session, creating the session if needed (for mentions).
    */
   async enqueueNew(key: string, item: QueueItem): Promise<void> {
+    // Admission cap check — before getOrCreate so no container spins up on a breach.
+    const breachedCap = this.checkCaps(key, item.userId);
+    if (breachedCap !== null) {
+      this.rejectForCap(breachedCap, 'rejected', {
+        sessionKey: key,
+        channel: item.channel,
+        threadTs: item.threadTs,
+        userId: item.userId,
+        teamId: item.teamId,
+      });
+      return;
+    }
     const session = await this.getOrCreate(key, item);
     session.queue.push(item);
     void this.drain(session);
@@ -251,7 +392,18 @@ export class SessionManager {
         session.pendingApproval.resolve({ kind: 'reply', text: item.message });
         return true;
       }
-      // Normal in-memory hit — unchanged behaviour.
+      // Normal in-memory hit — admission cap check before enqueuing.
+      const breachedInMem = this.checkCaps(session.key, session.requestorUserId);
+      if (breachedInMem !== null) {
+        this.rejectForCap(breachedInMem, 'rejected', {
+          sessionKey: session.key,
+          channel: item.channel,
+          threadTs: item.threadTs,
+          userId: session.requestorUserId,
+          teamId: session.teamId,
+        });
+        return true; // message was handled; thread is known
+      }
       this.resetIdleTimer(session);
       session.queue.push(item);
       void this.drain(session);
@@ -266,6 +418,20 @@ export class SessionManager {
     }
 
     // Known thread, session was evicted (e.g. idle reap after gateway restart).
+    // Admission cap check on the rehydrate path. Use the stored user_id (original requestor).
+    const storedUserId = row.user_id ?? undefined;
+    const breachedRehy = this.checkCaps(key, storedUserId);
+    if (breachedRehy !== null) {
+      this.rejectForCap(breachedRehy, 'rejected', {
+        sessionKey: key,
+        channel: item.channel,
+        threadTs: item.threadTs,
+        userId: storedUserId,
+        teamId: row.team_id ?? undefined,
+      });
+      return true; // message was handled; thread is known
+    }
+
     // Rehydrate: recreate the runner from the stored profile_id.
     console.log(`[session] rehydrating evicted session: ${key}`);
     const rehydrated = await this.getOrCreate(key, {
@@ -336,6 +502,22 @@ export class SessionManager {
     while (session.queue.length > 0) {
       const item = session.queue.shift();
       if (item === undefined) break;
+
+      // Pre-dispatch cap check (mid-task graceful stop). The prior turn already
+      // completed and its cost is in the ledger. If accumulated spend ≥ any cap,
+      // refuse to start the next turn — post a message, clear the queue, and break.
+      const breachedMid = this.checkCaps(session.key, session.requestorUserId);
+      if (breachedMid !== null) {
+        this.rejectForCap(breachedMid, 'abandoned', {
+          sessionKey: session.key,
+          channel: item.channel,
+          threadTs: item.threadTs,
+          userId: session.requestorUserId,
+          teamId: session.teamId,
+        });
+        session.queue.length = 0; // drop any further queued turns
+        break;
+      }
 
       // Reset idle timer each time we start processing a message
       this.resetIdleTimer(session);

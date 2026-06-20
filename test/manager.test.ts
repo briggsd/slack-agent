@@ -65,6 +65,9 @@ class SeededStore implements SessionStore {
   listExpired(_cutoffMs: number): SessionRow[] { return []; }
   deleteSession(key: string): void { this.rows.delete(key); }
   close(): void {}
+  sumCostByTask(_sessionKey: string): number { return 0; }
+  sumCostByUserSince(_userId: string, _sinceMs: number): number { return 0; }
+  sumCostGlobalSince(_sinceMs: number): number { return 0; }
 }
 
 function makeManager(idleTimeoutMs = 60_000, script: TurnScript[] = []) {
@@ -677,7 +680,8 @@ describe('SessionManager — abandoned event', () => {
 
 /**
  * A SessionStore fake that captures audit events for assertion. Also captures
- * recordSession calls (to verify the session was persisted).
+ * recordSession calls (to verify the session was persisted). Implements the three
+ * SUM methods (B1) by computing from the in-memory audits array.
  */
 class CapturingStore implements SessionStore {
   public audits: AuditEvent[] = [];
@@ -716,6 +720,24 @@ class CapturingStore implements SessionStore {
     this.rows.delete(key);
   }
   close(): void {}
+
+  sumCostByTask(sessionKey: string): number {
+    return this.audits
+      .filter((a) => a.session_key === sessionKey && a.cost_micro_usd !== null)
+      .reduce((sum, a) => sum + (a.cost_micro_usd ?? 0), 0);
+  }
+
+  sumCostByUserSince(userId: string, sinceMs: number): number {
+    return this.audits
+      .filter((a) => a.user_id === userId && a.ts > sinceMs && a.cost_micro_usd !== null)
+      .reduce((sum, a) => sum + (a.cost_micro_usd ?? 0), 0);
+  }
+
+  sumCostGlobalSince(sinceMs: number): number {
+    return this.audits
+      .filter((a) => a.ts > sinceMs && a.cost_micro_usd !== null)
+      .reduce((sum, a) => sum + (a.cost_micro_usd ?? 0), 0);
+  }
 }
 
 /** A fake VolumeReaper that records which keys it was asked to remove. */
@@ -1248,6 +1270,542 @@ describe('SessionManager — volume GC sweep', () => {
     // The expired row must survive — without a reaper, GC deletes nothing.
     expect(store.deletedKeys).toHaveLength(0);
     expect(store.get('TEAM:GC:NOgc')).toBeDefined();
+
+    await manager.disposeAll();
+  });
+});
+
+// ─── SessionManager — spend-caps enforcement ─────────────────────────────────
+
+/**
+ * A runner that yields a scripted usage event per turn. Each call to send()
+ * pops the next costMicroUsd from the list (looping to the last value).
+ */
+class CostRunner implements SessionRunner {
+  public sends: string[] = [];
+  private costs: number[];
+  private idx = 0;
+  constructor(costs: number[]) {
+    this.costs = costs.length > 0 ? costs : [0];
+  }
+  send(message: string): RunnerStream {
+    this.sends.push(message);
+    const cost = this.costs[Math.min(this.idx++, this.costs.length - 1)] ?? 0;
+    async function* gen(): RunnerStream {
+      yield { type: 'usage', costMicroUsd: cost, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+      yield { type: 'text', text: 'ok' };
+    }
+    return gen();
+  }
+  async dispose(): Promise<void> {}
+}
+
+class CostRunnerFactory implements RunnerFactory {
+  constructor(private costs: number[]) {}
+  async create(_key: string, _profile: Profile): Promise<SessionRunner> {
+    return new CostRunner(this.costs);
+  }
+}
+
+describe('SessionManager — spend-caps enforcement', () => {
+  it('admission rejects enqueueNew when per-user-24h cap is breached, posts message, records audit', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory();
+    let nowMs = 1_000_000;
+
+    // Pre-seed a cost row for U1 inside the 24h window
+    store.recordAudit({
+      session_key: 'OLD:C:T',
+      team_id: 'TEAM',
+      user_id: 'U1',
+      ts: nowMs - 1000, // 1 second ago — within 24h
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: 5_000_000, // $5 already spent
+    });
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      spendCaps: { perTaskMicroUsd: 0, perUser24hMicroUsd: 3_000_000, perGlobal24hMicroUsd: 0 },
+      now: () => nowMs,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // No runner was created — session was not started
+    expect(factory.creates).toHaveLength(0);
+    expect(manager.has('TEAM:C:T')).toBe(false);
+
+    // A message was posted to the user
+    expect(slack.posts.length).toBeGreaterThan(0);
+    const capPost = slack.posts.find((p) => p.text.includes('daily spend limit'));
+    expect(capPost).toBeDefined();
+
+    // An audit row was recorded
+    const capAudits = store.audits.filter((a) => a.kind === 'correction' && a.tool === 'spend-cap');
+    expect(capAudits).toHaveLength(1);
+    expect(capAudits[0]?.result).toBe('rejected:user');
+    expect(capAudits[0]?.user_id).toBe('U1');
+
+    // No cost/message content in audit fields
+    expect(capAudits[0]?.summary).toBeNull();
+    expect(capAudits[0]?.reasoning).toBeNull();
+    // The posted message must not contain the raw spend number
+    expect(capPost?.text).not.toContain('5000000');
+  });
+
+  it('admission rejects enqueueNew when global-24h cap is breached', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory();
+    let nowMs = 2_000_000;
+
+    store.recordAudit({
+      session_key: 'ANY:C:T',
+      team_id: 'TEAM',
+      user_id: 'OTHER',
+      ts: nowMs - 100,
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: 10_000_000, // $10 global spend
+    });
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      spendCaps: { perTaskMicroUsd: 0, perUser24hMicroUsd: 0, perGlobal24hMicroUsd: 5_000_000 },
+      now: () => nowMs,
+    });
+
+    await manager.enqueueNew('TEAM:C:T2', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T2',
+      teamId: 'TEAM',
+      userId: 'U-NEW',
+    });
+
+    expect(factory.creates).toHaveLength(0);
+    const capAudits = store.audits.filter((a) => a.kind === 'correction' && a.tool === 'spend-cap');
+    expect(capAudits).toHaveLength(1);
+    expect(capAudits[0]?.result).toBe('rejected:global');
+
+    // Global message must not reveal other users' spend details
+    const capPost = slack.posts.find((p) => p.text.includes('workspace daily spend limit'));
+    expect(capPost).toBeDefined();
+    expect(capPost?.text).not.toContain('OTHER');
+  });
+
+  it('admission rejects on the rehydrate path, keyed on the STORED requestor (per-user cap)', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory();
+    const nowMs = 3_000_000;
+
+    // Seed an evicted session owned by U-ORIG (so a reply rehydrates rather than hits memory)...
+    store.recordSession({
+      session_key: 'TEAM:C:T',
+      team_id: 'TEAM',
+      user_id: 'U-ORIG',
+      channel_id: 'C',
+      thread_ts: 'T',
+      profile_id: 'supervised-repo-oneshot',
+      created_at: 0,
+      last_active_at: 0,
+      status: 'active',
+    });
+    // ...plus a prior cost row attributed to U-ORIG that breaches the per-user cap.
+    store.recordAudit({
+      session_key: 'PRIOR:C:T',
+      team_id: 'TEAM',
+      user_id: 'U-ORIG',
+      ts: nowMs - 1000, // within 24h
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: 8_000_000, // $8 already spent
+    });
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      spendCaps: { perTaskMicroUsd: 0, perUser24hMicroUsd: 3_000_000, perGlobal24hMicroUsd: 0 },
+      now: () => nowMs,
+    });
+
+    // The reply is from U-OTHER and triggers the rehydrate path; the cap check must key on
+    // the STORED requestor (U-ORIG), not the replier, and reject before any rehydration.
+    const accepted = await manager.enqueueExisting('TEAM:C:T', {
+      message: 'continue',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-OTHER',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Thread is known → handled (true), but nothing rehydrated.
+    expect(accepted).toBe(true);
+    expect(factory.creates).toHaveLength(0);
+    expect(
+      store.audits.filter((a) => a.kind === 'lifecycle' && a.tool === 'session'),
+    ).toHaveLength(0);
+
+    // Rejected on per-user, attributed to the STORED requestor (not the replier).
+    const capAudits = store.audits.filter(
+      (a) => a.kind === 'correction' && a.tool === 'spend-cap',
+    );
+    expect(capAudits).toHaveLength(1);
+    expect(capAudits[0]?.result).toBe('rejected:user');
+    expect(capAudits[0]?.user_id).toBe('U-ORIG');
+    expect(capAudits[0]?.team_id).toBe('TEAM');
+  });
+
+  it('fails closed: a store SUM error refuses the turn (rejected:error), no run started', async () => {
+    const slack = new FakeSlackClient();
+    class ThrowingStore extends CapturingStore {
+      override sumCostByTask(): number {
+        throw new Error('db down');
+      }
+    }
+    const store = new ThrowingStore();
+    const factory = new FakeRunnerFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      spendCaps: { perTaskMicroUsd: 5_000_000, perUser24hMicroUsd: 0, perGlobal24hMicroUsd: 0 },
+      now: () => 1_000_000,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Failed closed — no container/run started.
+    expect(factory.creates).toHaveLength(0);
+    expect(manager.has('TEAM:C:T')).toBe(false);
+    // Honest "couldn't verify" message + a rejected:error audit row.
+    const capAudits = store.audits.filter(
+      (a) => a.kind === 'correction' && a.tool === 'spend-cap',
+    );
+    expect(capAudits).toHaveLength(1);
+    expect(capAudits[0]?.result).toBe('rejected:error');
+    expect(slack.posts.find((p) => p.text.includes("Couldn't verify"))).toBeDefined();
+  });
+
+  it('admission rejects enqueueExisting (in-memory hit) when per-task cap is breached', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory();
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      spendCaps: { perTaskMicroUsd: 3_000_000, perUser24hMicroUsd: 0, perGlobal24hMicroUsd: 0 },
+      now: () => Date.now(),
+    });
+
+    // Create the session first
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'first turn',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Manually seed a cost row for this session (simulating the first turn cost)
+    store.recordAudit({
+      session_key: 'TEAM:C:T',
+      team_id: 'TEAM',
+      user_id: 'U1',
+      ts: Date.now(),
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: 5_000_000, // $5 — exceeds $3 cap
+    });
+
+    const prevPosts = slack.posts.length;
+    const accepted = await manager.enqueueExisting('TEAM:C:T', {
+      message: 'second turn',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // enqueueExisting returns true (the thread is known)
+    expect(accepted).toBe(true);
+    // No drain happened for the second turn
+    const capAudits = store.audits.filter((a) => a.kind === 'correction' && a.tool === 'spend-cap');
+    expect(capAudits).toHaveLength(1);
+    expect(capAudits[0]?.result).toBe('rejected:task');
+    // A message was posted
+    expect(slack.posts.length).toBeGreaterThan(prevPosts);
+    const capPost = slack.posts[slack.posts.length - 1];
+    expect(capPost?.text).toContain('Start a new thread');
+  });
+
+  it('mid-task: abandon triggered when turn 2 is queued while turn 1 runs and cap is crossed by turn 1', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+
+    // Turn 1: $5 cost (above $4 cap). Turn 1 is blocking — released after turn 2 is queued.
+    let releaseTurn1!: () => void;
+    const turn1Done = new Promise<void>((res) => { releaseTurn1 = res; });
+
+    const turn1Script: TurnScript = async () => {
+      await turn1Done;
+      return [
+        { type: 'usage', costMicroUsd: 5_000_000, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        { type: 'text', text: 'turn 1 done' },
+      ] as RunnerEvent[];
+    };
+
+    const factory = new FakeRunnerFactory([turn1Script]);
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      spendCaps: { perTaskMicroUsd: 4_000_000, perUser24hMicroUsd: 0, perGlobal24hMicroUsd: 0 },
+      now: () => Date.now(),
+    });
+
+    // Start turn 1 — it blocks, draining = true
+    const enqueue1 = manager.enqueueNew('TEAM:C:T', {
+      message: 'turn 1',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    // Wait for drain to start (session is now draining)
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Enqueue turn 2 while turn 1 is running. Admission check: sumCostByTask = 0 (nothing
+    // recorded yet), so admission passes and turn 2 is queued.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'turn 2',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U1',
+    });
+    // No cap audits yet — turn 1 hasn't recorded its cost
+    expect(store.audits.filter((a) => a.tool === 'spend-cap')).toHaveLength(0);
+
+    // Release turn 1 — it records $5 to the store, then drain loops to turn 2
+    releaseTurn1();
+    await enqueue1;
+    await new Promise((r) => setTimeout(r, 20)); // let drain run the post-turn-1 loop iteration
+
+    // Second turn should NOT have been dispatched (mid-task abandon fires first)
+    const capAudits = store.audits.filter((a) => a.kind === 'correction' && a.tool === 'spend-cap');
+    expect(capAudits).toHaveLength(1);
+    expect(capAudits[0]?.result).toBe('abandoned:task');
+    expect(capAudits[0]?.user_id).toBe('U1');
+
+    // A "nothing was pushed" message was posted
+    const capPost = slack.posts.find((p) => p.text.includes('reached its budget'));
+    expect(capPost).toBeDefined();
+
+    // Queue was cleared
+    const session = manager['sessions'].get('TEAM:C:T');
+    expect(session?.queue.length ?? 0).toBe(0);
+
+    // No message content leaked into audit fields
+    expect(capAudits[0]?.summary).toBeNull();
+    expect(capAudits[0]?.reasoning).toBeNull();
+    const auditJson = JSON.stringify(capAudits[0]);
+    expect(auditJson).not.toContain('turn 2');
+  });
+
+  it('a 0-disabled cap is not enforced even when accumulated spend would exceed it', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new CostRunnerFactory([50_000_000]); // $50/turn — huge
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      // All caps disabled (0)
+      spendCaps: { perTaskMicroUsd: 0, perUser24hMicroUsd: 0, perGlobal24hMicroUsd: 0 },
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'turn 1',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'turn 2',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // No cap audit rows
+    const capAudits = store.audits.filter((a) => a.tool === 'spend-cap');
+    expect(capAudits).toHaveLength(0);
+  });
+
+  it('unknown userId skips the per-user check but global still fires', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory();
+    let nowMs = 3_000_000;
+
+    // Seed a large global spend
+    store.recordAudit({
+      session_key: 'ANY:C:T',
+      team_id: null,
+      user_id: null,
+      ts: nowMs - 100,
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: 10_000_000,
+    });
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      spendCaps: { perTaskMicroUsd: 0, perUser24hMicroUsd: 1_000_000, perGlobal24hMicroUsd: 5_000_000 },
+      now: () => nowMs,
+    });
+
+    // No userId — per-user check must be skipped; global should still reject
+    await manager.enqueueNew('TEAM:C:T3', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T3',
+      teamId: 'TEAM',
+      // userId intentionally omitted
+    });
+
+    expect(factory.creates).toHaveLength(0);
+    const capAudits = store.audits.filter((a) => a.tool === 'spend-cap');
+    expect(capAudits).toHaveLength(1);
+    // Must be global, not user
+    expect(capAudits[0]?.result).toBe('rejected:global');
+  });
+
+  it('per-user rows older than 24h (via injected clock) do not count toward the cap', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory();
+    // now = 100h in ms; 24h window starts at 76h
+    const nowMs = 100 * 60 * 60 * 1000;
+
+    // Seed a row at 50h — older than 24h, should NOT count
+    store.recordAudit({
+      session_key: 'OLD:C:T',
+      team_id: null,
+      user_id: 'U1',
+      ts: 50 * 60 * 60 * 1000,
+      kind: 'cost',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: 10_000_000, // $10, but outside window
+    });
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      spendCaps: { perTaskMicroUsd: 0, perUser24hMicroUsd: 5_000_000, perGlobal24hMicroUsd: 0 },
+      now: () => nowMs,
+    });
+
+    await manager.enqueueNew('TEAM:C:T4', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T4',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Session was created — old row didn't count
+    expect(factory.creates).toHaveLength(1);
+    const capAudits = store.audits.filter((a) => a.tool === 'spend-cap');
+    expect(capAudits).toHaveLength(0);
+  });
+
+  it('default SessionManager (no spendCaps) is unaffected — existing tests still pass', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+
+    // No spendCaps in constructor — caps default to disabled
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T',
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Session was created and processed normally
+    expect(factory.creates).toHaveLength(1);
+    expect(slack.posts.length).toBeGreaterThanOrEqual(1); // placeholder posted
 
     await manager.disposeAll();
   });

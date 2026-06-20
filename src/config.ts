@@ -106,6 +106,15 @@ export function parseCheckCmds(raw: string | undefined): ReadonlyMap<string, Rep
   return result;
 }
 
+export interface SpendCapsConfig {
+  /** Lifetime per-session cap, micro-USD. 0 = disabled. */
+  perTaskMicroUsd: number;
+  /** Rolling-24h per-user cap, micro-USD. 0 = disabled. */
+  perUser24hMicroUsd: number;
+  /** Rolling-24h workspace-wide cap, micro-USD. 0 = disabled. */
+  perGlobal24hMicroUsd: number;
+}
+
 export interface Config {
   SLACK_BOT_TOKEN: string;
   SLACK_APP_TOKEN: string;
@@ -121,6 +130,12 @@ export interface Config {
   SESSION_DB_PATH: string;
   docker: DockerConfig;
   oneshot: OneShotConfig;
+  spendCaps: SpendCapsConfig;
+}
+
+/** Convert a dollar amount to integer micro-USD, clamping negatives to 0. */
+function usdToMicro(usd: number): number {
+  return Math.max(0, Math.round(usd * 1_000_000));
 }
 
 export function loadConfig(): Config {
@@ -156,6 +171,11 @@ export function loadConfig(): Config {
       lintCommand: optionalEnvMaybe('ONESHOT_LINT_CMD'),
       testCommand: optionalEnvMaybe('ONESHOT_TEST_CMD'),
       checkCmds: parseCheckCmds(process.env['ONESHOT_CHECK_CMDS']),
+    },
+    spendCaps: {
+      perTaskMicroUsd:      usdToMicro(optionalEnvNumber('SPEND_CAP_PER_TASK_USD', 20)),
+      perUser24hMicroUsd:   usdToMicro(optionalEnvNumber('SPEND_CAP_PER_USER_24H_USD', 100)),
+      perGlobal24hMicroUsd: usdToMicro(optionalEnvNumber('SPEND_CAP_GLOBAL_24H_USD', 400)),
     },
   };
 }

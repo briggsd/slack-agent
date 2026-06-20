@@ -677,3 +677,99 @@ describe('DockerRunnerFactory — removeVolumeForSession', () => {
     expect(result).toBe(false);
   });
 });
+
+// ── Per-turn cost ceiling (Slice B1) ──────────────────────────────────────────
+
+describe('DockerRunner — per-turn cost ceiling (PER_TURN_COST_CEILING_MICRO_USD)', () => {
+  it('a usage line with costMicroUsd above the ceiling is yielded clamped to 20_000_000', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const gen = runner.send('test');
+    const iter = gen[Symbol.asyncIterator]();
+
+    const e1Promise = iter.next();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sent = JSON.parse(fake.stdinLines[0] ?? '{}') as { type: string; id: string };
+
+    // costMicroUsd far above the $20 ceiling
+    fake.writeOut(JSON.stringify({
+      type: 'usage',
+      id: sent.id,
+      costMicroUsd: 99_000_000, // $99 — way above ceiling
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    }));
+    fake.writeOut(JSON.stringify({ type: 'text', id: sent.id, text: 'done' }));
+
+    const e1 = await e1Promise;
+    expect(e1.value).toMatchObject({
+      type: 'usage',
+      costMicroUsd: 20_000_000, // clamped to ceiling
+    });
+
+    // Token fields pass through unchanged
+    expect((e1.value as { inputTokens: number }).inputTokens).toBe(100);
+    expect((e1.value as { outputTokens: number }).outputTokens).toBe(50);
+  });
+
+  it('a normal costMicroUsd value (below ceiling) passes through without clamping', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const gen = runner.send('test2');
+    const iter = gen[Symbol.asyncIterator]();
+
+    const e1Promise = iter.next();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sent = JSON.parse(fake.stdinLines[0] ?? '{}') as { type: string; id: string };
+
+    fake.writeOut(JSON.stringify({
+      type: 'usage',
+      id: sent.id,
+      costMicroUsd: 1_500_000, // $1.50 — well below ceiling
+      inputTokens: 50,
+      outputTokens: 25,
+      cacheReadTokens: 5,
+      cacheCreationTokens: 10,
+    }));
+    fake.writeOut(JSON.stringify({ type: 'text', id: sent.id, text: 'done' }));
+
+    const e1 = await e1Promise;
+    expect(e1.value).toMatchObject({
+      type: 'usage',
+      costMicroUsd: 1_500_000, // not clamped
+    });
+  });
+
+  it('costMicroUsd exactly at the ceiling passes through unchanged', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const gen = runner.send('test3');
+    const iter = gen[Symbol.asyncIterator]();
+
+    const e1Promise = iter.next();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sent = JSON.parse(fake.stdinLines[0] ?? '{}') as { type: string; id: string };
+
+    fake.writeOut(JSON.stringify({
+      type: 'usage',
+      id: sent.id,
+      costMicroUsd: 20_000_000, // exactly at ceiling
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    }));
+    fake.writeOut(JSON.stringify({ type: 'text', id: sent.id, text: 'done' }));
+
+    const e1 = await e1Promise;
+    expect(e1.value).toMatchObject({
+      type: 'usage',
+      costMicroUsd: 20_000_000,
+    });
+  });
+});

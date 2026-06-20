@@ -566,6 +566,121 @@ describe('SqliteSessionStore — durability', () => {
   });
 });
 
+// ─── SqliteSessionStore — SUM cap methods (Slice B1) ─────────────────────────
+
+describe('SqliteSessionStore — sumCostByTask / sumCostByUserSince / sumCostGlobalSince', () => {
+  let store: SqliteSessionStore;
+
+  beforeEach(() => {
+    store = new SqliteSessionStore(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  const baseEvent = {
+    team_id: null as null,
+    user_id: null as null,
+    kind: 'cost' as const,
+    tool: null as null,
+    summary: null as null,
+    reasoning: null as null,
+    result: null as null,
+    cost_tokens: null as null,
+  };
+
+  it('sumCostByTask returns 0 when no rows exist for the session', () => {
+    expect(store.sumCostByTask('NO:SUCH:KEY')).toBe(0);
+  });
+
+  it('sumCostByUserSince returns 0 when no rows exist', () => {
+    expect(store.sumCostByUserSince('U1', 0)).toBe(0);
+  });
+
+  it('sumCostGlobalSince returns 0 when no rows exist', () => {
+    expect(store.sumCostGlobalSince(0)).toBe(0);
+  });
+
+  it('sumCostByTask sums only the matching session_key', () => {
+    store.recordAudit({ ...baseEvent, session_key: 'K1', ts: 1000, cost_micro_usd: 3000 });
+    store.recordAudit({ ...baseEvent, session_key: 'K1', ts: 2000, cost_micro_usd: 7000 });
+    store.recordAudit({ ...baseEvent, session_key: 'K2', ts: 3000, cost_micro_usd: 50000 });
+
+    expect(store.sumCostByTask('K1')).toBe(10000);
+    expect(store.sumCostByTask('K2')).toBe(50000);
+    expect(store.sumCostByTask('K3')).toBe(0);
+  });
+
+  it('sumCostByTask ignores null cost_micro_usd rows', () => {
+    store.recordAudit({ ...baseEvent, session_key: 'K1', ts: 1000, cost_micro_usd: 5000 });
+    store.recordAudit({ ...baseEvent, session_key: 'K1', ts: 2000, cost_micro_usd: null });
+
+    expect(store.sumCostByTask('K1')).toBe(5000);
+  });
+
+  it('sumCostByUserSince sums only rows with matching user_id within the window', () => {
+    const since = 5000;
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U1', ts: since + 1, cost_micro_usd: 2000 });
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U1', ts: since + 2, cost_micro_usd: 3000 });
+    // exactly at since — should be excluded (ts > since, not >=)
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U1', ts: since, cost_micro_usd: 1000 });
+    // different user — excluded
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U2', ts: since + 3, cost_micro_usd: 99999 });
+
+    expect(store.sumCostByUserSince('U1', since)).toBe(5000);
+    expect(store.sumCostByUserSince('U2', since)).toBe(99999);
+  });
+
+  it('sumCostByUserSince excludes rows older than the window (boundary row at exactly since is excluded)', () => {
+    const since = 10_000;
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U1', ts: since - 1, cost_micro_usd: 9000 });
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U1', ts: since, cost_micro_usd: 5000 });
+
+    // Both are <= since, so excluded by ts > since
+    expect(store.sumCostByUserSince('U1', since)).toBe(0);
+  });
+
+  it('sumCostGlobalSince sums all rows with ts > sinceMs regardless of user or session', () => {
+    const since = 5000;
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U1', ts: since + 1, cost_micro_usd: 1000 });
+    store.recordAudit({ ...baseEvent, session_key: 'K2', user_id: 'U2', ts: since + 2, cost_micro_usd: 2000 });
+    store.recordAudit({ ...baseEvent, session_key: 'K3', user_id: null, ts: since + 3, cost_micro_usd: 3000 });
+    // old row — excluded
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U1', ts: since - 1, cost_micro_usd: 9999 });
+
+    expect(store.sumCostGlobalSince(since)).toBe(6000);
+  });
+
+  it('sumCostGlobalSince excludes the boundary row (ts > since, not >=)', () => {
+    const since = 8000;
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: null, ts: since, cost_micro_usd: 5000 });
+
+    expect(store.sumCostGlobalSince(since)).toBe(0);
+  });
+
+  it('kind != cost rows with null cost_micro_usd do not affect SUM (COALESCE SUM trick)', () => {
+    store.recordAudit({
+      session_key: 'K1',
+      team_id: null,
+      user_id: 'U1',
+      ts: 1000,
+      kind: 'lifecycle',
+      tool: 'session',
+      summary: null,
+      reasoning: null,
+      result: 'created',
+      cost_tokens: null,
+      cost_micro_usd: null,
+    });
+    store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U1', ts: 2000, cost_micro_usd: 500 });
+
+    expect(store.sumCostByTask('K1')).toBe(500);
+    expect(store.sumCostByUserSince('U1', 0)).toBe(500);
+    expect(store.sumCostGlobalSince(0)).toBe(500);
+  });
+});
+
 // ─── Rehydrate-on-reply integration tests ────────────────────────────────────
 
 /**

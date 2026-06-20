@@ -90,6 +90,9 @@ npm test
 | `SLACK_APP_TOKEN` | yes | — | App-Level Token for Socket Mode (`xapp-…`) |
 | `IDLE_TIMEOUT_MS` | no | `600000` | Milliseconds before an idle session runner is reaped |
 | `SESSION_DB_PATH` | no | `.data/sessions.db` | Path to the SQLite session DB; parent dir is auto-created; mount on a persistent volume in production |
+| `SPEND_CAP_PER_TASK_USD` | no | `20` | Lifetime spend cap per session/thread, in USD. `0` disables it. A thread at or over this is stopped ("start a new thread to continue") |
+| `SPEND_CAP_PER_USER_24H_USD` | no | `100` | Rolling 24-hour spend cap per user, in USD. `0` disables it |
+| `SPEND_CAP_GLOBAL_24H_USD` | no | `400` | Rolling 24-hour workspace-wide spend cap, in USD. `0` disables it |
 
 ## Sandbox runner
 
@@ -153,7 +156,7 @@ thread. Nothing is written until you respond in-thread:
 > Invocation is controlled **operationally, at Slack**: the bot only receives events
 > from channels it's a member of, so keep it in channels whose membership you trust
 > (ideally private) and out of `#general`. Anyone in a bot-occupied channel can start a
-> run — spending API budget (no spend caps yet) and opening a PR. That's an accepted
+> run — spending API budget (bounded by the `SPEND_CAP_*` caps above) and opening a PR. That's an accepted
 > trade-off because the real control is downstream: every run ends at "open a PR", which
 > a human reviews and merges on GitHub — **the bot never merges**, and agent code only
 > ever runs inside the sandbox container, never on the host. So an unwanted PR is a
