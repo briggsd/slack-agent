@@ -325,6 +325,21 @@ describe('DockerGitNodeExecutor — clone', () => {
     }
   });
 
+  it('TIMEOUT: a clone that never exits is killed and rejects (no token in message)', async () => {
+    // A spawn that returns a child which never emits exit/error — a stalled `docker run`.
+    let killed = false;
+    const fake = new FakeChildProcess();
+    fake.kill = (): boolean => { killed = true; return true; };
+    const spawnFn: SpawnFn = () => fake.asChildProcess();
+    // Tiny timeout so the real timer fires fast; default is 120s.
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, cloneTimeoutMs: 10 });
+
+    await expect(
+      exec.clone({ lease: makeLease(token), repo: 'owner/repo', workdir, volume }),
+    ).rejects.toThrow(/git clone timed out/);
+    expect(killed).toBe(true);
+  });
+
   it('rejects with an Error (no token in message) when docker exits non-zero', async () => {
     const { spawnFn } = makeFakeSpawn(128);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });

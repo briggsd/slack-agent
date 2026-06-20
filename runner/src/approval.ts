@@ -9,7 +9,7 @@
  * takes an emit callback and is driven by parsed messages, so it unit-tests offline.
  */
 
-import type { ApprovalVerdictMessage, UserMessage } from './protocol.js';
+import type { ApprovalVerdictMessage, CloneResultMessage, UserMessage } from './protocol.js';
 
 /** The human's decision on a submitted spec, as the tool sees it. */
 export type Verdict = { approved: boolean; feedback?: string };
@@ -81,6 +81,7 @@ export class ApprovalCoordinator {
 export type InboundParsed =
   | { kind: 'user'; msg: UserMessage }
   | { kind: 'verdict'; msg: ApprovalVerdictMessage }
+  | { kind: 'clone_result'; msg: CloneResultMessage }
   | { kind: 'bad'; error: string };
 
 /**
@@ -115,6 +116,24 @@ export function parseInbound(line: string): InboundParsed {
         ? { type: 'approval_verdict', id: obj['id'], approved: obj['approved'], feedback: obj['feedback'] }
         : { type: 'approval_verdict', id: obj['id'], approved: obj['approved'] };
     return { kind: 'verdict', msg };
+  }
+  if (obj['type'] === 'clone_result') {
+    if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
+      return { kind: 'bad', error: 'unexpected clone_result shape' };
+    }
+    const ok = obj['ok'];
+    const id = obj['id'];
+    let msg: CloneResultMessage;
+    if (ok && typeof obj['workdir'] === 'string') {
+      msg = { type: 'clone_result', id, ok: true, workdir: obj['workdir'] };
+    } else if (ok) {
+      msg = { type: 'clone_result', id, ok: true };
+    } else if (typeof obj['error'] === 'string') {
+      msg = { type: 'clone_result', id, ok: false, error: obj['error'] };
+    } else {
+      msg = { type: 'clone_result', id, ok: false };
+    }
+    return { kind: 'clone_result', msg };
   }
   return { kind: 'bad', error: 'unknown message type' };
 }

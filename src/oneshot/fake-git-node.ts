@@ -23,6 +23,7 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   public checks: CheckRequest[] = [];
 
   private readonly prUrl: string;
+  private cloneError: Error | null = null;
   private branchError: Error | null = null;
   private pushError: Error | null = null;
   private openChangeError: Error | null = null;
@@ -37,6 +38,11 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
 
   constructor(prUrl = 'https://example.test/pr/1') {
     this.prUrl = prUrl;
+  }
+
+  /** Script clone() to reject with the given error (for failure-path tests). */
+  failNextClone(err: Error): void {
+    this.cloneError = err;
   }
 
   /** Script branch() to reject with the given error (for failure-path tests). */
@@ -71,6 +77,11 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
 
   async clone(req: CloneRequest): Promise<void> {
     this.clones.push(req);
+    if (this.cloneError !== null) {
+      const err = this.cloneError;
+      this.cloneError = null;
+      throw err;
+    }
   }
 
   async branch(req: BranchRequest): Promise<void> {

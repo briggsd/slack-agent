@@ -922,19 +922,28 @@ describe('DockerRunner — commit gate translation', () => {
     expect((await iter.next()).done).toBe(true);
   });
 
-  it('skips a malformed request_approval (missing specRef) without parking', async () => {
+  it('a malformed request_approval (has id, missing specRef) writes approval_verdict{approved:false} to unblock the tool without parking', async () => {
     const { runner, fake } = await makeReadyRunner();
     const iter = runner.send('build a thing')[Symbol.asyncIterator]();
 
     const e1Promise = iter.next();
     await tick();
-    // No specRef — bad shape, must be skipped (not surfaced as a gate).
+    // Has an id but no specRef — carry-forward fix: unblock the parked tool rather than
+    // dropping the verdict (which would leave a live promise waiting forever inside the turn).
     fake.writeOut(JSON.stringify({ type: 'request_approval', id: 'appr-5' }));
     fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'done anyway' }));
 
     const e1 = await e1Promise;
     expect(e1.value).toEqual({ type: 'text', text: 'done anyway' });
-    expect(fake.stdinLines.some((l) => l.includes('approval_verdict'))).toBe(false);
+    // The fallback approval_verdict must be written to the container so the parked submit_spec
+    // tool unblocks. Without this the tool would park forever on a verdict that never arrives.
+    const verdictLine = fake.stdinLines.find((l) => l.includes('approval_verdict'));
+    expect(verdictLine).toBeDefined();
+    expect(JSON.parse(verdictLine ?? '{}')).toEqual({
+      type: 'approval_verdict',
+      id: 'appr-5',
+      approved: false,
+    });
   });
 });
 

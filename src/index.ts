@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { spawn as nodeSpawn } from 'node:child_process';
 // @slack/bolt is CommonJS — a named import fails at runtime under ESM
 import bolt from '@slack/bolt';
 const { App } = bolt;
@@ -18,6 +19,7 @@ import { DockerGitNodeExecutor } from './oneshot/docker-git-node.js';
 import { FakeGitNodeExecutor } from './oneshot/fake-git-node.js';
 import type { GitNodeExecutor } from './oneshot/git-node.js';
 import { DispatchingRunnerFactory } from './oneshot/dispatching-factory.js';
+import { RealCloneService } from './oneshot/clone-service.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -93,18 +95,6 @@ async function main(): Promise<void> {
   const oc = config.oneshot;
   if (config.RUNNER_BACKEND === 'docker') {
     const dc = config.docker;
-    const dockerFactory = new DockerRunnerFactory({
-      image: dc.RUNNER_IMAGE,
-      readyTimeoutMs: dc.RUNNER_READY_TIMEOUT_MS,
-      turnTimeoutMs: dc.RUNNER_TURN_TIMEOUT_MS,
-      killGraceMs: dc.RUNNER_KILL_GRACE_MS,
-      memory: dc.RUNNER_MEMORY,
-      cpus: dc.RUNNER_CPUS,
-      pidsLimit: dc.RUNNER_PIDS_LIMIT,
-    });
-    baseFactory = dockerFactory;
-    volumeReaper = dockerFactory;
-    console.log(`[gateway] using DockerRunnerFactory (image=${dc.RUNNER_IMAGE})`);
 
     const botTokens = new Map<GitHost, string>();
     if (oc.githubToken !== undefined) botTokens.set('github', oc.githubToken);
@@ -116,6 +106,20 @@ async function main(): Promise<void> {
       ...(oc.testCommand !== undefined ? { testCmd: oc.testCommand } : {}),
       ...(oc.checkCmds.size > 0 ? { checkCmds: oc.checkCmds } : {}),
     });
+    const cloneService = new RealCloneService(broker, gitNodes);
+
+    const dockerFactory = new DockerRunnerFactory({
+      image: dc.RUNNER_IMAGE,
+      readyTimeoutMs: dc.RUNNER_READY_TIMEOUT_MS,
+      turnTimeoutMs: dc.RUNNER_TURN_TIMEOUT_MS,
+      killGraceMs: dc.RUNNER_KILL_GRACE_MS,
+      memory: dc.RUNNER_MEMORY,
+      cpus: dc.RUNNER_CPUS,
+      pidsLimit: dc.RUNNER_PIDS_LIMIT,
+    }, nodeSpawn, cloneService);
+    baseFactory = dockerFactory;
+    volumeReaper = dockerFactory;
+    console.log(`[gateway] using DockerRunnerFactory (image=${dc.RUNNER_IMAGE})`);
     console.log(
       `[gateway] one-shot enabled (git image=${oc.GIT_IMAGE}, hosts=[${[...botTokens.keys()].join(',')}])`,
     );
