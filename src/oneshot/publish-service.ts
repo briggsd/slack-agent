@@ -46,6 +46,10 @@ export class RealPublishService implements PublishService {
         title,
       });
 
+    if (!(await this.gitNodes.verifyRepo({ repo: req.repo, workdir, volume: req.volume }))) {
+      return { ok: false, reason: 'repo binding mismatch' };
+    }
+
     let lease: CredentialLease;
     try {
       lease = await this.broker.lease({ host: 'github', repo: req.repo, taskId });

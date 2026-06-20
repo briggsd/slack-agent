@@ -26,10 +26,18 @@ export interface PushRequest {
   volume: string;
 }
 
+export interface VerifyRepoRequest {
+  repo: string;
+  workdir: string;
+  /** Docker volume name to mount at /workspace (e.g. slackbot-ws-<sanitized-key>). */
+  volume: string;
+}
+
 export interface OpenChangeRequest {
   lease: CredentialLease;
   repo: string;
   head: string;
+  /** Fallback PR base; real executors may resolve the repo's default branch instead. */
   base: string;
   title: string;
   body: string;
@@ -84,6 +92,8 @@ export interface GitNodeExecutor {
   clone(req: CloneRequest): Promise<void>;
   /** Create a local branch; no credential needed (purely local git op). */
   branch(req: BranchRequest): Promise<void>;
+  /** Verify the local worktree's origin matches `repo`; no credential required. */
+  verifyRepo(req: VerifyRepoRequest): Promise<boolean>;
   push(req: PushRequest): Promise<void>;
   openChangeRequest(req: OpenChangeRequest): Promise<{ url: string }>;
   /**

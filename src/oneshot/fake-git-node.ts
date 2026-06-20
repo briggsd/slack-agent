@@ -10,6 +10,7 @@ import type {
   CloneRequest,
   BranchRequest,
   PushRequest,
+  VerifyRepoRequest,
   OpenChangeRequest,
   CheckRequest,
   CheckResult,
@@ -18,6 +19,7 @@ import type {
 export class FakeGitNodeExecutor implements GitNodeExecutor {
   public clones: CloneRequest[] = [];
   public branches: BranchRequest[] = [];
+  public repoVerifications: VerifyRepoRequest[] = [];
   public pushes: PushRequest[] = [];
   public changeRequests: OpenChangeRequest[] = [];
   public checks: CheckRequest[] = [];
@@ -25,6 +27,7 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   private readonly prUrl: string;
   private cloneError: Error | null = null;
   private branchError: Error | null = null;
+  private verifyRepoResult = true;
   private pushError: Error | null = null;
   private openChangeError: Error | null = null;
 
@@ -48,6 +51,11 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   /** Script branch() to reject with the given error (for failure-path tests). */
   failNextBranch(err: Error): void {
     this.branchError = err;
+  }
+
+  /** Script verifyRepo() to return a specific result. */
+  setVerifyRepoResult(result: boolean): void {
+    this.verifyRepoResult = result;
   }
 
   /** Script push() to reject with the given error (for failure-path tests). */
@@ -91,6 +99,11 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
       this.branchError = null;
       throw err;
     }
+  }
+
+  async verifyRepo(req: VerifyRepoRequest): Promise<boolean> {
+    this.repoVerifications.push(req);
+    return this.verifyRepoResult;
   }
 
   async push(req: PushRequest): Promise<void> {

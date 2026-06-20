@@ -21,6 +21,7 @@ describe('RealPublishService', () => {
     }
 
     expect(broker.leases).toHaveLength(0);
+    expect(gitNodes.repoVerifications).toHaveLength(0);
     expect(gitNodes.pushes).toHaveLength(0);
     expect(gitNodes.changeRequests).toHaveLength(0);
   });
@@ -41,6 +42,11 @@ describe('RealPublishService', () => {
     expect(broker.leases).toHaveLength(1);
     expect(broker.leases[0]).toMatchObject({ host: 'github', repo: 'owner/repo' });
     expect(broker.revokes).toHaveLength(1);
+    expect(gitNodes.repoVerifications).toEqual([{
+      repo: 'owner/repo',
+      workdir: '/workspace/owner-repo',
+      volume: 'slackbot-ws-session-1',
+    }]);
     expect(gitNodes.pushes).toHaveLength(1);
     expect(gitNodes.pushes[0]).toMatchObject({
       repo: 'owner/repo',
@@ -79,6 +85,25 @@ describe('RealPublishService', () => {
     });
     expect(gitNodes.changeRequests[0]?.title).toBe('Publish verified changes');
     expect(gitNodes.changeRequests[0]?.body).toContain('Automated one-shot implementation.');
+  });
+
+  it('repo binding mismatch returns ok:false before leasing or pushing', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    gitNodes.setVerifyRepoResult(false);
+    const svc = new RealPublishService(broker, gitNodes);
+
+    const outcome = await svc.publish({ repo: 'owner/repo', volume: 'vol' });
+
+    expect(outcome).toEqual({ ok: false, reason: 'repo binding mismatch' });
+    expect(gitNodes.repoVerifications).toEqual([{
+      repo: 'owner/repo',
+      workdir: '/workspace/owner-repo',
+      volume: 'vol',
+    }]);
+    expect(broker.leases).toHaveLength(0);
+    expect(gitNodes.pushes).toHaveLength(0);
+    expect(gitNodes.changeRequests).toHaveLength(0);
   });
 
   it('push failure returns ok:false and revokes without opening a PR', async () => {

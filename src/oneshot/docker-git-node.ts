@@ -14,7 +14,7 @@
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import type { SpawnFn } from '../runner/docker.js';
-import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, OpenChangeRequest, CheckRequest, CheckResult } from './git-node.js';
+import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, VerifyRepoRequest, OpenChangeRequest, CheckRequest, CheckResult } from './git-node.js';
 import { providerFor, type FetchFn } from './git-host.js';
 
 /** Env vars the docker CLI itself may need; everything else (incl. host secrets) is dropped. */
@@ -186,6 +186,10 @@ function runDocker(
  *  guard so a stalled `docker run git clone` can't hang the turn. Not a tuning knob. */
 const DEFAULT_CLONE_TIMEOUT_MS = 120_000;
 
+function normalizeRemoteUrl(url: string): string {
+  return url.trim().replace(/\.git$/, '').toLowerCase();
+}
+
 export class DockerGitNodeExecutor implements GitNodeExecutor {
   private readonly image: string;
   private readonly spawnFn: SpawnFn;
@@ -258,6 +262,17 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     const gitArgs = ['-C', req.workdir, 'checkout', '-b', req.branch];
     const args = this.dockerRunArgs(req.volume, gitArgs);
     await runDocker(this.spawnFn, args, '', 'git branch', `repo: ${req.repo}, branch: ${req.branch}`);
+  }
+
+  async verifyRepo(req: VerifyRepoRequest): Promise<boolean> {
+    const provider = providerFor('github');
+    const expected = normalizeRemoteUrl(provider.cloneUrl(req.repo));
+    const gitArgs = ['-C', req.workdir, 'remote', 'get-url', 'origin'];
+    const args = this.dockerRunArgs(req.volume, gitArgs);
+    const result = await runDockerCapture(this.spawnFn, args, 'git remote', `repo: ${req.repo}`);
+    if (result.exitCode !== 0) return false;
+    const actual = normalizeRemoteUrl(result.output.split(/\r?\n/, 1)[0] ?? '');
+    return actual === expected;
   }
 
   async push(req: PushRequest): Promise<void> {

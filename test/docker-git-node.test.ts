@@ -358,6 +358,44 @@ describe('DockerGitNodeExecutor — clone', () => {
   });
 });
 
+// ── DockerGitNodeExecutor — verifyRepo ────────────────────────────────────────
+
+describe('DockerGitNodeExecutor — verifyRepo', () => {
+  const image = 'slackbot-runner:test';
+  const volume = 'slackbot-ws-team01-c123-t456';
+  const workdir = '/workspace/owner-repo';
+
+  it('runs a credential-free git remote check and returns true when origin matches repo', async () => {
+    const { spawnFn, calls } = makeFakeSpawn({ stdout: 'https://github.com/owner/repo.git\n' });
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await expect(exec.verifyRepo({ repo: 'owner/repo', workdir, volume })).resolves.toBe(true);
+
+    expect(calls).toHaveLength(1);
+    const { args, options } = calls[0]!;
+    expect(args).toContain('remote');
+    expect(args).toContain('get-url');
+    expect(args).toContain('origin');
+    expect(args).toContain(workdir);
+    const env = options.env as Record<string, string | undefined>;
+    expect(env['GIT_TOKEN']).toBeUndefined();
+  });
+
+  it('returns false when origin points at a different repo', async () => {
+    const { spawnFn } = makeFakeSpawn({ stdout: 'https://github.com/other/repo.git\n' });
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await expect(exec.verifyRepo({ repo: 'owner/repo', workdir, volume })).resolves.toBe(false);
+  });
+
+  it('returns false when git cannot read the remote', async () => {
+    const { spawnFn } = makeFakeSpawn({ exitCode: 128, stderr: 'not a git repository' });
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await expect(exec.verifyRepo({ repo: 'owner/repo', workdir, volume })).resolves.toBe(false);
+  });
+});
+
 // ── DockerGitNodeExecutor — push ──────────────────────────────────────────────
 
 describe('DockerGitNodeExecutor — push', () => {
