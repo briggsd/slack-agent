@@ -18,7 +18,7 @@ type TurnResult = SDKMessage[];
 class FakeAgentSdk {
   private turns: TurnResult[];
   private turnIndex = 0;
-  public calls: Array<{ prompt: string; resume?: string; disallowedTools?: string[] }> = [];
+  public calls: Array<{ prompt: string; resume?: string; disallowedTools?: string[]; systemPrompt?: unknown }> = [];
 
   constructor(turns: TurnResult[] = []) {
     this.turns = turns;
@@ -31,6 +31,7 @@ class FakeAgentSdk {
         prompt: params.prompt,
         resume: params.options?.resume,
         disallowedTools: params.options?.disallowedTools,
+        systemPrompt: params.options?.systemPrompt,
       });
       const idx = self.turnIndex++;
       const messages: SDKMessage[] = self.turns[idx] ?? [
@@ -274,6 +275,32 @@ describe('runner main — basic flow', () => {
 
     expect(sdk.calls).toHaveLength(1);
     expect(sdk.calls[0]?.disallowedTools).toContain('AskUserQuestion');
+  });
+
+  it('appends verify-then-publish workflow guidance to the SDK system prompt', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
+    ]);
+    await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'msg-1', text: 'hello' })],
+      sdk,
+    );
+
+    const systemPrompt = sdk.calls[0]?.systemPrompt;
+    expect(systemPrompt).toMatchObject({
+      type: 'preset',
+      preset: 'claude_code',
+    });
+    expect(typeof systemPrompt).toBe('object');
+    expect(systemPrompt).not.toBeNull();
+
+    const append = (systemPrompt as { append?: unknown }).append;
+    expect(typeof append).toBe('string');
+    expect(append).toContain('SPEC.md');
+    expect(append).toContain('diff');
+    expect(append).toContain('run_checks');
+    expect(append).toContain('publish');
+    expect(append).toContain('only after');
   });
 
   it('persists session-id from init message', async () => {

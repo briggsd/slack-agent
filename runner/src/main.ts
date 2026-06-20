@@ -140,10 +140,13 @@ const WORKSPACE_SYSTEM_PROMPT_ADDITION =
 const COMMIT_SYSTEM_PROMPT_ADDITION =
   'When your plan is ready and the user wants it built, call the build_spec tool (its full name ' +
   'is mcp__commit__build_spec) with the "owner/name" repo you cloned. It reads /workspace/SPEC.md ' +
-  '(write your plan there first), asks the human to approve, and on approval runs the build in a ' +
-  'fresh sandbox to produce a local candidate — you do not write code, push, or open a PR yourself. ' +
-  'It returns candidate-ready confirmation, or the failure reason to revise and try again. If it ' +
-  'returns not-approved, revise and call it again, or keep discussing.';
+  '(write your plan there first). Make SPEC.md a buildable implementation spec, not a vague summary: ' +
+  'include concrete acceptance criteria, likely files/modules to inspect, relevant test commands or ' +
+  'existing tests, and known constraints. Present that SPEC to the user through build_spec and treat ' +
+  'human feedback as data to revise from. On approval, build_spec runs the build in a fresh sandbox to ' +
+  'produce a local candidate; you do not write code, push, or open a PR yourself. It returns ' +
+  'candidate-ready confirmation, or the failure reason to revise and try again. If it returns ' +
+  'not-approved, revise and call it again, or keep discussing.';
 
 const CLONE_SYSTEM_PROMPT_ADDITION =
   'To investigate a repository, call the clone_repo tool (mcp__commit__clone_repo) with the ' +
@@ -155,11 +158,16 @@ const CLONE_SYSTEM_PROMPT_ADDITION =
 const PUBLISH_SYSTEM_PROMPT_ADDITION =
   'After build_spec returns candidate-ready, inspect the cloned repo worktree with normal ' +
   'workspace tools before publishing; for example, use Bash to run git -C /workspace/<owner-name> ' +
-  'diff main...HEAD or equivalent. Then call run_checks (mcp__commit__run_checks) with the same ' +
-  '"owner/name" repo and review the raw lint/test output. After the coordinator has verified the ' +
-  'diff and checks, use publish (mcp__commit__publish) ' +
-  'or open_pr (mcp__commit__open_pr) with the same "owner/name" repo to ask the gateway to push ' +
-  'the verified worktree and open a PR. The gateway handles credentials; do not push or open a PR yourself.';
+  'diff main...HEAD or equivalent, then read enough changed files to judge the diff against ' +
+  '/workspace/SPEC.md. Call run_checks (mcp__commit__run_checks) with the same "owner/name" repo ' +
+  'and interpret every result: exitCode 0 with skipped false means that check ran green; skipped true ' +
+  'is inconclusive, not green; any non-zero exit code is red even when the tool call succeeded. Use ' +
+  'publish (mcp__commit__publish) or open_pr (mcp__commit__open_pr) only after you have actually ' +
+  'inspected the diff and reviewed check output and both are satisfactory. If checks are red, skipped, ' +
+  'inconclusive, or the diff does not match SPEC.md, do not claim success or publish automatically; ' +
+  'tell the user honestly what you observed and ask for the next step. Recap verification results like ' +
+  'a teammate, not a status panel: only claim what was verified, hedge honestly, and avoid raw stack ' +
+  'traces or internal logs in failure prose. The gateway handles credentials; do not push or open a PR yourself.';
 
 // ── Spec-file helper ─────────────────────────────────────────────────────────
 
@@ -201,7 +209,7 @@ export async function runBuildSpec(
   }
   const outcome = await requestBuild(repo);
   return outcome.ok
-    ? 'BUILD COMPLETE. Local candidate ready in the session worktree. The coordinator must verify it before using publish or open_pr. Tell the user and offer next steps.'
+    ? 'BUILD COMPLETE. Local candidate ready in the session worktree. Before publish or open_pr, inspect the candidate diff, read changed files as needed against /workspace/SPEC.md, and call run_checks. Publish only after the diff review and checks are satisfactory; if verification is red, skipped, inconclusive, or does not match the SPEC, report honestly and ask the user what to do.'
     : `BUILD DID NOT COMPLETE: ${outcome.reason}. Revise the spec and call build_spec again, or discuss with the user.`;
 }
 
@@ -215,7 +223,7 @@ export async function runPublish(
 ): Promise<string> {
   const outcome = await publish(input);
   return outcome.ok
-    ? `PUBLISH COMPLETE. Opened PR: ${outcome.prUrl}. Tell the user and offer next steps.`
+    ? `PUBLISH COMPLETE. Opened PR: ${outcome.prUrl}. Give the user an honest verification report: one-line build summary, check status only if you actually reviewed run_checks output, diff/SPEC assessment only if you inspected the diff, and the PR URL. Do not overclaim or send only a bare PR link.`
     : `PUBLISH DID NOT COMPLETE: ${outcome.reason}. Tell the user the short failure reason.`;
 }
 
@@ -243,7 +251,12 @@ export async function runChecks(
       '</raw_output>',
     ].join('\n'),
   );
-  return `RUN CHECKS COMPLETE. Requested kind: ${normalized.kind}.\n\n${parts.join('\n\n')}`;
+  return (
+    `RUN CHECKS COMPLETE. Requested kind: ${normalized.kind}. Interpret results carefully: ` +
+    'a non-zero exitCode is red, skipped true is inconclusive and not green, and a green claim ' +
+    'requires every relevant check to have run with skipped false and exitCode 0.' +
+    `\n\n${parts.join('\n\n')}`
+  );
 }
 
 function publishInputFromArgs(args: {
@@ -813,10 +826,11 @@ function buildCommitMcpServer(
 ) {
   const buildSpecTool = tool(
     'build_spec',
-    'Get human approval for your plan and then build it. Reads /workspace/SPEC.md — write your ' +
-      'plan there first. Pass the "owner/name" repo you cloned. Blocks while the human reviews; on ' +
-      'approval it runs the build in a fresh sandbox and returns a local candidate ready for ' +
-      'verification (or the failure reason). Do not write code, push, or open a PR yourself — this tool does not publish.',
+    'Get human approval for your SPEC and then build it. Reads /workspace/SPEC.md — write your ' +
+      'buildable implementation spec there first. Pass the "owner/name" repo you cloned. Blocks while ' +
+      'the human reviews; on approval it runs the build in a fresh sandbox and returns a local candidate. ' +
+      'After this tool returns candidate-ready, inspect the diff and call run_checks before publish/open_pr. ' +
+      'Do not write code, push, or open a PR yourself — this tool does not publish.',
     { repo: z.string().describe('Repository slug in "owner/name" format — the repo you cloned.') },
     async (args) => {
       const text = await runBuildSpec(args.repo, readFile, submitSpec, requestBuild);
@@ -854,7 +868,7 @@ function buildCommitMcpServer(
     'run_checks',
     'Run deterministic project checks on the local candidate through the gateway. Pass the ' +
       '"owner/name" repo. Defaults to all, which runs lint then test. Inspect the raw output; ' +
-      'non-zero check exits are returned as data, not tool failure.',
+      'non-zero check exits are returned as data, not tool failure, and skipped checks are inconclusive rather than green.',
     checksSchema,
     async (args) => {
       const text = await runChecks(checksInputFromArgs(args), runChecksFn);
@@ -864,8 +878,9 @@ function buildCommitMcpServer(
 
   const publishTool = tool(
     'publish',
-    'Publish a verified local candidate by asking the gateway to push the session worktree and open a PR. ' +
-      'Pass the "owner/name" repo. The gateway owns credentials; do not push or open a PR yourself.',
+    'Publish only a verified local candidate by asking the gateway to push the session worktree and open a PR, ' +
+      'or when the human explicitly says to open anyway after you reported verification risk. Pass the ' +
+      '"owner/name" repo. The gateway owns credentials; do not push or open a PR yourself.',
     publishSchema,
     async (args) => {
       const text = await runPublish(publishInputFromArgs(args), publish);
@@ -875,7 +890,8 @@ function buildCommitMcpServer(
 
   const openPrTool = tool(
     'open_pr',
-    'Alias for publish. Opens a PR for a verified local candidate through the gateway credential path.',
+    'Alias for publish. Opens a PR only for a verified local candidate through the gateway credential path, ' +
+      'or after explicit human "open anyway" escalation.',
     publishSchema,
     async (args) => {
       const text = await runPublish(publishInputFromArgs(args), publish);
