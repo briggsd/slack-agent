@@ -22,7 +22,9 @@ export type RunnerEvent =
   // gateway-internal: the coordinator's build_spec tool asked the gateway to run the build
   // tail (a fresh implementer container on the shared volume). The manager services it and
   // feeds a BuildOutcome back via next(); it never crosses the container boundary as-is.
-  | { type: 'run_build'; repo: string; volume: string };
+  // The build always targets the session's shared volume (derived from the session key), so
+  // the event carries only the repo — no volume field.
+  | { type: 'run_build'; repo: string };
 
 /**
  * The value the gateway feeds back into a run parked at an `await_approval` gate

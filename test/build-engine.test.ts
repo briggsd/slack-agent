@@ -140,6 +140,25 @@ describe('S12a — createBuildRunner runs the build-tail blueprint', () => {
     expect(baseFactory.suffixes).toHaveLength(1);
     expect(baseFactory.suffixes[0]).toBe('build');
   });
+
+  it('rejects an unsafe repo slug (traversal) with an error event before any lease or git op', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor('https://github.com/x/y/pull/1');
+    const baseFactory = new FakeRunnerFactory([[{ type: 'text', text: 'impl' }]]);
+
+    const factory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);
+    // '..' has no slash and is a traversal segment — isSafeRepoSlug must reject it.
+    const runner = await factory.createBuildRunner(TEST_SESSION_KEY, '..');
+
+    const events = await drain(runner.send(''));
+
+    expect(events.some((e) => e.type === 'error')).toBe(true);
+    expect(events.filter((e) => e.type === 'pr_opened')).toHaveLength(0);
+    // Short-circuited before the lease was minted and before any git op ran.
+    expect(broker.leases).toHaveLength(0);
+    expect(gitNodes.branches).toHaveLength(0);
+    expect(gitNodes.changeRequests).toHaveLength(0);
+  });
 });
 
 // ── Group 2: Distinct container name ─────────────────────────────────────────
@@ -223,7 +242,7 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
 
     // Router runner yields a run_build event then a text completion
     const routerScript: RunnerEvent[] = [
-      { type: 'run_build', repo: 'acme/widgets', volume: 'slackbot-ws-test' },
+      { type: 'run_build', repo: 'acme/widgets' },
       { type: 'text', text: 'build done' },
     ];
 
@@ -270,7 +289,7 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
     const slack = new FakeSlackClient();
 
     const routerScript: RunnerEvent[] = [
-      { type: 'run_build', repo: 'acme/widgets', volume: 'slackbot-ws-test' },
+      { type: 'run_build', repo: 'acme/widgets' },
       { type: 'text', text: 'build done' },
     ];
 
@@ -308,7 +327,7 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
     const slack = new FakeSlackClient();
 
     const routerScript: RunnerEvent[] = [
-      { type: 'run_build', repo: 'org/my-proj', volume: 'slackbot-ws-test' },
+      { type: 'run_build', repo: 'org/my-proj' },
       { type: 'text', text: 'done' },
     ];
 
@@ -335,6 +354,43 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(buildFactory.createCalls[0]?.repo).toBe('org/my-proj');
+  });
+
+  it('createBuildRunner failure → ok:false as data: placeholder shows the failure, router turn still completes', async () => {
+    const slack = new FakeSlackClient();
+
+    const routerScript: RunnerEvent[] = [
+      { type: 'run_build', repo: 'acme/widgets' },
+      { type: 'text', text: 'after build' },
+    ];
+    const routerFactory = new FakeRunnerFactory([[...routerScript]]);
+
+    // Tail container fails to spawn — createBuildRunner rejects.
+    const failingBuildFactory: BuildRunnerFactory = {
+      createBuildRunner(): Promise<SessionRunner> {
+        return Promise.reject(new Error('container spawn failed'));
+      },
+    };
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory: routerFactory,
+      slack,
+      buildRunnerFactory: failingBuildFactory,
+    });
+
+    await manager.enqueueNew(TEST_SESSION_KEY, {
+      message: 'go',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // The failure surfaced on the build placeholder (not orphaned, not a thrown crash)…
+    expect(slack.updates.some((u) => u.text.includes('Build failed to start'))).toBe(true);
+    // …and the router turn continued past the build (the {ok:false} resume was fed back).
+    expect(slack.updates.some((u) => u.text === 'after build')).toBe(true);
   });
 });
 

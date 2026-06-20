@@ -10,7 +10,7 @@ import type { SessionRunner, RunnerEvent, RunnerStream } from '../runner/types.j
 import type { CredentialBroker, CredentialLease } from '../broker/types.js';
 import type { GitHost } from '../broker/types.js';
 import type { GitNodeExecutor } from './git-node.js';
-import { parseOneShotTask } from './parse.js';
+import { parseOneShotTask, isSafeRepoSlug } from './parse.js';
 import { volumeNameFor } from '../runner/docker.js';
 import { REPO_ONESHOT_PROFILE_ID } from '../profiles/registry.js';
 import { blueprintFor } from './registry.js';
@@ -51,6 +51,18 @@ export class OneShotOrchestrator implements SessionRunner {
     let host: GitHost, repo: string, instruction: string;
     if (this.explicitTask !== undefined) {
       ({ host, repo, instruction } = this.explicitTask);
+      // The explicit-context path skips parseOneShotTask, so re-apply its no-traversal
+      // slug guard here. The repo ultimately flows from a container-emitted run_build
+      // event (untrusted), and is turned into the filesystem path /workspace/<slug> and
+      // passed to broker.lease — so an unsafe slug (e.g. '..') must be rejected, not
+      // sanitised. The slash→dash workdir rewrite below does NOT neutralise a bare '..'.
+      if (!isSafeRepoSlug(repo)) {
+        yield {
+          type: 'error',
+          message: 'Invalid repo slug — expected owner/name with no path traversal.',
+        } satisfies RunnerEvent;
+        return;
+      }
     } else {
       const parsed = parseOneShotTask(message);
       if (parsed === null) {
@@ -65,7 +77,8 @@ export class OneShotOrchestrator implements SessionRunner {
     const branch = `slackbot/oneshot-${self.taskId}`;
     // Stable workdir derived from the repo slug (ALL slashes → dashes, so GitLab
     // subgroups collapse to one path segment). The slug is already validated safe
-    // by parseOneShotTask (no traversal). One thread = one session = one
+    // (no traversal) by parseOneShotTask on the parsed path or by the isSafeRepoSlug
+    // check above on the explicit-context path. One thread = one session = one
     // container/volume, so this fixed path is single-occupant — no per-task scoping needed.
     const repoSlug = repo.replaceAll('/', '-');
     const workdir = `/workspace/${repoSlug}`;

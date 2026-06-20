@@ -643,7 +643,7 @@ export class SessionManager {
   private async runBuild(
     session: Session,
     item: QueueItem,
-    event: { repo: string; volume: string },
+    event: { repo: string },
   ): Promise<BuildOutcome> {
     const buildFactory = this.buildRunnerFactory;
     if (buildFactory === undefined) {
@@ -652,17 +652,31 @@ export class SessionManager {
       );
     }
     const placeholder = await postPlaceholder(this.slack, item.channel, item.threadTs);
-    const runner = await buildFactory.createBuildRunner(session.key, event.repo);
+    // createBuildRunner is INSIDE the try: spawning the tail container is fallible, and a
+    // failure must come back to the coordinator as a `{ ok: false }` BuildOutcome (the whole
+    // point — failures are data), not escape as an exception that orphans the placeholder and
+    // aborts the router turn. `dispose` is guarded on whether a runner was actually created.
+    let runner: SessionRunner | undefined;
     try {
+      runner = await buildFactory.createBuildRunner(session.key, event.repo);
       const outcome = await this.driveToThread(runner.send(''), placeholder, session, item);
       if (outcome.type === 'pr_opened') return { ok: true, prUrl: outcome.url };
       if (outcome.type === 'error') return { ok: false, reason: outcome.message };
       if (outcome.type === 'abandoned') return { ok: false, reason: outcome.reason };
       return { ok: false, reason: 'build finished without opening a PR' };
     } catch (err: unknown) {
-      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+      const reason = err instanceof Error ? err.message : String(err);
+      // Surface the failure on the build placeholder so it isn't stranded in 'thinking'.
+      if (placeholder !== null) {
+        try {
+          await updatePlaceholder(this.slack, placeholder, `:x: Build failed to start: ${reason}`);
+        } catch {
+          // best effort — must not mask the real outcome
+        }
+      }
+      return { ok: false, reason };
     } finally {
-      await runner.dispose();   // ALWAYS dispose the tail container, both paths
+      if (runner !== undefined) await runner.dispose();   // dispose only if it was created
     }
   }
 
