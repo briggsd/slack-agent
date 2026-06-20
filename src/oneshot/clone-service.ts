@@ -12,6 +12,15 @@ import type { CloneService, CloneServiceRequest, CloneOutcome } from '../runner/
 import type { CredentialBroker, CredentialLease } from '../broker/types.js';
 import type { GitNodeExecutor } from './git-node.js';
 
+/**
+ * A strict "owner/name" slug. The repo is model-chosen (the agent names it via the
+ * clone_repo tool) and untrusted, then interpolated into the clone URL and the workdir
+ * path — so validate its shape before leasing/cloning, mirroring SAFE_USERNAME in
+ * docker-git-node.ts. Rejects traversal ('../'), extra path segments, and URL-meaningful
+ * characters. Defense-in-depth: the host is hardcoded and git runs via argv (no shell).
+ */
+const SAFE_REPO_SLUG = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
 export class RealCloneService implements CloneService {
   constructor(
     private readonly broker: CredentialBroker,
@@ -19,6 +28,9 @@ export class RealCloneService implements CloneService {
   ) {}
 
   async clone(req: CloneServiceRequest): Promise<CloneOutcome> {
+    if (!SAFE_REPO_SLUG.test(req.repo)) {
+      return { ok: false, error: 'invalid repo (expected "owner/name")' };
+    }
     // Correlation id mirrors orchestrator.ts style
     const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     // Derive workdir: all slashes → dashes (same recipe as orchestrator.ts)

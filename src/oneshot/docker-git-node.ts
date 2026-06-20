@@ -123,6 +123,11 @@ function dockerCheckEnv(): NodeJS.ProcessEnv {
  * failure carries a diagnosable reason. Resolves on exit 0, rejects otherwise.
  * Git's credential exchange happens over its own channel, so container stderr carries
  * only error text (e.g. "Authentication failed") — never the token.
+ *
+ * When `timeoutMs` is set, a stalled op (network/daemon hang) is bounded: the child is
+ * SIGKILLed and the promise rejects with a timeout error rather than pending forever.
+ * The conversational clone path passes one so a hung `docker run git clone` cannot wedge
+ * the turn (and the in-container `clone_repo` tool parked on its result) indefinitely.
  */
 function runDocker(
   spawnFn: SpawnFn,
@@ -130,12 +135,22 @@ function runDocker(
   token: string,
   what: string,
   context: string,
+  timeoutMs?: number,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const child: ChildProcess = spawnFn('docker', args, {
       env: dockerCliEnv(token),
       stdio: ['ignore', 'ignore', 'pipe'],
     });
+
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      fn();
+    };
 
     let stderr = '';
     child.stderr?.on('data', (chunk: Buffer | string) => {
@@ -144,17 +159,32 @@ function runDocker(
       }
     });
 
-    child.once('error', (err) => reject(err));
-    child.once('exit', (code) => {
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        // Kill the stalled child; `docker run --rm` cleans the container on the client's death.
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        settle(() => reject(new Error(`${what} timed out after ${String(timeoutMs)}ms [${context}]`)));
+      }, timeoutMs);
+      if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+        (timer as { unref(): void }).unref();
+      }
+    }
+
+    child.once('error', (err) => settle(() => reject(err)));
+    child.once('exit', (code) => settle(() => {
       if (code === 0) {
         resolve();
         return;
       }
       const detail = stderr.trim().slice(0, 500);
       reject(new Error(`${what} failed (exit ${String(code)}) [${context}]${detail !== '' ? `: ${detail}` : ''}`));
-    });
+    }));
   });
 }
+
+/** Default bound on a single clone (ms). Generous for a shallow clone; just a liveness
+ *  guard so a stalled `docker run git clone` can't hang the turn. Not a tuning knob. */
+const DEFAULT_CLONE_TIMEOUT_MS = 120_000;
 
 export class DockerGitNodeExecutor implements GitNodeExecutor {
   private readonly image: string;
@@ -163,6 +193,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
   private readonly lintCmd: string | undefined;
   private readonly testCmd: string | undefined;
   private readonly checkCmds: ReadonlyMap<string, { lint?: string; test?: string }>;
+  private readonly cloneTimeoutMs: number;
 
   constructor(opts: {
     image: string;
@@ -171,6 +202,8 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     lintCmd?: string;
     testCmd?: string;
     checkCmds?: ReadonlyMap<string, { lint?: string; test?: string }>;
+    /** Bound on a single clone in ms (default 120000). A stalled clone is killed and rejects. */
+    cloneTimeoutMs?: number;
   }) {
     this.image = opts.image;
     this.spawnFn = opts.spawn ?? nodeSpawn;
@@ -178,6 +211,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     this.lintCmd = opts.lintCmd;
     this.testCmd = opts.testCmd;
     this.checkCmds = opts.checkCmds ?? new Map();
+    this.cloneTimeoutMs = opts.cloneTimeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS;
   }
 
   /**
@@ -215,7 +249,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     ];
 
     const args = this.dockerRunArgs(req.volume, gitArgs);
-    await runDocker(this.spawnFn, args, req.lease.token, 'git clone', `repo: ${req.repo}`);
+    await runDocker(this.spawnFn, args, req.lease.token, 'git clone', `repo: ${req.repo}`, this.cloneTimeoutMs);
   }
 
   async branch(req: BranchRequest): Promise<void> {

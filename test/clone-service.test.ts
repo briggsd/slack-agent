@@ -52,6 +52,20 @@ describe('RealCloneService', () => {
     expect(broker.revokes).toHaveLength(1); // lease was still revoked
   });
 
+  it('rejects an invalid repo slug before leasing or cloning (defense-in-depth)', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const svc = new RealCloneService(broker, gitNodes);
+
+    for (const bad of ['../etc/passwd', 'owner', 'owner/repo/extra', 'owner/re po', '']) {
+      const outcome = await svc.clone({ repo: bad, volume: 'vol' });
+      expect(outcome.ok).toBe(false);
+    }
+    // No lease minted and no clone attempted for any rejected slug.
+    expect(broker.leases).toHaveLength(0);
+    expect(gitNodes.clones).toHaveLength(0);
+  });
+
   it('on broker failure: returns ok:false+error, no clone called', async () => {
     const broker = new FakeBroker();
     broker.lease = async () => { throw new Error('no token'); };

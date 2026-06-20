@@ -437,7 +437,9 @@ export class DockerRunner implements SessionRunner {
             continue;
           } else if (parsed.type === 'request_clone') {
             // The container requested a credentialed clone (the credential never enters the agent env).
-            // Validate the line as data; service it inline — no human hop, no deadline reset.
+            // Validate the line as data; service it inline — no human hop. The clone is bounded by
+            // the git node's own clone timeout (docker-git-node.ts), so this await cannot hang the
+            // turn even though it sits outside the nextLineWithTimeout race.
             if (typeof parsed.id !== 'string') {
               // No usable id — can't correlate
               console.error('[gateway] malformed request_clone: missing id — skipping');
@@ -478,6 +480,10 @@ export class DockerRunner implements SessionRunner {
               ? { type: 'clone_result', id: cloneId, ok: true, workdir: cloneOutcome.workdir }
               : { type: 'clone_result', id: cloneId, ok: false, error: cloneOutcome.error };
             self.child.stdin.write(JSON.stringify(cloneResult) + '\n');
+            // The clone is gateway-side work (lease + ephemeral git container), not the agent's —
+            // give the post-clone continuation a fresh turn budget rather than charging it the
+            // clone's wall-clock, the same reasoning the approval branch resets `deadline`.
+            deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
             yield { type: 'error', message: parsed.message } as RunnerEvent;
