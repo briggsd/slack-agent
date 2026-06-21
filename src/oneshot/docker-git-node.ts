@@ -282,9 +282,14 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
   }
 
   async branch(req: BranchRequest): Promise<void> {
-    // git -C <workdir> checkout -b <branch> — purely local, no credential needed.
+    // git -C <workdir> checkout -B <branch> — purely local, no credential needed.
+    // -B (not -b): a session's build branch is deterministic (branchForTask) and the workspace
+    // volume persists across builds, so a 2nd build_spec in the same thread would hit an existing
+    // branch and fail with exit 128 ("already exists"), dead-ending the iterate loop. -B points the
+    // branch at the current HEAD whether or not it exists — idempotent, and it keeps the thread's
+    // evolving work stacked on the prior build (the deterministic per-session branch is one PR).
     // Pass an empty token; dockerRunArgs injects -e GIT_TOKEN but no git op here reads it.
-    const gitArgs = ['-C', req.workdir, 'checkout', '-b', req.branch];
+    const gitArgs = ['-C', req.workdir, 'checkout', '-B', req.branch];
     const args = this.dockerRunArgs(req.volume, gitArgs);
     await runDocker(this.spawnFn, args, '', 'git branch', `repo: ${req.repo}, branch: ${req.branch}`);
   }
