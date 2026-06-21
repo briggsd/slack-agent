@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { runBuildSpec } from '../src/main.js';
+import { buildApprovalSpecRef, runBuildSpec } from '../src/main.js';
 import type { ReadFileFn } from '../src/main.js';
 import type { ApprovalResult } from '../src/approval.js';
 import type { BuildOutcome } from '../src/build.js';
@@ -38,6 +38,20 @@ function makeRequestBuild(outcome: BuildOutcome): { fn: (repo: string) => Promis
 // ── runBuildSpec ─────────────────────────────────────────────────────────────
 
 describe('runBuildSpec', () => {
+  it('invalid repo → refuses before reading SPEC or requesting approval', async () => {
+    const readFile: ReadFileFn = async () => {
+      throw new Error('should not read');
+    };
+    const submit = makeSubmitSpec({ status: 'approved' });
+    const build = makeRequestBuild({ ok: true });
+
+    const result = await runBuildSpec('owner/repo/extra', readFile, submit.fn, build.fn);
+
+    expect(result).toContain('Invalid repo');
+    expect(submit.calls).toHaveLength(0);
+    expect(build.calls).toHaveLength(0);
+  });
+
   it('null spec → "write SPEC.md first"; submitSpec and requestBuild NOT called', async () => {
     const readFile: ReadFileFn = async () => null;
     const submit = makeSubmitSpec({ status: 'approved' });
@@ -144,7 +158,7 @@ describe('runBuildSpec', () => {
     expect(build.calls[0]).toBe('owner/repo');
   });
 
-  it('submitSpec receives the spec content from readSpecForApproval', async () => {
+  it('submitSpec receives the target repo bound to the spec content', async () => {
     const readFile: ReadFileFn = async (path) => {
       if (path === '/workspace/SPEC.md') return 'The spec content';
       return null;
@@ -154,7 +168,15 @@ describe('runBuildSpec', () => {
 
     await runBuildSpec('owner/repo', readFile, submit.fn, build.fn);
 
-    expect(submit.calls[0]).toBe('The spec content');
+    expect(submit.calls[0]).toBe(buildApprovalSpecRef('owner/repo', 'The spec content'));
+    expect(submit.calls[0]).toContain('Target repository: owner/repo');
+    expect(submit.calls[0]).toContain('<SPEC.md>\nThe spec content\n</SPEC.md>');
+  });
+
+  it('changing only the repo changes the approval payload', () => {
+    expect(buildApprovalSpecRef('owner/repo', 'same spec')).not.toBe(
+      buildApprovalSpecRef('other/repo', 'same spec'),
+    );
   });
 
   it('repo slug is passed through to requestBuild exactly as provided', async () => {

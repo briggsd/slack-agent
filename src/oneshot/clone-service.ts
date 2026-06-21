@@ -25,11 +25,15 @@ export class RealCloneService implements CloneService {
   constructor(
     private readonly broker: CredentialBroker,
     private readonly gitNodes: GitNodeExecutor,
+    private readonly opts: { allowedRepos: ReadonlySet<string> },
   ) {}
 
   async clone(req: CloneServiceRequest): Promise<CloneOutcome> {
     if (!SAFE_REPO_SLUG.test(req.repo)) {
       return { ok: false, error: 'invalid repo (expected "owner/name")' };
+    }
+    if (!this.opts.allowedRepos.has(req.repo.toLowerCase())) {
+      return { ok: false, error: 'repo not allowed' };
     }
     // Correlation id mirrors orchestrator.ts style
     const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;

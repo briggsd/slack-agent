@@ -108,7 +108,9 @@ async function main(): Promise<void> {
       ...(oc.testCommand !== undefined ? { testCmd: oc.testCommand } : {}),
       ...(oc.checkCmds.size > 0 ? { checkCmds: oc.checkCmds } : {}),
     });
-    const cloneService = new RealCloneService(broker, gitNodes);
+    const cloneService = new RealCloneService(broker, gitNodes, {
+      allowedRepos: oc.cloneRepoAllowlist,
+    });
     const publishService = new RealPublishService(broker, gitNodes);
     const checkService = new RealCheckService(gitNodes);
 

@@ -57,6 +57,11 @@ export interface OneShotConfig {
   /** Per-host bot-account tokens. Absent host → that host is unavailable (lease throws). */
   githubToken: string | undefined;
   gitlabToken: string | undefined;
+  /**
+   * Exact GitHub owner/name slugs the conversational clone_repo tool may clone.
+   * Empty = deny all model-chosen clones.
+   */
+  cloneRepoAllowlist: ReadonlySet<string>;
   /** Override shell command for the lint check (default: auto-detect via package.json). */
   lintCommand: string | undefined;
   /** Override shell command for the test check (default: auto-detect via package.json). */
@@ -102,6 +107,42 @@ export function parseCheckCmds(raw: string | undefined): ReadonlyMap<string, Rep
     // "has overrides" signal — the wiring sites gate on it. An all-invalid entry would
     // resolve identically (fall through to global/auto-detect), just with a misleading size.
     if (entry.lint !== undefined || entry.test !== undefined) result.set(key, entry);
+  }
+  return result;
+}
+
+function isSafeOwnerRepoSlug(repo: string): boolean {
+  const segments = repo.split('/');
+  if (segments.length !== 2) return false;
+  for (const segment of segments) {
+    if (
+      segment === '' ||
+      segment === '.' ||
+      segment === '..' ||
+      !/^[A-Za-z0-9._-]+$/.test(segment)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Parse CLONE_REPO_ALLOWLIST as a comma-separated list of exact owner/name slugs.
+ * This is intentionally strict: an invalid entry fails startup so operators do not
+ * accidentally believe a model-chosen repo was authorized when it was not.
+ */
+export function parseRepoAllowlist(raw: string | undefined): ReadonlySet<string> {
+  if (raw === undefined || raw.trim() === '') return new Set();
+
+  const result = new Set<string>();
+  for (const part of raw.split(',')) {
+    const repo = part.trim();
+    if (repo === '') continue;
+    if (!isSafeOwnerRepoSlug(repo)) {
+      throw new Error(`Invalid CLONE_REPO_ALLOWLIST entry "${repo}": expected owner/name`);
+    }
+    result.add(repo.toLowerCase());
   }
   return result;
 }
@@ -168,6 +209,7 @@ export function loadConfig(): Config {
       GIT_IMAGE: optionalEnvString('GIT_IMAGE', 'slackbot-runner:latest'),
       githubToken: optionalEnvMaybe('GITHUB_BOT_TOKEN'),
       gitlabToken: optionalEnvMaybe('GITLAB_BOT_TOKEN'),
+      cloneRepoAllowlist: parseRepoAllowlist(process.env['CLONE_REPO_ALLOWLIST']),
       lintCommand: optionalEnvMaybe('ONESHOT_LINT_CMD'),
       testCommand: optionalEnvMaybe('ONESHOT_TEST_CMD'),
       checkCmds: parseCheckCmds(process.env['ONESHOT_CHECK_CMDS']),

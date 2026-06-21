@@ -204,6 +204,32 @@ export async function readSpecForApproval(readFile: ReadFileFn): Promise<string 
   return content;
 }
 
+export function buildApprovalSpecRef(repo: string, spec: string): string {
+  return [
+    `Target repository: ${repo}`,
+    '',
+    '<SPEC.md>',
+    spec,
+    '</SPEC.md>',
+  ].join('\n');
+}
+
+function isSafeOwnerRepoSlug(repo: string): boolean {
+  const segments = repo.split('/');
+  if (segments.length !== 2) return false;
+  for (const segment of segments) {
+    if (
+      segment === '' ||
+      segment === '.' ||
+      segment === '..' ||
+      !/^[A-Za-z0-9._-]+$/.test(segment)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * The build_spec tool flow: read the spec, get the human verdict (phase ①), and on approval
  * run the build (phase ②). Returns the text the tool surfaces to the model. Exported so it is
@@ -215,11 +241,15 @@ export async function runBuildSpec(
   submitSpec: (specRef: string) => Promise<ApprovalResult>,
   requestBuild: (repo: string) => Promise<BuildOutcome>,
 ): Promise<string> {
+  if (!isSafeOwnerRepoSlug(repo)) {
+    return 'Invalid repo. Pass the exact "owner/name" repository you cloned.';
+  }
   const specRef = await readSpecForApproval(readFile);
   if (specRef === null) {
     return 'No spec found. Write your plan to /workspace/SPEC.md first, then call build_spec.';
   }
-  const verdict = await submitSpec(specRef);
+  const approvalSpecRef = buildApprovalSpecRef(repo, specRef);
+  const verdict = await submitSpec(approvalSpecRef);
   if (verdict.status === 'requested') {
     return 'APPROVAL REQUESTED. The SPEC was sent to the user for review. End your turn now and ask the user to reply in the thread with approval or requested changes. On the next user reply for this pending gate, call build_spec again with the same repo; if the gateway authenticated approval, it will build without asking again.';
   }

@@ -136,6 +136,7 @@ function runDocker(
   what: string,
   context: string,
   timeoutMs?: number,
+  timeoutContainerName?: string,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const child: ChildProcess = spawnFn('docker', args, {
@@ -161,7 +162,21 @@ function runDocker(
 
     if (timeoutMs !== undefined) {
       timer = setTimeout(() => {
-        // Kill the stalled child; `docker run --rm` cleans the container on the client's death.
+        // Kill the container by name first: a killed docker CLI client can leave `docker run --rm`
+        // containers behind when the daemon keeps the run alive.
+        if (timeoutContainerName !== undefined) {
+          try {
+            const cleanup = spawnFn('docker', ['rm', '-f', timeoutContainerName], {
+              env: dockerCheckEnv(),
+              stdio: 'ignore',
+            });
+            cleanup.once('error', () => {
+              /* best-effort cleanup */
+            });
+          } catch {
+            /* best-effort cleanup */
+          }
+        }
         try { child.kill('SIGKILL'); } catch { /* already gone */ }
         settle(() => reject(new Error(`${what} timed out after ${String(timeoutMs)}ms [${context}]`)));
       }, timeoutMs);
@@ -194,6 +209,16 @@ export const DIFF_BASE_REF = 'refs/slack-agent/base';
 
 function normalizeRemoteUrl(url: string): string {
   return url.trim().replace(/\.git$/, '').toLowerCase();
+}
+
+function dockerNamePart(value: string): string {
+  const safe = value.replace(/[^A-Za-z0-9_.-]/g, '-');
+  return safe.slice(0, 48);
+}
+
+function gitCloneContainerName(repo: string): string {
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `slackbot-git-clone-${dockerNamePart(repo)}-${suffix}`;
 }
 
 export class DockerGitNodeExecutor implements GitNodeExecutor {
@@ -230,10 +255,11 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
    * ENTRYPOINT that runs the agent, so passing git args without overriding the
    * entrypoint would silently run the agent instead of git.
    */
-  private dockerRunArgs(volume: string, gitArgs: string[]): string[] {
+  private dockerRunArgs(volume: string, gitArgs: string[], containerName?: string): string[] {
     return [
       'run',
       '--rm',
+      ...(containerName !== undefined ? ['--name', containerName] : []),
       '-v', `${volume}:/workspace`,
       '-e', 'GIT_TOKEN',   // name-only: value inherited from spawn env, never in argv
       '--security-opt', 'no-new-privileges',
@@ -258,8 +284,17 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
       req.workdir,
     ];
 
-    const args = this.dockerRunArgs(req.volume, gitArgs);
-    await runDocker(this.spawnFn, args, req.lease.token, 'git clone', `repo: ${req.repo}`, this.cloneTimeoutMs);
+    const cloneContainerName = gitCloneContainerName(req.repo);
+    const args = this.dockerRunArgs(req.volume, gitArgs, cloneContainerName);
+    await runDocker(
+      this.spawnFn,
+      args,
+      req.lease.token,
+      'git clone',
+      `repo: ${req.repo}`,
+      this.cloneTimeoutMs,
+      cloneContainerName,
+    );
 
     // Capture the clone's checked-out default-branch HEAD under a stable local ref.
     // Later build work happens on a branch from this commit, so the coordinator can

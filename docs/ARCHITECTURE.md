@@ -242,6 +242,7 @@ container is ever executed on the host.
 | `RUNNER_MEMORY` / `RUNNER_CPUS` / `RUNNER_PIDS_LIMIT` | `512m` / `1.0` / `256` | Per-container caps |
 | `GITHUB_BOT_TOKEN` / `GITLAB_BOT_TOKEN` | — | Bot-account tokens for one-shot repo tasks. Held gateway-side; carried only by the deterministic git nodes, never injected into the agent sandbox. Under `RUNNER_BACKEND=fake` the broker is faked and these are unused. |
 | `GIT_IMAGE` | `slackbot-runner:latest` | Image for the ephemeral credentialed git nodes (clone/push) |
+| `CLONE_REPO_ALLOWLIST` | empty | Comma-separated exact GitHub `owner/name` slugs the conversational `clone_repo` tool may clone. Empty/unset denies model-chosen clones before leasing or spawning Docker; malformed entries fail startup. |
 
 ---
 

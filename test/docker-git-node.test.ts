@@ -258,6 +258,9 @@ describe('DockerGitNodeExecutor — clone', () => {
     expect(command).toBe('docker');
     expect(args).toContain('run');
     expect(args).toContain('--rm');
+    expect(args).toContain('--name');
+    const nameIdx = args.indexOf('--name');
+    expect(args[nameIdx + 1]).toMatch(/^slackbot-git-clone-owner-repo-/);
     expect(args).toContain('-e');
 
     // Volume mount
@@ -354,9 +357,15 @@ describe('DockerGitNodeExecutor — clone', () => {
   it('TIMEOUT: a clone that never exits is killed and rejects (no token in message)', async () => {
     // A spawn that returns a child which never emits exit/error — a stalled `docker run`.
     let killed = false;
-    const fake = new FakeChildProcess();
-    fake.kill = (): boolean => { killed = true; return true; };
-    const spawnFn: SpawnFn = () => fake.asChildProcess();
+    const runFake = new FakeChildProcess();
+    const cleanupFake = new FakeChildProcess();
+    runFake.kill = (): boolean => { killed = true; return true; };
+    const calls: SpawnCall[] = [];
+    const spawnFn: SpawnFn = (command, args, options) => {
+      const fake = calls.length === 0 ? runFake : cleanupFake;
+      calls.push({ command, args, options, fake });
+      return fake.asChildProcess();
+    };
     // Tiny timeout so the real timer fires fast; default is 120s.
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, cloneTimeoutMs: 10 });
 
@@ -364,6 +373,15 @@ describe('DockerGitNodeExecutor — clone', () => {
       exec.clone({ lease: makeLease(token), repo: 'owner/repo', workdir, volume }),
     ).rejects.toThrow(/git clone timed out/);
     expect(killed).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.args).toContain('--name');
+    const nameIdx = calls[0]?.args.indexOf('--name') ?? -1;
+    const containerName = calls[0]?.args[nameIdx + 1];
+    expect(containerName).toMatch(/^slackbot-git-clone-owner-repo-/);
+    expect(calls[1]?.args).toEqual(['rm', '-f', containerName]);
+    const cleanupEnv = calls[1]?.options.env as Record<string, string | undefined>;
+    expect(cleanupEnv['GIT_TOKEN']).toBeUndefined();
+    expect(cleanupFake.listenerCount('error')).toBeGreaterThan(0);
   });
 
   it('rejects with an Error (no token in message) when docker exits non-zero', async () => {
