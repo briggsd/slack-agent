@@ -598,6 +598,9 @@ export class DockerRunner implements SessionRunner {
               ? { type: 'publish_result', id: publishId, ok: true, prUrl: publishOutcome.prUrl }
               : { type: 'publish_result', id: publishId, ok: false, reason: publishOutcome.reason };
             self.child.stdin.write(JSON.stringify(publishResult satisfies GatewayToRunnerMessage) + '\n');
+            if (publishOutcome.ok) {
+              yield { type: 'pr_opened', url: publishOutcome.prUrl } as RunnerEvent;
+            }
             // Publishing is gateway-side work (lease + push + PR), not the agent's — give the
             // post-publish continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;

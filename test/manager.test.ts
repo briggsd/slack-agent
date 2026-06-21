@@ -1307,9 +1307,9 @@ describe('SessionManager — audit emission', () => {
     expect(prAudits[0]?.reasoning).toBeNull();
     expect(prAudits[0]?.cost_tokens).toBeNull();
 
-    // Slack placeholder must show "Opened PR: <url>" (the smoke-harness contract).
-    expect(slack.updates.some((u) => u.text.includes('Opened PR:'))).toBe(true);
-    expect(slack.updates.some((u) => u.text.includes('http://x/pr/1'))).toBe(true);
+    // Slack placeholder must show exactly one "Opened PR: <url>" surface.
+    const openPrUpdates = slack.updates.filter((u) => u.text === 'Opened PR: http://x/pr/1');
+    expect(openPrUpdates).toHaveLength(1);
   });
 
   it('a started exec reconciles to a terminal audit (started → succeeded_pr), summary is the PR URL only', async () => {
