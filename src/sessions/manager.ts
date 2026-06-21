@@ -16,6 +16,7 @@ import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
 import type { SessionStore, AuditEvent } from './store.js';
 import { NoopSessionStore } from './store.js';
 import type { SpendCapsConfig } from '../config.js';
+import type { PrStateReader } from './pr-state-reader.js';
 
 /**
  * The outcome of a `driveToThread` run — used by both the router drain path
@@ -116,12 +117,16 @@ export class SessionManager {
   private readonly volumeReaper: VolumeReaper | undefined;
   private readonly volumeTtlMs: number;
   private readonly gcIntervalMs: number;
+  private readonly prStateReader: PrStateReader | undefined;
+  private readonly prStaleAfterMs: number;
   private readonly spendCaps: SpendCapsConfig;
   private readonly now: () => number;
   private readonly buildRunnerFactory: BuildRunnerFactory | undefined;
   private readonly pendingApprovalRetentionMs: number;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private gcRunning = false;
+  private prReconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private prReconcileRunning = false;
 
   constructor(opts: {
     idleTimeoutMs: number;
@@ -139,6 +144,10 @@ export class SessionManager {
     volumeTtlMs?: number;
     /** Interval for the GC sweep in ms (default 1 hour). */
     gcIntervalMs?: number;
+    /** When provided, starts an unref'd PR reconciliation interval on the GC cadence. */
+    prStateReader?: PrStateReader;
+    /** How long an open PR can sit before it is marked stale (default 30 days). */
+    prStaleAfterMs?: number;
     /** Rolling dollar caps enforced at admission and pre-dispatch. All-zero = disabled (default). */
     spendCaps?: SpendCapsConfig;
     /** Clock injectable for testable 24h windows. Default: () => Date.now(). */
@@ -159,6 +168,8 @@ export class SessionManager {
     this.volumeReaper = opts.volumeReaper;
     this.volumeTtlMs = opts.volumeTtlMs ?? 7 * 24 * 60 * 60 * 1000;
     this.gcIntervalMs = opts.gcIntervalMs ?? 60 * 60 * 1000;
+    this.prStateReader = opts.prStateReader;
+    this.prStaleAfterMs = opts.prStaleAfterMs ?? 30 * 24 * 60 * 60 * 1000;
     this.spendCaps = opts.spendCaps ?? DISABLED_CAPS;
     this.now = opts.now ?? (() => Date.now());
     this.buildRunnerFactory = opts.buildRunnerFactory;
@@ -175,6 +186,16 @@ export class SessionManager {
         (timer as { unref(): void }).unref();
       }
       this.gcTimer = timer;
+    }
+
+    if (this.prStateReader !== undefined) {
+      const timer = setInterval(() => {
+        void this.runPrReconciliation();
+      }, this.gcIntervalMs);
+      if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+        (timer as { unref(): void }).unref();
+      }
+      this.prReconcileTimer = timer;
     }
   }
 
@@ -1224,11 +1245,57 @@ export class SessionManager {
     }
   }
 
+  async runPrReconciliation(): Promise<void> {
+    if (this.prReconcileRunning) return;
+    this.prReconcileRunning = true;
+    try {
+      const reader = this.prStateReader;
+      if (reader === undefined) return;
+
+      const rows = this.store.listOpenPullRequests();
+      for (const row of rows) {
+        try {
+          const polledAt = this.now();
+          if (polledAt - row.opened_at > this.prStaleAfterMs) {
+            this.store.resolvePullRequest(row.id, 'stale', polledAt);
+            continue;
+          }
+
+          const st = await reader.getState({ repo: row.repo, number: row.pr_number });
+          const settledAt = this.now();
+          if (st.status === 'merged') {
+            this.store.resolvePullRequest(
+              row.id,
+              st.headSha === row.head_sha ? 'merged_clean' : 'merged_intervened',
+              settledAt,
+            );
+          } else if (st.status === 'closed') {
+            this.store.resolvePullRequest(row.id, 'closed', settledAt);
+          } else {
+            this.store.touchPullRequestPolled(row.id, settledAt);
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[session] pr reconcile error for ${row.repo}#${row.pr_number}: ${msg}`);
+        }
+      }
+    } finally {
+      this.prReconcileRunning = false;
+    }
+  }
+
   /** Stop the GC interval (called from disposeAll on clean shutdown). */
   stopVolumeGc(): void {
     if (this.gcTimer !== null) {
       clearInterval(this.gcTimer);
       this.gcTimer = null;
+    }
+  }
+
+  stopPrReconciliation(): void {
+    if (this.prReconcileTimer !== null) {
+      clearInterval(this.prReconcileTimer);
+      this.prReconcileTimer = null;
     }
   }
 
@@ -1245,6 +1312,7 @@ export class SessionManager {
   /** Dispose all sessions (cleanup) */
   async disposeAll(): Promise<void> {
     this.stopVolumeGc();
+    this.stopPrReconciliation();
     const keys = Array.from(this.sessions.keys());
     for (const key of keys) {
       await this.reapSession(key, true);

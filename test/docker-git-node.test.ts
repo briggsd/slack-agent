@@ -243,6 +243,101 @@ describe('GithubProvider', () => {
       fetchFn: fakeFetch as typeof fetch,
     })).rejects.toThrow('GitHub API returned no head.sha for the pull request');
   });
+
+  it('getChangeRequestState maps a merged PR and returns head.sha', async () => {
+    const fetchCalls: { url: string; init: RequestInit }[] = [];
+    const fakeFetch = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      fetchCalls.push({ url: String(url), init: init ?? {} });
+      return Promise.resolve(makeResponse({
+        merged: true,
+        state: 'closed',
+        head: { sha: 'merge-head-sha' },
+      }));
+    };
+
+    const result = await provider.getChangeRequestState({
+      repo: 'owner/repo',
+      number: 9,
+      token: 'tok-state',
+      fetchFn: fakeFetch as typeof fetch,
+    });
+
+    expect(result).toEqual({ status: 'merged', headSha: 'merge-head-sha' });
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]?.url).toBe('https://api.github.com/repos/owner/repo/pulls/9');
+    const headers = fetchCalls[0]?.init.headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer tok-state');
+    expect(headers['Accept']).toBe('application/vnd.github+json');
+    expect(headers['User-Agent']).toBe('slack-agent');
+  });
+
+  it('getChangeRequestState maps a closed-unmerged PR', async () => {
+    const fakeFetch = (): Promise<Response> =>
+      Promise.resolve(makeResponse({
+        merged: false,
+        state: 'closed',
+        head: { sha: 'closed-head-sha' },
+      }));
+
+    await expect(provider.getChangeRequestState({
+      repo: 'owner/repo',
+      number: 10,
+      token: 'tok-state',
+      fetchFn: fakeFetch as typeof fetch,
+    })).resolves.toEqual({ status: 'closed', headSha: 'closed-head-sha' });
+  });
+
+  it('getChangeRequestState maps an open PR', async () => {
+    const fakeFetch = (): Promise<Response> =>
+      Promise.resolve(makeResponse({
+        merged: false,
+        state: 'open',
+        head: { sha: 'open-head-sha' },
+      }));
+
+    await expect(provider.getChangeRequestState({
+      repo: 'owner/repo',
+      number: 11,
+      token: 'tok-state',
+      fetchFn: fakeFetch as typeof fetch,
+    })).resolves.toEqual({ status: 'open', headSha: 'open-head-sha' });
+  });
+
+  it('getChangeRequestState throws on non-2xx response without leaking the token', async () => {
+    const token = 'state-secret-token';
+    const fakeFetch = (): Promise<Response> =>
+      Promise.resolve(makeResponse({ message: 'Not Found' }, 404));
+
+    await expect(provider.getChangeRequestState({
+      repo: 'owner/repo',
+      number: 12,
+      token,
+      fetchFn: fakeFetch as typeof fetch,
+    })).rejects.toThrow('GitHub API error 404');
+
+    await provider.getChangeRequestState({
+      repo: 'owner/repo',
+      number: 12,
+      token,
+      fetchFn: fakeFetch as typeof fetch,
+    }).catch((err: unknown) => {
+      if (err instanceof Error) {
+        expect(err.message).not.toContain(token);
+      }
+    });
+  });
+
+  it('getChangeRequestState throws when the response omits head.sha', async () => {
+    const fakeFetch = (): Promise<Response> =>
+      Promise.resolve(makeResponse({ merged: false, state: 'open', head: {} }));
+
+    await expect(provider.getChangeRequestState({
+      repo: 'owner/repo',
+      number: 13,
+      token: 'tok-state',
+      fetchFn: fakeFetch as typeof fetch,
+    })).rejects.toThrow('GitHub API returned no head.sha for the pull request');
+  });
 });
 
 // ── credentialHelper (shell-injection guard) ─────────────────────────────────

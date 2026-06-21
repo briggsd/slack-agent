@@ -80,6 +80,8 @@ export interface PullRequestRow {
   resolved_at: number | null;
 }
 
+export type PullRequestTerminalState = 'merged_clean' | 'merged_intervened' | 'closed' | 'stale';
+
 /** Minimal shape required to record a newly opened pull request. */
 export type NewPullRequestRow = Pick<
   PullRequestRow,
@@ -106,12 +108,23 @@ export interface SessionStore {
    */
   getAuditEvents(sessionKey: string): AuditEvent[];
   /**
-   * Reconciliation worklist helper: list only rows still marked open. NOT
-   * tenancy-scoped (no team_id filter). The slice-3 acceptance-rate rollup must
-   * scope by team (WHERE team_id = ?) before any user-facing query path consumes
-   * pull_requests data — the row carries team_id for exactly that.
+   * Reconciliation worklist helper: open rows, oldest-polled first, **bounded**
+   * (one sweep can't fan out to unbounded serial GitHub polls — the rest drains on
+   * later sweeps). NOT tenancy-scoped (no team_id filter). The slice-3 acceptance-rate
+   * rollup must scope by team (WHERE team_id = ?) before any user-facing query path
+   * consumes pull_requests data — the row carries team_id for exactly that.
    */
   listOpenPullRequests(): PullRequestRow[];
+  /** Mark a tracked PR as terminal and stamp both resolved_at and last_polled_at. */
+  resolvePullRequest(id: number, state: PullRequestTerminalState, resolvedAtMs: number): void;
+  /** Record a successful poll while the PR remains open. */
+  touchPullRequestPolled(id: number, polledAtMs: number): void;
+  /**
+   * Test/diagnostic helper only — it is NOT tenancy-scoped (no team_id filter). Add a
+   * mandatory team scope (WHERE id = ? AND team_id = ?) before any user-facing query path
+   * consumes pull_requests data.
+   */
+  getPullRequest(id: number): PullRequestRow | undefined;
   /** Rows whose last_active_at is strictly older than `cutoffMs` (uses the
    *  sessions_last_active_at index). For the volume-GC sweep. */
   listExpired(cutoffMs: number): SessionRow[];
@@ -168,6 +181,9 @@ export class SqliteSessionStore implements SessionStore {
   >;
   private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
   private readonly stmtListOpenPullRequests: Database.Statement<[], PullRequestRow>;
+  private readonly stmtResolvePullRequest: Database.Statement<[string, number, number, number]>;
+  private readonly stmtTouchPullRequestPolled: Database.Statement<[number, number]>;
+  private readonly stmtGetPullRequest: Database.Statement<[number], PullRequestRow>;
   private readonly stmtListExpired: Database.Statement<[number], SessionRow>;
   private readonly stmtDeleteSession: Database.Statement<[string]>;
   private readonly stmtSumByTask: Database.Statement<[string], { total: number }>;
@@ -246,7 +262,22 @@ export class SqliteSessionStore implements SessionStore {
     `);
 
     this.stmtListOpenPullRequests = this.db.prepare<[], PullRequestRow>(
-      "SELECT * FROM pull_requests WHERE state = 'open' ORDER BY id",
+      // Bounded so one reconciliation sweep can't fan out to an unbounded set of serial
+      // GitHub polls; the remainder drains on subsequent sweeps. Oldest-polled first
+      // (never-polled rows sort first as NULL) so no open PR is starved.
+      "SELECT * FROM pull_requests WHERE state = 'open' ORDER BY last_polled_at LIMIT 500",
+    );
+
+    this.stmtResolvePullRequest = this.db.prepare<[string, number, number, number]>(
+      'UPDATE pull_requests SET state = ?, resolved_at = ?, last_polled_at = ? WHERE id = ?',
+    );
+
+    this.stmtTouchPullRequestPolled = this.db.prepare<[number, number]>(
+      'UPDATE pull_requests SET last_polled_at = ? WHERE id = ?',
+    );
+
+    this.stmtGetPullRequest = this.db.prepare<[number], PullRequestRow>(
+      'SELECT * FROM pull_requests WHERE id = ?',
     );
 
     this.stmtListExpired = this.db.prepare<[number], SessionRow>(
@@ -448,6 +479,18 @@ export class SqliteSessionStore implements SessionStore {
     return this.stmtListOpenPullRequests.all();
   }
 
+  resolvePullRequest(id: number, state: PullRequestTerminalState, resolvedAtMs: number): void {
+    this.stmtResolvePullRequest.run(state, resolvedAtMs, resolvedAtMs, id);
+  }
+
+  touchPullRequestPolled(id: number, polledAtMs: number): void {
+    this.stmtTouchPullRequestPolled.run(polledAtMs, id);
+  }
+
+  getPullRequest(id: number): PullRequestRow | undefined {
+    return this.stmtGetPullRequest.get(id);
+  }
+
   listExpired(cutoffMs: number): SessionRow[] {
     return this.stmtListExpired.all(cutoffMs);
   }
@@ -493,6 +536,9 @@ export class NoopSessionStore implements SessionStore {
   recordPullRequest(_row: NewPullRequestRow): void { /* no-op */ }
   getAuditEvents(_sessionKey: string): AuditEvent[] { return []; }
   listOpenPullRequests(): PullRequestRow[] { return []; }
+  resolvePullRequest(_id: number, _state: PullRequestTerminalState, _resolvedAtMs: number): void { /* no-op */ }
+  touchPullRequestPolled(_id: number, _polledAtMs: number): void { /* no-op */ }
+  getPullRequest(_id: number): PullRequestRow | undefined { return undefined; }
   listExpired(_cutoffMs: number): SessionRow[] { return []; }
   deleteSession(_key: string): void { /* no-op */ }
   close(): void { /* no-op */ }

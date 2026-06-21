@@ -22,9 +22,11 @@ import type {
   AuditEvent,
   NewPullRequestRow,
   PullRequestRow,
+  PullRequestTerminalState,
 } from '../src/sessions/store.js';
 import { FakeSlackClient } from './responder.test.js';
 import type { SlackClientLike } from '../src/slack/responder.js';
+import type { PrState, PrStateReader } from '../src/sessions/pr-state-reader.js';
 
 /**
  * A two-way runner that parks at an `await_approval` gate and records the resume
@@ -117,6 +119,21 @@ class SeededStore implements SessionStore {
   }
   getAuditEvents(_sessionKey: string): AuditEvent[] { return []; }
   listOpenPullRequests(): PullRequestRow[] { return this.pullRequests.filter((row) => row.state === 'open'); }
+  resolvePullRequest(id: number, state: PullRequestTerminalState, resolvedAtMs: number): void {
+    const row = this.pullRequests.find((candidate) => candidate.id === id);
+    if (row !== undefined) {
+      row.state = state;
+      row.resolved_at = resolvedAtMs;
+      row.last_polled_at = resolvedAtMs;
+    }
+  }
+  touchPullRequestPolled(id: number, polledAtMs: number): void {
+    const row = this.pullRequests.find((candidate) => candidate.id === id);
+    if (row !== undefined) row.last_polled_at = polledAtMs;
+  }
+  getPullRequest(id: number): PullRequestRow | undefined {
+    return this.pullRequests.find((row) => row.id === id);
+  }
   listExpired(_cutoffMs: number): SessionRow[] { return []; }
   deleteSession(key: string): void { this.rows.delete(key); }
   close(): void {}
@@ -980,6 +997,21 @@ class CapturingStore implements SessionStore {
   listOpenPullRequests(): PullRequestRow[] {
     return this.pullRequests.filter((row) => row.state === 'open');
   }
+  resolvePullRequest(id: number, state: PullRequestTerminalState, resolvedAtMs: number): void {
+    const row = this.pullRequests.find((candidate) => candidate.id === id);
+    if (row !== undefined) {
+      row.state = state;
+      row.resolved_at = resolvedAtMs;
+      row.last_polled_at = resolvedAtMs;
+    }
+  }
+  touchPullRequestPolled(id: number, polledAtMs: number): void {
+    const row = this.pullRequests.find((candidate) => candidate.id === id);
+    if (row !== undefined) row.last_polled_at = polledAtMs;
+  }
+  getPullRequest(id: number): PullRequestRow | undefined {
+    return this.pullRequests.find((row) => row.id === id);
+  }
   listExpired(cutoffMs: number): SessionRow[] {
     return Array.from(this.rows.values()).filter(
       (r) => r.last_active_at < cutoffMs,
@@ -1018,6 +1050,22 @@ class CapturingStore implements SessionStore {
   }
 
   private readonly execOptIns = new Set<string>();
+}
+
+class FakePrStateReader implements PrStateReader {
+  public calls: Array<{ repo: string; number: number }> = [];
+
+  constructor(private readonly responses: Map<string, PrState | Error>) {}
+
+  async getState(req: { repo: string; number: number }): Promise<PrState> {
+    this.calls.push(req);
+    const response = this.responses.get(`${req.repo}#${req.number}`);
+    if (response instanceof Error) throw response;
+    if (response === undefined) {
+      throw new Error(`missing fake PR state for ${req.repo}#${req.number}`);
+    }
+    return response;
+  }
 }
 
 /** A fake VolumeReaper that records which keys it was asked to remove. */
@@ -1862,6 +1910,186 @@ describe('SessionManager — volume GC sweep', () => {
     expect(store.deletedKeys).toHaveLength(0);
     expect(store.get('TEAM:GC:NOgc')).toBeDefined();
 
+    await manager.disposeAll();
+  });
+});
+
+describe('SessionManager — PR reconciliation', () => {
+  it('reconciles PR rows to terminal states and updates last_polled_at for still-open rows', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const store = new CapturingStore();
+    const reader = new FakePrStateReader(new Map([
+      ['owner/repo#1', { status: 'merged', headSha: 'same-sha' }],
+      ['owner/repo#2', { status: 'merged', headSha: 'different-sha' }],
+      ['owner/repo#3', { status: 'closed', headSha: 'closed-sha' }],
+      ['owner/repo#4', { status: 'open', headSha: 'open-sha' }],
+    ]));
+
+    store.pullRequests.push(
+      {
+        id: 1,
+        session_key: 'TEAM:C:1',
+        team_id: 'TEAM',
+        repo: 'owner/repo',
+        pr_number: 1,
+        head_sha: 'same-sha',
+        profile_id: 'repo-oneshot',
+        opened_at: 9_000,
+        state: 'open',
+        last_polled_at: null,
+        resolved_at: null,
+      },
+      {
+        id: 2,
+        session_key: 'TEAM:C:2',
+        team_id: 'TEAM',
+        repo: 'owner/repo',
+        pr_number: 2,
+        head_sha: 'original-sha',
+        profile_id: 'repo-oneshot',
+        opened_at: 9_000,
+        state: 'open',
+        last_polled_at: null,
+        resolved_at: null,
+      },
+      {
+        id: 3,
+        session_key: 'TEAM:C:3',
+        team_id: 'TEAM',
+        repo: 'owner/repo',
+        pr_number: 3,
+        head_sha: 'closed-sha',
+        profile_id: 'repo-oneshot',
+        opened_at: 9_000,
+        state: 'open',
+        last_polled_at: null,
+        resolved_at: null,
+      },
+      {
+        id: 4,
+        session_key: 'TEAM:C:4',
+        team_id: 'TEAM',
+        repo: 'owner/repo',
+        pr_number: 4,
+        head_sha: 'open-sha',
+        profile_id: 'repo-oneshot',
+        opened_at: 9_000,
+        state: 'open',
+        last_polled_at: null,
+        resolved_at: null,
+      },
+      {
+        id: 5,
+        session_key: 'TEAM:C:5',
+        team_id: 'TEAM',
+        repo: 'owner/repo',
+        pr_number: 5,
+        head_sha: 'stale-sha',
+        profile_id: 'repo-oneshot',
+        opened_at: 0,
+        state: 'open',
+        last_polled_at: null,
+        resolved_at: null,
+      },
+    );
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      prStateReader: reader,
+      prStaleAfterMs: 5_000,
+      now: () => 10_000,
+    });
+
+    await manager.runPrReconciliation();
+
+    expect(store.getPullRequest(1)?.state).toBe('merged_clean');
+    expect(store.getPullRequest(1)?.resolved_at).toBe(10_000);
+    expect(store.getPullRequest(1)?.last_polled_at).toBe(10_000);
+
+    expect(store.getPullRequest(2)?.state).toBe('merged_intervened');
+    expect(store.getPullRequest(2)?.resolved_at).toBe(10_000);
+
+    expect(store.getPullRequest(3)?.state).toBe('closed');
+    expect(store.getPullRequest(3)?.resolved_at).toBe(10_000);
+
+    expect(store.getPullRequest(4)?.state).toBe('open');
+    expect(store.getPullRequest(4)?.last_polled_at).toBe(10_000);
+    expect(store.getPullRequest(4)?.resolved_at).toBeNull();
+
+    expect(store.getPullRequest(5)?.state).toBe('stale');
+    expect(store.getPullRequest(5)?.resolved_at).toBe(10_000);
+    expect(reader.calls).toEqual([
+      { repo: 'owner/repo', number: 1 },
+      { repo: 'owner/repo', number: 2 },
+      { repo: 'owner/repo', number: 3 },
+      { repo: 'owner/repo', number: 4 },
+    ]);
+
+    await manager.disposeAll();
+  });
+
+  it('leaves a row open after a read error and still processes the remaining rows', async () => {
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const store = new CapturingStore();
+    const reader = new FakePrStateReader(new Map([
+      ['owner/repo#8', new Error('boom')],
+      ['owner/repo#9', { status: 'closed', headSha: 'closed-sha' }],
+    ]));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    store.pullRequests.push(
+      {
+        id: 8,
+        session_key: 'TEAM:C:8',
+        team_id: 'TEAM',
+        repo: 'owner/repo',
+        pr_number: 8,
+        head_sha: 'head-eight',
+        profile_id: 'repo-oneshot',
+        opened_at: 9_000,
+        state: 'open',
+        last_polled_at: null,
+        resolved_at: null,
+      },
+      {
+        id: 9,
+        session_key: 'TEAM:C:9',
+        team_id: 'TEAM',
+        repo: 'owner/repo',
+        pr_number: 9,
+        head_sha: 'head-nine',
+        profile_id: 'repo-oneshot',
+        opened_at: 9_000,
+        state: 'open',
+        last_polled_at: null,
+        resolved_at: null,
+      },
+    );
+
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      prStateReader: reader,
+      now: () => 10_000,
+    });
+
+    await manager.runPrReconciliation();
+
+    expect(store.getPullRequest(8)?.state).toBe('open');
+    expect(store.getPullRequest(8)?.resolved_at).toBeNull();
+    expect(store.getPullRequest(9)?.state).toBe('closed');
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[session] pr reconcile error for owner/repo#8: boom',
+    );
+
+    errorSpy.mockRestore();
     await manager.disposeAll();
   });
 });

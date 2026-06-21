@@ -23,6 +23,7 @@ import { RealCloneService } from './oneshot/clone-service.js';
 import { RealPublishService } from './oneshot/publish-service.js';
 import { RealCheckService } from './oneshot/check-service.js';
 import { RealRuntimeProvisionService } from './oneshot/runtime-provision-service.js';
+import { RealPrStateReader } from './oneshot/pr-state-reader.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -92,6 +93,7 @@ async function main(): Promise<void> {
   let baseFactory: RunnerFactory;
   let broker: CredentialBroker;
   let gitNodes: GitNodeExecutor;
+  let prStateReader: RealPrStateReader | undefined;
   // Hold the concrete docker factory in a separate reference so it can be used as a
   // VolumeReaper (baseFactory is typed RunnerFactory which doesn't have that method).
   let volumeReaper: VolumeReaper | undefined;
@@ -103,6 +105,7 @@ async function main(): Promise<void> {
     if (oc.githubToken !== undefined) botTokens.set('github', oc.githubToken);
     if (oc.gitlabToken !== undefined) botTokens.set('gitlab', oc.gitlabToken);
     broker = new BotAccountBroker(botTokens);
+    prStateReader = new RealPrStateReader(broker);
     gitNodes = new DockerGitNodeExecutor({
       image: oc.GIT_IMAGE,
       ...(oc.lintCommand !== undefined ? { lintCmd: oc.lintCommand } : {}),
@@ -156,6 +159,7 @@ async function main(): Promise<void> {
     ...(volumeReaper !== undefined && { volumeReaper }),
     volumeTtlMs: config.VOLUME_TTL_MS,
     gcIntervalMs: config.VOLUME_GC_INTERVAL_MS,
+    ...(prStateReader !== undefined && { prStateReader }),
     spendCaps: config.spendCaps,
     buildRunnerFactory: factory,
   });
