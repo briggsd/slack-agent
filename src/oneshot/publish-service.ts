@@ -117,7 +117,7 @@ export class RealPublishService implements PublishService {
 
     // Nothing to change → refuse before leasing. An empty PATCH would lease a credential,
     // round-trip to GitHub for a no-op, and falsely narrate (and audit) a completed edit.
-    // Mirrors commentPr, which requires non-empty input.
+    // commentPr has the symmetric guard for an empty comment.
     if (title === undefined && body === undefined) {
       return { ok: false, reason: 'nothing to edit (provide a title or body)' };
     }
@@ -161,6 +161,14 @@ export class RealPublishService implements PublishService {
 
     const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const branch = branchForTask(taskIdFromWorkspaceVolume(req.volume));
+    const comment = cleanOptionalText(req.comment);
+
+    // Empty/whitespace comment → refuse before leasing, symmetric with editPr's no-op
+    // guard. (docker.ts also trims+rejects at the wire boundary; this self-guards the
+    // service for any direct caller and keeps the two PR-mutation paths consistent.)
+    if (comment === undefined) {
+      return { ok: false, reason: 'nothing to comment (provide a comment)' };
+    }
 
     let lease: CredentialLease;
     try {
@@ -182,7 +190,7 @@ export class RealPublishService implements PublishService {
           lease,
           repo: req.repo,
           head: branch,
-          comment: req.comment,
+          comment,
         });
         return 'notFound' in result ? { ok: false, reason: 'no open PR for this thread' } : { ok: true, prUrl: result.prUrl };
       } catch {

@@ -244,6 +244,18 @@ describe('RealPublishService', () => {
     expect(gitNodes.repoVerifications).toHaveLength(0);
   });
 
+  it('commentPr with an empty/whitespace comment refuses before leasing', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const svc = new RealPublishService(broker, gitNodes);
+
+    const outcome = await svc.commentPr({ repo: 'owner/repo', volume: 'vol', comment: '   ' });
+
+    expect(outcome).toEqual({ ok: false, reason: 'nothing to comment (provide a comment)' });
+    expect(broker.leases).toHaveLength(0); // refused before any credential lease
+    expect(gitNodes.prComments).toHaveLength(0); // no GitHub round-trip
+  });
+
   it('commentPr maps notFound to no open PR for this thread', async () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
