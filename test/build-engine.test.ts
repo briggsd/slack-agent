@@ -445,6 +445,148 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
     expect(slack.updates.some((u) => u.text === 'after build')).toBe(true);
   });
 
+  it('over-budget at run_build boundary refuses before spawning the build tail and resumes the router', async () => {
+    const slack = new FakeSlackClient();
+    const store = new SqliteSessionStore(':memory:');
+    let releaseRouter!: () => void;
+    const routerReady = new Promise<void>((resolve) => {
+      releaseRouter = resolve;
+    });
+
+    const routerScript = async (): Promise<RunnerEvent[]> => {
+      await routerReady;
+      return [
+        { type: 'run_build', repo: 'acme/widgets' },
+        { type: 'text', text: 'router resumed' },
+      ];
+    };
+    const routerFactory = new FakeRunnerFactory([routerScript]);
+    const buildFactory = new FakeBuildFactory([[{ type: 'text', text: 'should not run' }]]);
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory: routerFactory,
+      slack,
+      store,
+      buildRunnerFactory: buildFactory,
+      spendCaps: { perTaskMicroUsd: 5_000_000, perUser24hMicroUsd: 0, perGlobal24hMicroUsd: 0 },
+    });
+
+    try {
+      const enqueue = manager.enqueueNew(TEST_SESSION_KEY, {
+        message: 'go',
+        channel: 'C',
+        threadTs: 'T',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      store.recordAudit({
+        session_key: TEST_SESSION_KEY,
+        team_id: 'TEAM',
+        user_id: 'U1',
+        ts: Date.now(),
+        kind: 'cost',
+        tool: null,
+        summary: null,
+        reasoning: null,
+        result: null,
+        cost_tokens: null,
+        cost_micro_usd: 5_000_000,
+      });
+
+      releaseRouter();
+      await enqueue;
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(buildFactory.createCalls).toHaveLength(0);
+      expect(slack.posts.filter((p) => p.text === '_thinking…_')).toHaveLength(1);
+      expect(slack.posts.some((p) => p.text.includes('reached its budget'))).toBe(true);
+      expect(slack.updates.some((u) => u.text === 'router resumed')).toBe(true);
+
+      const capAudits = store
+        .getAuditEvents(TEST_SESSION_KEY)
+        .filter((a) => a.kind === 'correction' && a.tool === 'spend-cap');
+      expect(capAudits).toHaveLength(1);
+      expect(capAudits[0]?.result).toBe('abandoned:task');
+      expect(capAudits[0]?.user_id).toBe('U1');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('build-tail usage is billed to the same session and requestor budget', async () => {
+    const slack = new FakeSlackClient();
+    const store = new SqliteSessionStore(':memory:');
+    const tailCostMicroUsd = 2_500_000;
+    const routerScript: RunnerEvent[] = [
+      { type: 'run_build', repo: 'acme/widgets' },
+      { type: 'text', text: 'router resumed' },
+    ];
+    const tailScript: RunnerEvent[] = [
+      {
+        type: 'usage',
+        costMicroUsd: tailCostMicroUsd,
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheReadTokens: 30,
+        cacheCreationTokens: 40,
+      },
+      { type: 'text', text: 'candidate ready locally' },
+    ];
+    const routerFactory = new FakeRunnerFactory([[...routerScript], [{ type: 'text', text: 'should not run' }]]);
+    const buildFactory = new FakeBuildFactory([[...tailScript]]);
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory: routerFactory,
+      slack,
+      store,
+      buildRunnerFactory: buildFactory,
+      spendCaps: { perTaskMicroUsd: tailCostMicroUsd, perUser24hMicroUsd: 0, perGlobal24hMicroUsd: 0 },
+    });
+
+    try {
+      await manager.enqueueNew(TEST_SESSION_KEY, {
+        message: 'go',
+        channel: 'C',
+        threadTs: 'T',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const costAudits = store
+        .getAuditEvents(TEST_SESSION_KEY)
+        .filter((a) => a.kind === 'cost');
+      expect(costAudits).toHaveLength(1);
+      expect(costAudits[0]?.session_key).toBe(TEST_SESSION_KEY);
+      expect(costAudits[0]?.team_id).toBe('TEAM');
+      expect(costAudits[0]?.user_id).toBe('U1');
+      expect(costAudits[0]?.cost_micro_usd).toBe(tailCostMicroUsd);
+      expect(costAudits[0]?.cost_tokens).toBe(100);
+      expect(store.sumCostByTask(TEST_SESSION_KEY)).toBe(tailCostMicroUsd);
+
+      const accepted = await manager.enqueueExisting(TEST_SESSION_KEY, {
+        message: 'again',
+        channel: 'C',
+        threadTs: 'T',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(accepted).toBe(true);
+      expect(routerFactory.runners[0]?.sends).toEqual(['go']);
+      expect(slack.posts.some((p) => p.text.includes('reached its budget'))).toBe(true);
+      const capAudits = store
+        .getAuditEvents(TEST_SESSION_KEY)
+        .filter((a) => a.kind === 'correction' && a.tool === 'spend-cap');
+      expect(capAudits).toHaveLength(1);
+      expect(capAudits[0]?.result).toBe('rejected:task');
+    } finally {
+      store.close();
+    }
+  });
+
   it('run_exec without a recorded requestor refuses before creating an exec runner', async () => {
     const slack = new FakeSlackClient();
     const routerScript: RunnerEvent[] = [
