@@ -232,6 +232,7 @@ export class SessionManager {
       channel_id: item.channel,
       thread_ts: item.threadTs,
       profile_id: profile.id,
+      harness_version: profile.version,
       created_at: now,
       last_active_at: now,
       status: 'active',

@@ -13,6 +13,7 @@ import type {
   BuildRunnerFactory,
 } from '../src/runner/types.js';
 import type { Profile } from '../src/profiles/registry.js';
+import { getProfile } from '../src/profiles/registry.js';
 import type {
   SessionStore,
   SessionRow,
@@ -705,6 +706,10 @@ describe('SessionManager — build_spec approval_requested', () => {
 
     expect(manager.has('TEAM:C:T')).toBe(true);
     expect(store.get('TEAM:C:T')?.status).toBe('active');
+    // 0014 Part A: the session is stamped with its profile's version for attribution.
+    const createdRow = store.get('TEAM:C:T');
+    expect(createdRow?.harness_version).toBe(getProfile(createdRow?.profile_id ?? '').version);
+    expect(createdRow?.harness_version).not.toBeNull();
     expect(
       store.audits.filter((a) => a.kind === 'lifecycle' && a.tool === 'session' && a.result === 'reaped'),
     ).toHaveLength(0);
@@ -931,7 +936,6 @@ class CapturingStore implements SessionStore {
   recordSession(row: NewSessionRow): void {
     this.rows.set(row.session_key, {
       ...row,
-      harness_version: null,
       sdk_session_id: null,
       volume_name: null,
     });

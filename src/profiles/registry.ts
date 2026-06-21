@@ -23,12 +23,19 @@ export interface Profile {
    * only and no run parks on it.
    */
   planGate: boolean;
+  /**
+   * Profile version, stamped onto every session created under it
+   * (`sessions.harness_version`) for clean attribution — so a meta-agent can
+   * compare outcomes across profile revisions (design/0014 Part A, Q10).
+   * Hand-bumped: increment whenever this profile's prompt or tool policy changes.
+   */
+  version: string;
 }
 
 export const PROFILES: ReadonlyMap<string, Profile> = new Map([
-  ['conversational', { id: 'conversational', label: 'Conversational', mode: 'conversational', planGate: false }],
-  ['repo-oneshot', { id: 'repo-oneshot', label: 'Repo (one-shot)', mode: 'one-shot', planGate: false }],
-  ['supervised-repo-oneshot', { id: 'supervised-repo-oneshot', label: 'Repo (supervised one-shot)', mode: 'one-shot', planGate: true }],
+  ['conversational', { id: 'conversational', label: 'Conversational', mode: 'conversational', planGate: false, version: '1' }],
+  ['repo-oneshot', { id: 'repo-oneshot', label: 'Repo (one-shot)', mode: 'one-shot', planGate: false, version: '1' }],
+  ['supervised-repo-oneshot', { id: 'supervised-repo-oneshot', label: 'Repo (supervised one-shot)', mode: 'one-shot', planGate: true, version: '1' }],
 ]);
 
 export const DEFAULT_PROFILE_ID = 'conversational';

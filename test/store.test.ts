@@ -66,6 +66,23 @@ describe('SqliteSessionStore', () => {
     expect(row?.volume_name).toBeNull();
   });
 
+  it('stores harness_version when set (0014 Part A attribution stamp)', () => {
+    store.recordSession({
+      session_key: 'T:C:VER',
+      team_id: null,
+      user_id: null,
+      channel_id: 'C',
+      thread_ts: 'TS',
+      profile_id: 'conversational',
+      harness_version: '7',
+      created_at: 1_000,
+      last_active_at: 1_000,
+      status: 'active',
+    });
+
+    expect(store.get('T:C:VER')?.harness_version).toBe('7');
+  });
+
   it('get returns undefined for an unknown key', () => {
     expect(store.get('MISSING:KEY')).toBeUndefined();
   });

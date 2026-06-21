@@ -39,6 +39,7 @@ export type NewSessionRow = Pick<
   | 'channel_id'
   | 'thread_ts'
   | 'profile_id'
+  | 'harness_version'
   | 'created_at'
   | 'last_active_at'
   | 'status'
@@ -112,6 +113,7 @@ export class SqliteSessionStore implements SessionStore {
     string,
     string,
     string,
+    string | null,
     number,
     number,
     string,
@@ -154,14 +156,15 @@ export class SqliteSessionStore implements SessionStore {
       string,
       string,
       string,
+      string | null,
       number,
       number,
       string,
     ]>(`
       INSERT INTO sessions
         (session_key, team_id, user_id, channel_id, thread_ts, profile_id,
-         created_at, last_active_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         harness_version, created_at, last_active_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_key) DO UPDATE SET
         last_active_at = excluded.last_active_at,
         status = 'active'
@@ -327,6 +330,7 @@ export class SqliteSessionStore implements SessionStore {
       row.channel_id,
       row.thread_ts,
       row.profile_id,
+      row.harness_version,
       row.created_at,
       row.last_active_at,
       row.status,
