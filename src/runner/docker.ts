@@ -32,13 +32,22 @@ import type {
   RequestBuildMessage,
   ExecResultMessage,
   PublishResultMessage,
+  PrEditResultMessage,
+  PrCommentResultMessage,
   RunChecksResultMessage,
   ProvisionResultMessage,
 } from './protocol.js';
 import type { CloneService } from './clone-service.js';
 import type { CloneOutcome } from './clone-service.js';
 import type { PublishService } from './publish-service.js';
-import type { PublishOutcome, PublishServiceRequest } from './publish-service.js';
+import type {
+  PublishOutcome,
+  PublishServiceRequest,
+  PrEditOutcome,
+  PrEditServiceRequest,
+  PrCommentOutcome,
+  PrCommentServiceRequest,
+} from './publish-service.js';
 import type { CheckService } from './check-service.js';
 import type { CheckOutcome, CheckServiceRequest, RunChecksKind } from './check-service.js';
 import type { RuntimeProvisionService } from './runtime-provision-service.js';
@@ -609,6 +618,107 @@ export class DockerRunner implements SessionRunner {
             }
             // Publishing is gateway-side work (lease + push + PR), not the agent's — give the
             // post-publish continuation a fresh turn budget.
+            deadline = Date.now() + turnTimeoutMs;
+            continue;
+          } else if (parsed.type === 'request_pr_edit') {
+            if (typeof parsed.id !== 'string') {
+              console.error('[gateway] malformed request_pr_edit: missing id — skipping');
+              continue;
+            }
+            const editId = parsed.id;
+            const title = (parsed as { title?: unknown }).title;
+            const body = (parsed as { body?: unknown }).body;
+            if (
+              typeof parsed.repo !== 'string' ||
+              (title !== undefined && typeof title !== 'string') ||
+              (body !== undefined && typeof body !== 'string')
+            ) {
+              const fallback: GatewayToRunnerMessage = {
+                type: 'pr_edit_result',
+                id: editId,
+                ok: false,
+                reason: 'malformed request',
+              };
+              if (self.child.stdin?.writable) {
+                self.child.stdin.write(JSON.stringify(fallback) + '\n');
+              }
+              continue;
+            }
+            const editReq: PrEditServiceRequest = {
+              repo: parsed.repo,
+              volume: self.volume ?? '',
+              ...(title !== undefined ? { title } : {}),
+              ...(body !== undefined ? { body } : {}),
+            };
+            yield { type: 'status', text: `editing PR for ${editReq.repo}…` } as RunnerEvent;
+
+            let editOutcome: PrEditOutcome;
+            if (self.publishService !== undefined && self.volume !== undefined) {
+              editOutcome = await self.publishService.editPr(editReq);
+            } else {
+              editOutcome = { ok: false, reason: 'edit unavailable' };
+            }
+
+            if (!self.child.stdin?.writable) {
+              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              return;
+            }
+            const editResult: PrEditResultMessage = editOutcome.ok
+              ? { type: 'pr_edit_result', id: editId, ok: true }
+              : { type: 'pr_edit_result', id: editId, ok: false, reason: editOutcome.reason };
+            self.child.stdin.write(JSON.stringify(editResult satisfies GatewayToRunnerMessage) + '\n');
+            if (editOutcome.ok) {
+              yield { type: 'pr_edited', url: editOutcome.prUrl } as RunnerEvent;
+            }
+            deadline = Date.now() + turnTimeoutMs;
+            continue;
+          } else if (parsed.type === 'request_pr_comment') {
+            if (typeof parsed.id !== 'string') {
+              console.error('[gateway] malformed request_pr_comment: missing id — skipping');
+              continue;
+            }
+            const commentId = parsed.id;
+            if (
+              typeof parsed.repo !== 'string' ||
+              typeof (parsed as { comment?: unknown }).comment !== 'string' ||
+              (parsed as { comment: string }).comment.trim() === ''
+            ) {
+              const fallback: GatewayToRunnerMessage = {
+                type: 'pr_comment_result',
+                id: commentId,
+                ok: false,
+                reason: 'malformed request',
+              };
+              if (self.child.stdin?.writable) {
+                self.child.stdin.write(JSON.stringify(fallback) + '\n');
+              }
+              continue;
+            }
+            const commentReq: PrCommentServiceRequest = {
+              repo: parsed.repo,
+              volume: self.volume ?? '',
+              comment: (parsed as { comment: string }).comment,
+            };
+            yield { type: 'status', text: `commenting on PR for ${commentReq.repo}…` } as RunnerEvent;
+
+            let commentOutcome: PrCommentOutcome;
+            if (self.publishService !== undefined && self.volume !== undefined) {
+              commentOutcome = await self.publishService.commentPr(commentReq);
+            } else {
+              commentOutcome = { ok: false, reason: 'comment unavailable' };
+            }
+
+            if (!self.child.stdin?.writable) {
+              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              return;
+            }
+            const commentResult: PrCommentResultMessage = commentOutcome.ok
+              ? { type: 'pr_comment_result', id: commentId, ok: true }
+              : { type: 'pr_comment_result', id: commentId, ok: false, reason: commentOutcome.reason };
+            self.child.stdin.write(JSON.stringify(commentResult satisfies GatewayToRunnerMessage) + '\n');
+            if (commentOutcome.ok) {
+              yield { type: 'pr_commented', url: commentOutcome.prUrl } as RunnerEvent;
+            }
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_run_checks') {

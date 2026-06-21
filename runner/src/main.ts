@@ -26,8 +26,15 @@ import { BuildCoordinator } from './build.js';
 import type { BuildOutcome } from './build.js';
 import { ExecCoordinator } from './exec.js';
 import type { ExecHost, ExecInput, ExecOutcome } from './exec.js';
-import { PublishCoordinator } from './publish.js';
-import type { PublishInput, PublishOutcome } from './publish.js';
+import { PublishCoordinator, EditPrCoordinator, CommentPrCoordinator } from './publish.js';
+import type {
+  PublishInput,
+  PublishOutcome,
+  PrEditInput,
+  PrEditOutcome,
+  PrCommentInput,
+  PrCommentOutcome,
+} from './publish.js';
 import { ChecksCoordinator } from './checks.js';
 import type { ChecksInput, ChecksOutcome } from './checks.js';
 import { ProvisionCoordinator } from './provision.js';
@@ -89,6 +96,10 @@ export type SdkQueryFn = (params: {
    * the test fake calls it directly. Omitted only by callers that don't wire publish support.
    */
   publish?: (input: PublishInput) => Promise<PublishOutcome>;
+  /** Bound at the runner so the SDK's `edit_pr` tool can ask the gateway to edit this thread's PR. */
+  editPr?: (input: PrEditInput) => Promise<PrEditOutcome>;
+  /** Bound at the runner so the SDK's `comment_pr` tool can ask the gateway to comment on this thread's PR. */
+  commentPr?: (input: PrCommentInput) => Promise<PrCommentOutcome>;
   /**
    * Bound at the runner so the SDK's `run_checks` tool can ask the gateway to run deterministic
    * checks on the verified local candidate. The real query wraps this in an in-process MCP tool;
@@ -295,6 +306,32 @@ export async function runPublish(
 }
 
 /**
+ * The edit_pr tool flow: ask the gateway to replace this thread PR's title/body.
+ */
+export async function runEditPr(
+  input: PrEditInput,
+  editPr: (input: PrEditInput) => Promise<PrEditOutcome>,
+): Promise<string> {
+  const outcome = await editPr(input);
+  return outcome.ok
+    ? 'PR EDIT COMPLETE. Tell the user you updated this thread PR and summarize only what you intentionally changed.'
+    : `PR EDIT DID NOT COMPLETE: ${outcome.reason}. Tell the user the short failure reason.`;
+}
+
+/**
+ * The comment_pr tool flow: ask the gateway to add a new comment to this thread PR.
+ */
+export async function runCommentPr(
+  input: PrCommentInput,
+  commentPr: (input: PrCommentInput) => Promise<PrCommentOutcome>,
+): Promise<string> {
+  const outcome = await commentPr(input);
+  return outcome.ok
+    ? 'PR COMMENT COMPLETE. Tell the user you added a new comment to this thread PR and summarize its purpose.'
+    : `PR COMMENT DID NOT COMPLETE: ${outcome.reason}. Tell the user the short failure reason.`;
+}
+
+/**
  * The run_checks tool flow: ask the gateway to run deterministic project checks and return raw
  * check output as delimited data. Exported so it is unit-testable without the SDK.
  */
@@ -365,6 +402,28 @@ function publishInputFromArgs(args: {
     repo: args.repo,
     ...(args.title !== undefined ? { title: args.title } : {}),
     ...(args.body !== undefined ? { body: args.body } : {}),
+  };
+}
+
+function editPrInputFromArgs(args: {
+  repo: string;
+  title?: string | undefined;
+  body?: string | undefined;
+}): PrEditInput {
+  return {
+    repo: args.repo,
+    ...(args.title !== undefined ? { title: args.title } : {}),
+    ...(args.body !== undefined ? { body: args.body } : {}),
+  };
+}
+
+function commentPrInputFromArgs(args: {
+  repo: string;
+  comment: string;
+}): PrCommentInput {
+  return {
+    repo: args.repo,
+    comment: args.comment,
   };
 }
 
@@ -469,6 +528,25 @@ export async function runLoop(opts: {
     };
     emit(msg);
   });
+  const editPrCoordinator = new EditPrCoordinator((input, editId) => {
+    const msg: RunnerToGatewayMessage = {
+      type: 'request_pr_edit',
+      id: editId,
+      repo: input.repo,
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.body !== undefined ? { body: input.body } : {}),
+    };
+    emit(msg);
+  });
+  const commentPrCoordinator = new CommentPrCoordinator((input, commentId) => {
+    const msg: RunnerToGatewayMessage = {
+      type: 'request_pr_comment',
+      id: commentId,
+      repo: input.repo,
+      comment: input.comment,
+    };
+    emit(msg);
+  });
 
   // The checks coordinator. `run_checks` calls checksCoordinator.requestChecks mid-turn;
   // inbound run_checks_result lines are routed to checksCoordinator.handleResult by the dispatcher.
@@ -552,6 +630,18 @@ export async function runLoop(opts: {
           }
           return;
         }
+        if (parsed.kind === 'pr_edit_result') {
+          if (!editPrCoordinator.handleResult(parsed.msg)) {
+            log(`pr_edit_result for unknown id ${parsed.msg.id} — ignored`);
+          }
+          return;
+        }
+        if (parsed.kind === 'pr_comment_result') {
+          if (!commentPrCoordinator.handleResult(parsed.msg)) {
+            log(`pr_comment_result for unknown id ${parsed.msg.id} — ignored`);
+          }
+          return;
+        }
         if (parsed.kind === 'run_checks_result') {
           if (!checksCoordinator.handleResult(parsed.msg)) {
             log(`run_checks_result for unknown id ${parsed.msg.id} — ignored`);
@@ -589,6 +679,8 @@ export async function runLoop(opts: {
     buildCoordinator.failAllPending();
     execCoordinator.failAllPending();
     publishCoordinator.failAllPending();
+    editPrCoordinator.failAllPending();
+    commentPrCoordinator.failAllPending();
     checksCoordinator.failAllPending();
     provisionCoordinator.failAllPending();
     signal();
@@ -599,6 +691,8 @@ export async function runLoop(opts: {
   const requestBuild = (repo: string): Promise<BuildOutcome> => buildCoordinator.requestBuild(repo);
   const requestExec = (input: ExecInput): Promise<ExecOutcome> => execCoordinator.requestExec(input);
   const publish = (input: PublishInput): Promise<PublishOutcome> => publishCoordinator.requestPublish(input);
+  const editPr = (input: PrEditInput): Promise<PrEditOutcome> => editPrCoordinator.requestEditPr(input);
+  const commentPr = (input: PrCommentInput): Promise<PrCommentOutcome> => commentPrCoordinator.requestCommentPr(input);
   const runChecks = (input: ChecksInput): Promise<ChecksOutcome> => checksCoordinator.requestChecks(input);
   const provisionRuntime = (input: ProvisionInput): Promise<ProvisionOutcome> => provisionCoordinator.requestProvision(input);
 
@@ -630,6 +724,8 @@ export async function runLoop(opts: {
       requestBuild,
       requestExec,
       publish,
+      editPr,
+      commentPr,
       runChecks,
       provisionRuntime,
     });
@@ -655,6 +751,8 @@ async function processTurn(
     requestBuild: (repo: string) => Promise<BuildOutcome>;
     requestExec: (input: ExecInput) => Promise<ExecOutcome>;
     publish: (input: PublishInput) => Promise<PublishOutcome>;
+    editPr: (input: PrEditInput) => Promise<PrEditOutcome>;
+    commentPr: (input: PrCommentInput) => Promise<PrCommentOutcome>;
     runChecks: (input: ChecksInput) => Promise<ChecksOutcome>;
     provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>;
   },
@@ -673,6 +771,8 @@ async function processTurn(
       requestBuild: deps.requestBuild,
       requestExec: deps.requestExec,
       publish: deps.publish,
+      editPr: deps.editPr,
+      commentPr: deps.commentPr,
       runChecks: deps.runChecks,
       provisionRuntime: deps.provisionRuntime,
       options: {
@@ -997,6 +1097,8 @@ function buildCommitMcpServer(
   requestBuild: (repo: string) => Promise<BuildOutcome>,
   requestExec: (input: ExecInput) => Promise<ExecOutcome>,
   publish: (input: PublishInput) => Promise<PublishOutcome>,
+  editPr: (input: PrEditInput) => Promise<PrEditOutcome>,
+  commentPr: (input: PrCommentInput) => Promise<PrCommentOutcome>,
   runChecksFn: (input: ChecksInput) => Promise<ChecksOutcome>,
   provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>,
 ) {
@@ -1046,6 +1148,17 @@ function buildCommitMcpServer(
   const checksSchema = {
     repo: z.string().describe('Repository slug in "owner/name" format.'),
     kind: z.enum(['lint', 'test', 'all']).optional().describe('Which checks to run. Omit for all.'),
+  };
+
+  const editPrSchema = {
+    repo: z.string().describe('Repository slug in "owner/name" format.'),
+    title: z.string().optional().describe('Optional replacement PR title. Omit to leave unchanged.'),
+    body: z.string().optional().describe('Optional replacement PR body. Omit to leave unchanged.'),
+  };
+
+  const commentPrSchema = {
+    repo: z.string().describe('Repository slug in "owner/name" format.'),
+    comment: z.string().describe('The new PR comment text to post.'),
   };
 
   const execSchema = {
@@ -1118,10 +1231,32 @@ function buildCommitMcpServer(
     },
   );
 
+  const editPrTool = tool(
+    'edit_pr',
+    'Replace the title and/or body of this thread\'s PR through the gateway credential path. ' +
+      'The gateway owns credentials and resolves the PR from this thread branch; there is no PR-number argument by design.',
+    editPrSchema,
+    async (args) => {
+      const text = await runEditPr(editPrInputFromArgs(args), editPr);
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  const commentPrTool = tool(
+    'comment_pr',
+    'Add a new comment to this thread\'s PR through the gateway credential path. ' +
+      'The gateway owns credentials and resolves the PR from this thread branch; there is no PR-number argument by design.',
+    commentPrSchema,
+    async (args) => {
+      const text = await runCommentPr(commentPrInputFromArgs(args), commentPr);
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
   return createSdkMcpServer({
     name: 'commit',
     version: '0.0.0',
-    tools: [buildSpecTool, cloneRepoTool, runChecksTool, provisionRuntimeTool, publishTool, openPrTool, execTool],
+    tools: [buildSpecTool, cloneRepoTool, runChecksTool, provisionRuntimeTool, publishTool, openPrTool, editPrTool, commentPrTool, execTool],
     alwaysLoad: true,
   });
 }
@@ -1133,6 +1268,8 @@ function realSdkQuery(params: {
   requestBuild?: (repo: string) => Promise<BuildOutcome>;
   requestExec?: (input: ExecInput) => Promise<ExecOutcome>;
   publish?: (input: PublishInput) => Promise<PublishOutcome>;
+  editPr?: (input: PrEditInput) => Promise<PrEditOutcome>;
+  commentPr?: (input: PrCommentInput) => Promise<PrCommentOutcome>;
   runChecks?: (input: ChecksInput) => Promise<ChecksOutcome>;
   provisionRuntime?: (input: ProvisionInput) => Promise<ProvisionOutcome>;
   options?: {
@@ -1157,7 +1294,9 @@ function realSdkQuery(params: {
     params.cloneRepo !== undefined &&
     params.requestBuild !== undefined &&
     params.requestExec !== undefined &&
-    params.publish !== undefined
+    params.publish !== undefined &&
+    params.editPr !== undefined &&
+    params.commentPr !== undefined
     && params.runChecks !== undefined
     && params.provisionRuntime !== undefined
       ? {
@@ -1168,6 +1307,8 @@ function realSdkQuery(params: {
             params.requestBuild,
             params.requestExec,
             params.publish,
+            params.editPr,
+            params.commentPr,
             params.runChecks,
             params.provisionRuntime,
           ),

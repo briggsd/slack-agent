@@ -6,7 +6,15 @@
  * The credential never enters the agent env. Never throws — outcomes are returned as data.
  */
 
-import type { PublishOutcome, PublishService, PublishServiceRequest } from '../runner/publish-service.js';
+import type {
+  PublishOutcome,
+  PublishService,
+  PublishServiceRequest,
+  PrEditOutcome,
+  PrEditServiceRequest,
+  PrCommentOutcome,
+  PrCommentServiceRequest,
+} from '../runner/publish-service.js';
 import type { CredentialBroker, CredentialLease } from '../broker/types.js';
 import type { GitNodeExecutor } from './git-node.js';
 import { branchForTask, taskIdFromWorkspaceVolume, workdirForRepo } from './orchestrator.js';
@@ -91,6 +99,87 @@ export class RealPublishService implements PublishService {
         return { ok: true, prUrl: url, prNumber: number, headSha };
       } catch {
         return { ok: false, reason: 'open PR failed' };
+      }
+    } finally {
+      await revokeOnce();
+    }
+  }
+
+  async editPr(req: PrEditServiceRequest): Promise<PrEditOutcome> {
+    if (!isSafeOwnerRepoSlug(req.repo)) {
+      return { ok: false, reason: 'invalid repo (expected "owner/name")' };
+    }
+
+    const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const branch = branchForTask(taskIdFromWorkspaceVolume(req.volume));
+    const title = cleanOptionalText(req.title);
+    const body = cleanOptionalText(req.body);
+
+    let lease: CredentialLease;
+    try {
+      lease = await this.broker.lease({ host: 'github', repo: req.repo, taskId });
+    } catch {
+      return { ok: false, reason: 'credential lease failed' };
+    }
+
+    let leaseRevoked = false;
+    const revokeOnce = async (): Promise<void> => {
+      if (leaseRevoked) return;
+      leaseRevoked = true;
+      try { await lease.revoke(); } catch { /* best effort */ }
+    };
+
+    try {
+      try {
+        const result = await this.gitNodes.editChangeRequest({
+          lease,
+          repo: req.repo,
+          head: branch,
+          ...(title !== undefined ? { title } : {}),
+          ...(body !== undefined ? { body } : {}),
+        });
+        return 'notFound' in result ? { ok: false, reason: 'no open PR for this thread' } : { ok: true, prUrl: result.prUrl };
+      } catch {
+        return { ok: false, reason: 'edit PR failed' };
+      }
+    } finally {
+      await revokeOnce();
+    }
+  }
+
+  async commentPr(req: PrCommentServiceRequest): Promise<PrCommentOutcome> {
+    if (!isSafeOwnerRepoSlug(req.repo)) {
+      return { ok: false, reason: 'invalid repo (expected "owner/name")' };
+    }
+
+    const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const branch = branchForTask(taskIdFromWorkspaceVolume(req.volume));
+
+    let lease: CredentialLease;
+    try {
+      lease = await this.broker.lease({ host: 'github', repo: req.repo, taskId });
+    } catch {
+      return { ok: false, reason: 'credential lease failed' };
+    }
+
+    let leaseRevoked = false;
+    const revokeOnce = async (): Promise<void> => {
+      if (leaseRevoked) return;
+      leaseRevoked = true;
+      try { await lease.revoke(); } catch { /* best effort */ }
+    };
+
+    try {
+      try {
+        const result = await this.gitNodes.commentChangeRequest({
+          lease,
+          repo: req.repo,
+          head: branch,
+          comment: req.comment,
+        });
+        return 'notFound' in result ? { ok: false, reason: 'no open PR for this thread' } : { ok: true, prUrl: result.prUrl };
+      } catch {
+        return { ok: false, reason: 'comment PR failed' };
       }
     } finally {
       await revokeOnce();

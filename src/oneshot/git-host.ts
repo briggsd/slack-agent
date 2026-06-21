@@ -42,6 +42,13 @@ export interface GitHostProvider {
     token: string;
     fetchFn: FetchFn;
   }): Promise<{ status: 'open' | 'merged' | 'closed'; headSha: string }>;
+  /** Resolve the open PR/MR for the given head branch. */
+  getChangeRequestByHead(req: {
+    repo: string;
+    head: string;
+    token: string;
+    fetchFn: FetchFn;
+  }): Promise<{ number: number; url: string; headSha: string } | null>;
   /** Open a PR/MR; returns its web url. */
   openChangeRequest(req: {
     repo: string;
@@ -52,6 +59,23 @@ export interface GitHostProvider {
     token: string;
     fetchFn: FetchFn;
   }): Promise<{ url: string; number: number; headSha: string }>;
+  /** Edit an existing PR/MR title/body. */
+  editChangeRequest(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+    title?: string;
+    body?: string;
+  }): Promise<{ url: string }>;
+  /** Add a comment to an existing PR/MR. */
+  addChangeRequestComment(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+    comment: string;
+  }): Promise<{ url: string }>;
 }
 
 /** GitHub implementation. Credentials travel as Bearer tokens; never embedded in URLs. */
@@ -133,6 +157,121 @@ export class GithubProvider implements GitHostProvider {
       throw new Error('GitHub API returned no head.sha for the pull request');
     }
     return { url: data.html_url, number: data.number, headSha: data.head.sha };
+  }
+
+  async getChangeRequestByHead(req: {
+    repo: string;
+    head: string;
+    token: string;
+    fetchFn: FetchFn;
+  }): Promise<{ number: number; url: string; headSha: string } | null> {
+    const owner = req.repo.split('/')[0];
+    if (owner === undefined || owner === '') {
+      throw new Error('GitHub API request needs an owner/repo slug');
+    }
+    const url = `https://api.github.com/repos/${req.repo}/pulls?head=${encodeURIComponent(`${owner}:${req.head}`)}&state=open`;
+    const res = await req.fetchFn(url, {
+      headers: {
+        Authorization: `Bearer ${req.token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'slack-agent',
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub API error ${res.status} fetching pull requests${await safeReason(res)}`);
+    }
+
+    const data = (await res.json()) as unknown;
+    if (!Array.isArray(data)) {
+      throw new Error('GitHub API returned a non-array pull request list');
+    }
+    if (data.length === 0) {
+      return null;
+    }
+    const first = data[0];
+    if (typeof first !== 'object' || first === null) {
+      throw new Error('GitHub API returned an invalid pull request entry');
+    }
+    const pr = first as {
+      html_url?: unknown;
+      number?: unknown;
+      head?: { sha?: unknown };
+    };
+    if (typeof pr.html_url !== 'string' || pr.html_url === '') {
+      throw new Error('GitHub API returned no html_url for the pull request');
+    }
+    if (typeof pr.number !== 'number') {
+      throw new Error('GitHub API returned no numeric pull request number');
+    }
+    if (typeof pr.head?.sha !== 'string' || pr.head.sha === '') {
+      throw new Error('GitHub API returned no head.sha for the pull request');
+    }
+    return { number: pr.number, url: pr.html_url, headSha: pr.head.sha };
+  }
+
+  async editChangeRequest(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+    title?: string;
+    body?: string;
+  }): Promise<{ url: string }> {
+    const url = `https://api.github.com/repos/${req.repo}/pulls/${String(req.number)}`;
+    const res = await req.fetchFn(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${req.token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'slack-agent',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...(req.title !== undefined && { title: req.title }),
+        ...(req.body !== undefined && { body: req.body }),
+      }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub API error ${res.status} editing pull request${await safeReason(res)}`);
+    }
+
+    const data = (await res.json()) as { html_url?: unknown };
+    if (typeof data.html_url !== 'string' || data.html_url === '') {
+      throw new Error('GitHub API returned no html_url for the pull request');
+    }
+    return { url: data.html_url };
+  }
+
+  async addChangeRequestComment(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+    comment: string;
+  }): Promise<{ url: string }> {
+    const url = `https://api.github.com/repos/${req.repo}/issues/${String(req.number)}/comments`;
+    const res = await req.fetchFn(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${req.token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'slack-agent',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ body: req.comment }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub API error ${res.status} creating pull request comment${await safeReason(res)}`);
+    }
+
+    const data = (await res.json()) as { html_url?: unknown };
+    if (typeof data.html_url !== 'string' || data.html_url === '') {
+      throw new Error('GitHub API returned no html_url for the comment');
+    }
+    return { url: data.html_url };
   }
 
   async getChangeRequestState(req: {

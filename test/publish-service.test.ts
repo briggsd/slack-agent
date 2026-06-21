@@ -151,4 +151,94 @@ describe('RealPublishService', () => {
     expect(gitNodes.pushes).toHaveLength(0);
     expect(gitNodes.changeRequests).toHaveLength(0);
   });
+
+  it('editPr happy path leases, edits this thread PR, and revokes', async () => {
+    const broker = new FakeBroker('test-token');
+    const gitNodes = new FakeGitNodeExecutor('https://github.com/owner/repo/pull/2');
+    const svc = new RealPublishService(broker, gitNodes);
+
+    const outcome = await svc.editPr({
+      repo: 'owner/repo',
+      volume: 'slackbot-ws-session-2',
+      title: 'Updated title',
+      body: 'Updated body',
+    });
+
+    expect(outcome).toEqual({ ok: true, prUrl: 'https://github.com/owner/repo/pull/2' });
+    expect(broker.leases).toHaveLength(1);
+    expect(broker.leases[0]).toMatchObject({ host: 'github', repo: 'owner/repo' });
+    expect(broker.revokes).toHaveLength(1);
+    expect(gitNodes.prEdits).toEqual([{
+      lease: expect.objectContaining({ token: 'test-token', host: 'github', repo: 'owner/repo' }),
+      repo: 'owner/repo',
+      head: 'slackbot/oneshot-session-2',
+      title: 'Updated title',
+      body: 'Updated body',
+    }]);
+    expect(gitNodes.pushes).toHaveLength(0);
+    expect(gitNodes.repoVerifications).toHaveLength(0);
+  });
+
+  it('editPr maps notFound to no open PR for this thread', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    gitNodes.setEditChangeResult({ notFound: true });
+    const svc = new RealPublishService(broker, gitNodes);
+
+    const outcome = await svc.editPr({ repo: 'owner/repo', volume: 'vol', title: 'T' });
+
+    expect(outcome).toEqual({ ok: false, reason: 'no open PR for this thread' });
+    expect(broker.revokes).toHaveLength(1);
+  });
+
+  it('editPr normalizes empty title/body to omitted fields', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const svc = new RealPublishService(broker, gitNodes);
+
+    const outcome = await svc.editPr({ repo: 'owner/repo', volume: 'vol', title: ' ', body: '' });
+
+    expect(outcome).toEqual({ ok: true, prUrl: 'https://example.test/pr/1' });
+    expect(gitNodes.prEdits[0]).toEqual({
+      lease: expect.objectContaining({ host: 'github', repo: 'owner/repo' }),
+      repo: 'owner/repo',
+      head: 'slackbot/oneshot-vol',
+    });
+  });
+
+  it('commentPr happy path leases, comments on this thread PR, and revokes', async () => {
+    const broker = new FakeBroker('comment-token');
+    const gitNodes = new FakeGitNodeExecutor('https://github.com/owner/repo/pull/3');
+    const svc = new RealPublishService(broker, gitNodes);
+
+    const outcome = await svc.commentPr({
+      repo: 'owner/repo',
+      volume: 'slackbot-ws-session-3',
+      comment: 'Status update',
+    });
+
+    expect(outcome).toEqual({ ok: true, prUrl: 'https://github.com/owner/repo/pull/3' });
+    expect(broker.leases).toHaveLength(1);
+    expect(broker.revokes).toHaveLength(1);
+    expect(gitNodes.prComments).toEqual([{
+      lease: expect.objectContaining({ token: 'comment-token', host: 'github', repo: 'owner/repo' }),
+      repo: 'owner/repo',
+      head: 'slackbot/oneshot-session-3',
+      comment: 'Status update',
+    }]);
+    expect(gitNodes.pushes).toHaveLength(0);
+    expect(gitNodes.repoVerifications).toHaveLength(0);
+  });
+
+  it('commentPr maps notFound to no open PR for this thread', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    gitNodes.setCommentChangeResult({ notFound: true });
+    const svc = new RealPublishService(broker, gitNodes);
+
+    const outcome = await svc.commentPr({ repo: 'owner/repo', volume: 'vol', comment: 'Hello' });
+
+    expect(outcome).toEqual({ ok: false, reason: 'no open PR for this thread' });
+    expect(broker.revokes).toHaveLength(1);
+  });
 });

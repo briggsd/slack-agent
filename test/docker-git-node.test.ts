@@ -780,6 +780,82 @@ describe('DockerGitNodeExecutor — openChangeRequest', () => {
   });
 });
 
+describe('DockerGitNodeExecutor — edit/comment change request', () => {
+  const image = 'slackbot-runner:test';
+  const token = 'ghp-pr-token';
+
+  it('editChangeRequest resolves the PR by head, PATCHes it, and returns the PR URL', async () => {
+    const fetchCalls: { url: string; init: RequestInit }[] = [];
+    const fetchFn = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      fetchCalls.push({ url: String(url), init: init ?? {} });
+      const urlStr = String(url);
+      if (urlStr.includes('/pulls?head=')) {
+        return Promise.resolve(makeResponse([
+          { html_url: 'https://github.com/owner/repo/pull/12', number: 12, head: { sha: 'head-12' } },
+        ]));
+      }
+      return Promise.resolve(makeResponse({ html_url: 'https://github.com/owner/repo/pull/12' }));
+    };
+    const exec = new DockerGitNodeExecutor({ image, spawn: makeFakeSpawn(0).spawnFn, fetchFn: fetchFn as typeof fetch });
+
+    const result = await exec.editChangeRequest({
+      lease: makeLease(token),
+      repo: 'owner/repo',
+      head: 'slackbot/oneshot-task-012',
+      title: 'Updated title',
+    });
+
+    expect(result).toEqual({ prUrl: 'https://github.com/owner/repo/pull/12' });
+    expect(fetchCalls).toHaveLength(2);
+    expect(fetchCalls[0]?.url).toBe(
+      'https://api.github.com/repos/owner/repo/pulls?head=owner%3Aslackbot%2Foneshot-task-012&state=open',
+    );
+    expect(fetchCalls[1]?.url).toBe('https://api.github.com/repos/owner/repo/pulls/12');
+    expect(fetchCalls[1]?.init.method).toBe('PATCH');
+    expect(JSON.parse((fetchCalls[1]?.init.body as string) ?? '{}')).toEqual({ title: 'Updated title' });
+  });
+
+  it('editChangeRequest returns notFound when there is no open PR for the head', async () => {
+    const fetchFn = (): Promise<Response> => Promise.resolve(makeResponse([]));
+    const exec = new DockerGitNodeExecutor({ image, spawn: makeFakeSpawn(0).spawnFn, fetchFn: fetchFn as typeof fetch });
+
+    await expect(exec.editChangeRequest({
+      lease: makeLease(token),
+      repo: 'owner/repo',
+      head: 'missing-branch',
+      body: 'Updated body',
+    })).resolves.toEqual({ notFound: true });
+  });
+
+  it('commentChangeRequest resolves the PR by head, POSTs a comment, and returns the PR URL', async () => {
+    const fetchCalls: { url: string; init: RequestInit }[] = [];
+    const fetchFn = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      fetchCalls.push({ url: String(url), init: init ?? {} });
+      const urlStr = String(url);
+      if (urlStr.includes('/pulls?head=')) {
+        return Promise.resolve(makeResponse([
+          { html_url: 'https://github.com/owner/repo/pull/13', number: 13, head: { sha: 'head-13' } },
+        ]));
+      }
+      return Promise.resolve(makeResponse({ html_url: 'https://github.com/owner/repo/pull/13#issuecomment-1' }));
+    };
+    const exec = new DockerGitNodeExecutor({ image, spawn: makeFakeSpawn(0).spawnFn, fetchFn: fetchFn as typeof fetch });
+
+    const result = await exec.commentChangeRequest({
+      lease: makeLease(token),
+      repo: 'owner/repo',
+      head: 'slackbot/oneshot-task-013',
+      comment: 'Please re-run checks.',
+    });
+
+    expect(result).toEqual({ prUrl: 'https://github.com/owner/repo/pull/13' });
+    expect(fetchCalls).toHaveLength(2);
+    expect(fetchCalls[1]?.url).toBe('https://api.github.com/repos/owner/repo/issues/13/comments');
+    expect(fetchCalls[1]?.init.method).toBe('POST');
+    expect(JSON.parse((fetchCalls[1]?.init.body as string) ?? '{}')).toEqual({ body: 'Please re-run checks.' });
+  });
+});
+
 // ── DockerGitNodeExecutor — runCheck ─────────────────────────────────────────
 
 describe('DockerGitNodeExecutor — runCheck', () => {

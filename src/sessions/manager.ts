@@ -832,6 +832,28 @@ export class SessionManager {
             headSha: event.headSha,
           };
           // Don't break — let the loop drain to done
+        } else if (event.type === 'pr_edited') {
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
+            kind: 'action',
+            tool: 'edit-pr',
+            summary: event.url,
+            result: 'edited',
+          });
+        } else if (event.type === 'pr_commented') {
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
+            kind: 'action',
+            tool: 'comment-pr',
+            summary: event.url,
+            result: 'commented',
+          });
         } else if (event.type === 'usage') {
           // Slice A: record per-turn cost to the audit ledger. Measurement only — no
           // enforcement. Silent: no Slack post. Cost is metadata, never message content.

@@ -1236,6 +1236,20 @@ class PrOpenedRunner implements SessionRunner {
   async dispose(): Promise<void> {}
 }
 
+class PrMutationRunner implements SessionRunner {
+  constructor(
+    readonly sessionKey: string,
+    private readonly event: Extract<RunnerEvent, { type: 'pr_edited' | 'pr_commented' }>,
+  ) {}
+
+  async *send(_m: string): RunnerStream {
+    yield { type: 'status', text: 'mutating PR…' };
+    yield this.event;
+  }
+
+  async dispose(): Promise<void> {}
+}
+
 describe('SessionManager — audit emission', () => {
   it('emits a lifecycle/created event when a new session is created', async () => {
     const slack = new FakeSlackClient();
@@ -1448,6 +1462,76 @@ describe('SessionManager — audit emission', () => {
     // Slack placeholder must show exactly one "Opened PR: <url>" surface.
     const openPrUpdates = slack.updates.filter((u) => u.text === 'Opened PR: http://x/pr/1');
     expect(openPrUpdates).toHaveLength(1);
+  });
+
+  it('audits pr_edited without Slack posting or recordPullRequest writes', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory: RunnerFactory = {
+      create: async (key) => new PrMutationRunner(key, { type: 'pr_edited', url: 'http://x/pr/2' }),
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'edit thread pr',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const audits = store.audits.filter((a) => a.tool === 'edit-pr');
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      kind: 'action',
+      tool: 'edit-pr',
+      summary: 'http://x/pr/2',
+      result: 'edited',
+      profile_id: 'conversational',
+    });
+    expect(store.pullRequests).toHaveLength(0);
+    expect(slack.updates.some((u) => u.text.includes('http://x/pr/2'))).toBe(false);
+  });
+
+  it('audits pr_commented without Slack posting or recordPullRequest writes', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory: RunnerFactory = {
+      create: async (key) => new PrMutationRunner(key, { type: 'pr_commented', url: 'http://x/pr/3' }),
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'comment thread pr',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const audits = store.audits.filter((a) => a.tool === 'comment-pr');
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      kind: 'action',
+      tool: 'comment-pr',
+      summary: 'http://x/pr/3',
+      result: 'commented',
+      profile_id: 'conversational',
+    });
+    expect(store.pullRequests).toHaveLength(0);
+    expect(slack.updates.some((u) => u.text.includes('http://x/pr/3'))).toBe(false);
   });
 
   it('a started exec reconciles to a terminal audit (started → succeeded_pr), summary is the PR URL only', async () => {

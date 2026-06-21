@@ -44,6 +44,25 @@ export interface OpenChangeRequest {
   body: string;
 }
 
+export interface EditChangeRequest {
+  lease: CredentialLease;
+  repo: string;
+  head: string;
+  title?: string;
+  body?: string;
+}
+
+export interface CommentChangeRequest {
+  lease: CredentialLease;
+  repo: string;
+  head: string;
+  comment: string;
+}
+
+export type ChangeRequestMutationResult =
+  | { prUrl: string }
+  | { notFound: true };
+
 /**
  * Create a local branch in the cloned working tree — purely local, no credential
  * required. The shared volume ensures the agent container sees the new branch
@@ -104,6 +123,8 @@ export interface GitNodeExecutor {
   verifyRepo(req: VerifyRepoRequest): Promise<boolean>;
   push(req: PushRequest): Promise<void>;
   openChangeRequest(req: OpenChangeRequest): Promise<{ url: string; number: number; headSha: string }>;
+  editChangeRequest(req: EditChangeRequest): Promise<ChangeRequestMutationResult>;
+  commentChangeRequest(req: CommentChangeRequest): Promise<ChangeRequestMutationResult>;
   /**
    * Run the project's lint or test command in an ephemeral container on the volume.
    * No credential is injected (defense-in-depth: the token never reaches lint/test).

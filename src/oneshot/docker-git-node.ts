@@ -14,7 +14,7 @@
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import type { SpawnFn } from '../runner/docker.js';
-import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, VerifyRepoRequest, OpenChangeRequest, CheckRequest, CheckResult, ProvisionRuntimeRequest } from './git-node.js';
+import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, VerifyRepoRequest, OpenChangeRequest, EditChangeRequest, CommentChangeRequest, ChangeRequestMutationResult, CheckRequest, CheckResult, ProvisionRuntimeRequest } from './git-node.js';
 import { providerFor, type FetchFn } from './git-host.js';
 
 /** Env vars the docker CLI itself may need; everything else (incl. host secrets) is dropped. */
@@ -438,6 +438,51 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
       token: req.lease.token,
       fetchFn: this.fetchFn,
     });
+  }
+
+  async editChangeRequest(req: EditChangeRequest): Promise<ChangeRequestMutationResult> {
+    const provider = providerFor(req.lease.host);
+    const found = await provider.getChangeRequestByHead({
+      repo: req.repo,
+      head: req.head,
+      token: req.lease.token,
+      fetchFn: this.fetchFn,
+    });
+    if (found === null) {
+      return { notFound: true };
+    }
+
+    await provider.editChangeRequest({
+      repo: req.repo,
+      number: found.number,
+      token: req.lease.token,
+      fetchFn: this.fetchFn,
+      ...(req.title !== undefined && { title: req.title }),
+      ...(req.body !== undefined && { body: req.body }),
+    });
+    return { prUrl: found.url };
+  }
+
+  async commentChangeRequest(req: CommentChangeRequest): Promise<ChangeRequestMutationResult> {
+    const provider = providerFor(req.lease.host);
+    const found = await provider.getChangeRequestByHead({
+      repo: req.repo,
+      head: req.head,
+      token: req.lease.token,
+      fetchFn: this.fetchFn,
+    });
+    if (found === null) {
+      return { notFound: true };
+    }
+
+    await provider.addChangeRequestComment({
+      repo: req.repo,
+      number: found.number,
+      token: req.lease.token,
+      fetchFn: this.fetchFn,
+      comment: req.comment,
+    });
+    return { prUrl: found.url };
   }
 
   /**
