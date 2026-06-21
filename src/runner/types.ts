@@ -28,7 +28,11 @@ export type RunnerEvent =
   // feeds a BuildOutcome back via next(); it never crosses the container boundary as-is.
   // The build always targets the session's shared volume (derived from the session key), so
   // the event carries only the repo — no volume field.
-  | { type: 'run_build'; repo: string };
+  | { type: 'run_build'; repo: string }
+  // gateway-internal: the coordinator's exec tool asked the gateway to run the ungated
+  // repo-oneshot blueprint. The manager checks the original requestor's recorded opt-in
+  // before creating a one-shot runner, then feeds an ExecOutcome back via next().
+  | { type: 'run_exec'; host: ExecHost; repo: string; instruction: string };
 
 /**
  * The value the gateway feeds back into a run parked at an `await_approval` gate
@@ -50,6 +54,22 @@ export type BuildOutcome =
   | { ok: true }
   | { ok: false; reason: string };  // short, token-free
 
+export type ExecHost = 'github' | 'gitlab';
+
+export interface ExecInput {
+  host: ExecHost;
+  repo: string;
+  instruction: string;
+}
+
+/**
+ * The outcome of an ungated exec run. Fed back into the coordinator run via
+ * `next(execOutcome)` after `runExec` completes. Gateway-internal only.
+ */
+export type ExecOutcome =
+  | { ok: true; prUrl?: string }
+  | { ok: false; reason: string };
+
 /** A trusted approval verdict that the gateway feeds to the runner before the next user turn. */
 export type ApprovalControl = {
   id: string;
@@ -64,12 +84,13 @@ export interface RunnerSendOptions {
 
 /**
  * A run's event stream. Two-way: the consumer may feed a {@link GateResume} back via
- * `next()` to resume a run parked at an `await_approval` gate, or a {@link BuildOutcome}
- * to resume a run parked at a `run_build` event. `TNext` is part of the contract so the
- * resume value can thread (via `yield*`) from the gateway down through the orchestrator
- * and blueprint into the parked node. Non-gate/non-build runs never read it.
+ * `next()` to resume a run parked at an `await_approval` gate, a {@link BuildOutcome}
+ * to resume a run parked at a `run_build` event, or an {@link ExecOutcome} to resume
+ * a run parked at a `run_exec` event. `TNext` is part of the contract so the resume
+ * value can thread (via `yield*`) from the gateway down through the orchestrator and
+ * blueprint into the parked node. Non-gate/non-build/non-exec runs never read it.
  */
-export type RunnerStream = AsyncGenerator<RunnerEvent, void, GateResume | BuildOutcome | undefined>;
+export type RunnerStream = AsyncGenerator<RunnerEvent, void, GateResume | BuildOutcome | ExecOutcome | undefined>;
 
 export interface SessionRunner {
   /** Send one user message; yields events until the turn completes. */
@@ -86,6 +107,7 @@ export interface RunnerFactory {
  *  (it holds the broker + git nodes); injected into the SessionManager. */
 export interface BuildRunnerFactory {
   createBuildRunner(sessionKey: string, repo: string): Promise<SessionRunner>;
+  createExecRunner(sessionKey: string, input: ExecInput): Promise<SessionRunner>;
 }
 
 /** Removes the Docker volume backing a session. Implemented by the docker factory;

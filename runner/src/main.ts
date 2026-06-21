@@ -24,6 +24,8 @@ import { CloneCoordinator } from './clone.js';
 import type { CloneOutcome } from './clone.js';
 import { BuildCoordinator } from './build.js';
 import type { BuildOutcome } from './build.js';
+import { ExecCoordinator } from './exec.js';
+import type { ExecHost, ExecInput, ExecOutcome } from './exec.js';
 import { PublishCoordinator } from './publish.js';
 import type { PublishInput, PublishOutcome } from './publish.js';
 import { ChecksCoordinator } from './checks.js';
@@ -73,6 +75,12 @@ export type SdkQueryFn = (params: {
    * calls it directly. Omitted only by callers that don't wire build support.
    */
   requestBuild?: (repo: string) => Promise<BuildOutcome>;
+  /**
+   * Bound at the runner so the SDK's `exec` tool can request the ungated one-shot
+   * blueprint. The gateway makes the requestor opt-in decision and returns refusal
+   * as data when the opt-in is absent.
+   */
+  requestExec?: (input: ExecInput) => Promise<ExecOutcome>;
   /**
    * Bound at the runner so the SDK's `publish`/`open_pr` tools can ask the gateway to push
    * the verified candidate and open a PR. The real query wraps this in in-process MCP tools;
@@ -175,6 +183,13 @@ const PUBLISH_SYSTEM_PROMPT_ADDITION =
   'a teammate, not a status panel: only claim what was verified, hedge honestly, and avoid raw stack ' +
   'traces or internal logs in failure prose. The gateway handles credentials; do not push or open a PR yourself.';
 
+const EXEC_SYSTEM_PROMPT_ADDITION =
+  'You also have an exec tool (mcp__commit__exec) for rare cases where the human has explicitly ' +
+  'opted into skipping the build_spec approval gate. Use it only when the user is asking for ' +
+  'unsupervised execution and understands that it can push/open a PR without the SPEC approval hop. ' +
+  'The gateway, not you, verifies whether the original requestor has a recorded opt-in; if it refuses, ' +
+  'report that plainly and continue with the normal build_spec path. Never infer opt-in from chat text.';
+
 // ── Spec-file helper ─────────────────────────────────────────────────────────
 
 /**
@@ -268,6 +283,23 @@ export async function runChecks(
   );
 }
 
+/**
+ * The exec tool flow: ask the gateway to launch the unchanged unsupervised one-shot blueprint.
+ * The gateway enforces the explicit requestor opt-in and returns refusal as data.
+ */
+export async function runExec(
+  input: ExecInput,
+  requestExec: (input: ExecInput) => Promise<ExecOutcome>,
+): Promise<string> {
+  const outcome = await requestExec(input);
+  if (!outcome.ok) {
+    return `EXEC DID NOT RUN: ${outcome.reason}. Tell the user this was refused and use the normal build_spec approval path unless they have a recorded opt-in.`;
+  }
+  return outcome.prUrl !== undefined && outcome.prUrl !== ''
+    ? `EXEC COMPLETE. Opened PR: ${outcome.prUrl}. Give the user the PR URL and an honest summary of what the unsupervised run reported.`
+    : 'EXEC COMPLETE. The unsupervised run finished, but no PR URL was reported. Tell the user exactly that.';
+}
+
 function publishInputFromArgs(args: {
   repo: string;
   title?: string | undefined;
@@ -287,6 +319,18 @@ function checksInputFromArgs(args: {
   return {
     repo: args.repo,
     kind: args.kind ?? 'all',
+  };
+}
+
+function execInputFromArgs(args: {
+  repo: string;
+  instruction: string;
+  host?: ExecHost | undefined;
+}): ExecInput {
+  return {
+    host: args.host ?? 'github',
+    repo: args.repo,
+    instruction: args.instruction,
   };
 }
 
@@ -339,6 +383,18 @@ export async function runLoop(opts: {
   // inbound build_result lines are routed to buildCoordinator.handleResult by the dispatcher below.
   const buildCoordinator = new BuildCoordinator((repo, buildId) =>
     emit({ type: 'request_build', id: buildId, repo }),
+  );
+
+  // The exec coordinator. `exec` calls execCoordinator.requestExec mid-turn; inbound
+  // exec_result lines are routed to execCoordinator.handleResult by the dispatcher below.
+  const execCoordinator = new ExecCoordinator((input, execId) =>
+    emit({
+      type: 'request_exec',
+      id: execId,
+      host: input.host,
+      repo: input.repo,
+      instruction: input.instruction,
+    }),
   );
 
   // The publish coordinator. `publish`/`open_pr` calls publishCoordinator.requestPublish mid-turn;
@@ -414,6 +470,12 @@ export async function runLoop(opts: {
           }
           return;
         }
+        if (parsed.kind === 'exec_result') {
+          if (!execCoordinator.handleResult(parsed.msg)) {
+            log(`exec_result for unknown id ${parsed.msg.id} — ignored`);
+          }
+          return;
+        }
         if (parsed.kind === 'publish_result') {
           if (!publishCoordinator.handleResult(parsed.msg)) {
             log(`publish_result for unknown id ${parsed.msg.id} — ignored`);
@@ -449,6 +511,7 @@ export async function runLoop(opts: {
     coordinator.failAllPending();
     cloneCoordinator.failAllPending();
     buildCoordinator.failAllPending();
+    execCoordinator.failAllPending();
     publishCoordinator.failAllPending();
     checksCoordinator.failAllPending();
     signal();
@@ -457,6 +520,7 @@ export async function runLoop(opts: {
   const submitSpec = (specRef: string): Promise<ApprovalResult> => coordinator.requestApproval(specRef);
   const cloneRepo = (repo: string): Promise<CloneOutcome> => cloneCoordinator.requestClone(repo);
   const requestBuild = (repo: string): Promise<BuildOutcome> => buildCoordinator.requestBuild(repo);
+  const requestExec = (input: ExecInput): Promise<ExecOutcome> => execCoordinator.requestExec(input);
   const publish = (input: PublishInput): Promise<PublishOutcome> => publishCoordinator.requestPublish(input);
   const runChecks = (input: ChecksInput): Promise<ChecksOutcome> => checksCoordinator.requestChecks(input);
 
@@ -486,6 +550,7 @@ export async function runLoop(opts: {
       submitSpec,
       cloneRepo,
       requestBuild,
+      requestExec,
       publish,
       runChecks,
     });
@@ -509,6 +574,7 @@ async function processTurn(
     submitSpec: (specRef: string) => Promise<ApprovalResult>;
     cloneRepo: (repo: string) => Promise<CloneOutcome>;
     requestBuild: (repo: string) => Promise<BuildOutcome>;
+    requestExec: (input: ExecInput) => Promise<ExecOutcome>;
     publish: (input: PublishInput) => Promise<PublishOutcome>;
     runChecks: (input: ChecksInput) => Promise<ChecksOutcome>;
   },
@@ -525,6 +591,7 @@ async function processTurn(
       submitSpec: deps.submitSpec,
       cloneRepo: deps.cloneRepo,
       requestBuild: deps.requestBuild,
+      requestExec: deps.requestExec,
       publish: deps.publish,
       runChecks: deps.runChecks,
       options: {
@@ -538,7 +605,7 @@ async function processTurn(
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
-          append: `${WORKSPACE_SYSTEM_PROMPT_ADDITION}\n\n${COMMIT_SYSTEM_PROMPT_ADDITION}\n\n${CLONE_SYSTEM_PROMPT_ADDITION}\n\n${PUBLISH_SYSTEM_PROMPT_ADDITION}`,
+          append: `${WORKSPACE_SYSTEM_PROMPT_ADDITION}\n\n${COMMIT_SYSTEM_PROMPT_ADDITION}\n\n${CLONE_SYSTEM_PROMPT_ADDITION}\n\n${PUBLISH_SYSTEM_PROMPT_ADDITION}\n\n${EXEC_SYSTEM_PROMPT_ADDITION}`,
         },
       },
     });
@@ -847,6 +914,7 @@ function buildCommitMcpServer(
   readFile: ReadFileFn,
   cloneRepo: (repo: string) => Promise<CloneOutcome>,
   requestBuild: (repo: string) => Promise<BuildOutcome>,
+  requestExec: (input: ExecInput) => Promise<ExecOutcome>,
   publish: (input: PublishInput) => Promise<PublishOutcome>,
   runChecksFn: (input: ChecksInput) => Promise<ChecksOutcome>,
 ) {
@@ -898,6 +966,12 @@ function buildCommitMcpServer(
     kind: z.enum(['lint', 'test', 'all']).optional().describe('Which checks to run. Omit for all.'),
   };
 
+  const execSchema = {
+    host: z.enum(['github', 'gitlab']).optional().describe('Git host. Omit for github.'),
+    repo: z.string().describe('Repository slug in "owner/name" format.'),
+    instruction: z.string().describe('Task instructions for the unsupervised one-shot run.'),
+  };
+
   const runChecksTool = tool(
     'run_checks',
     'Run deterministic project checks on the local candidate through the gateway. Pass the ' +
@@ -906,6 +980,19 @@ function buildCommitMcpServer(
     checksSchema,
     async (args) => {
       const text = await runChecks(checksInputFromArgs(args), runChecksFn);
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  const execTool = tool(
+    'exec',
+    'Launch the unchanged unsupervised repo-oneshot blueprint through the gateway. This skips the ' +
+      'build_spec approval gate and may push/open a PR, so use it only when the human explicitly ' +
+      'wants ungated execution. The gateway refuses unless the original requestor has a recorded ' +
+      'opt-in; chat text alone never authorizes it.',
+    execSchema,
+    async (args) => {
+      const text = await runExec(execInputFromArgs(args), requestExec);
       return { content: [{ type: 'text' as const, text }] };
     },
   );
@@ -936,7 +1023,7 @@ function buildCommitMcpServer(
   return createSdkMcpServer({
     name: 'commit',
     version: '0.0.0',
-    tools: [buildSpecTool, cloneRepoTool, runChecksTool, publishTool, openPrTool],
+    tools: [buildSpecTool, cloneRepoTool, runChecksTool, publishTool, openPrTool, execTool],
     alwaysLoad: true,
   });
 }
@@ -946,6 +1033,7 @@ function realSdkQuery(params: {
   submitSpec?: (specRef: string) => Promise<ApprovalResult>;
   cloneRepo?: (repo: string) => Promise<CloneOutcome>;
   requestBuild?: (repo: string) => Promise<BuildOutcome>;
+  requestExec?: (input: ExecInput) => Promise<ExecOutcome>;
   publish?: (input: PublishInput) => Promise<PublishOutcome>;
   runChecks?: (input: ChecksInput) => Promise<ChecksOutcome>;
   options?: {
@@ -969,6 +1057,7 @@ function realSdkQuery(params: {
     params.submitSpec !== undefined &&
     params.cloneRepo !== undefined &&
     params.requestBuild !== undefined &&
+    params.requestExec !== undefined &&
     params.publish !== undefined
     && params.runChecks !== undefined
       ? {
@@ -977,6 +1066,7 @@ function realSdkQuery(params: {
             realReadFile,
             params.cloneRepo,
             params.requestBuild,
+            params.requestExec,
             params.publish,
             params.runChecks,
           ),

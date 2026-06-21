@@ -7,6 +7,8 @@ import type {
   VolumeReaper,
   BuildRunnerFactory,
   BuildOutcome,
+  ExecOutcome,
+  ExecInput,
 } from '../runner/types.js';
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
 import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
@@ -629,7 +631,7 @@ export class SessionManager {
       }
     };
     try {
-      let resume: GateResume | BuildOutcome | undefined;
+      let resume: GateResume | BuildOutcome | ExecOutcome | undefined;
       while (true) {
         const result = await iterator.next(resume);
         resume = undefined;
@@ -688,6 +690,9 @@ export class SessionManager {
         } else if (event.type === 'run_build') {
           // Park: drive a fresh build tail runner and feed the BuildOutcome back.
           resume = await this.runBuild(session, item, event);
+        } else if (event.type === 'run_exec') {
+          // Park: authorize and drive an ungated repo-oneshot run, then feed the result back.
+          resume = await this.runExec(session, item, event);
         } else if (event.type === 'abandoned') {
           // A gate deliberately ended the run (cancel/timeout). Post a clean, non-error
           // line and stop driving — the `finally` below calls iterator.return(), which
@@ -801,6 +806,96 @@ export class SessionManager {
       return { ok: false, reason };
     } finally {
       if (runner !== undefined) await runner.dispose();   // dispose only if it was created
+    }
+  }
+
+  private hasExecOptIn(session: Session): boolean {
+    if (session.requestorUserId === undefined || session.teamId === undefined) {
+      return false;
+    }
+    try {
+      return this.store.hasExecOptIn(session.teamId, session.requestorUserId);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[session] exec opt-in lookup failed for ${session.key} — failing closed: ${msg}`);
+      return false;
+    }
+  }
+
+  /**
+   * Run the ungated repo-oneshot blueprint only when the gateway has a recorded opt-in for
+   * the original requestor. Refusals are data for the coordinator, not thrown exceptions.
+   */
+  private async runExec(
+    session: Session,
+    item: QueueItem,
+    event: ExecInput,
+  ): Promise<ExecOutcome> {
+    const input: ExecInput = {
+      host: event.host,
+      repo: event.repo,
+      instruction: event.instruction,
+    };
+    if (session.requestorUserId === undefined) {
+      this.audit({
+        session_key: session.key,
+        team_id: session.teamId ?? null,
+        user_id: null,
+        kind: 'correction',
+        tool: 'exec',
+        result: 'refused_no_requestor',
+      });
+      return { ok: false, reason: 'exec requires a recorded requestor opt-in' };
+    }
+    if (!this.hasExecOptIn(session)) {
+      this.audit({
+        session_key: session.key,
+        team_id: session.teamId ?? null,
+        user_id: session.requestorUserId,
+        kind: 'correction',
+        tool: 'exec',
+        result: 'refused_no_opt_in',
+      });
+      return { ok: false, reason: 'exec requires an explicit recorded opt-in for the requestor' };
+    }
+
+    const execFactory = this.buildRunnerFactory;
+    if (execFactory === undefined) {
+      throw new Error(
+        '[session] run_exec fired but buildRunnerFactory is not configured — this is a programming error',
+      );
+    }
+
+    this.audit({
+      session_key: session.key,
+      team_id: session.teamId ?? null,
+      user_id: session.requestorUserId,
+      kind: 'action',
+      tool: 'exec',
+      result: 'started',
+    });
+
+    const placeholder = await postPlaceholder(this.slack, item.channel, item.threadTs);
+    let runner: SessionRunner | undefined;
+    try {
+      runner = await execFactory.createExecRunner(session.key, input);
+      const outcome = await this.driveToThread(runner.send(''), placeholder, session, item);
+      if (outcome.type === 'pr_opened') return { ok: true, prUrl: outcome.url };
+      if (outcome.type === 'error') return { ok: false, reason: outcome.message };
+      if (outcome.type === 'abandoned') return { ok: false, reason: outcome.reason };
+      return { ok: true };
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      if (placeholder !== null) {
+        try {
+          await updatePlaceholder(this.slack, placeholder, `:x: Exec failed to start: ${reason}`);
+        } catch {
+          // best effort — must not mask the real outcome
+        }
+      }
+      return { ok: false, reason };
+    } finally {
+      if (runner !== undefined) await runner.dispose();
     }
   }
 

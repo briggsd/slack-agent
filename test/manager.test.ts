@@ -107,6 +107,8 @@ class SeededStore implements SessionStore {
   sumCostByTask(_sessionKey: string): number { return 0; }
   sumCostByUserSince(_userId: string, _sinceMs: number): number { return 0; }
   sumCostGlobalSince(_sinceMs: number): number { return 0; }
+  hasExecOptIn(_teamId: string, _userId: string): boolean { return false; }
+  recordExecOptIn(_teamId: string, _userId: string, _atMs: number): void {}
 }
 
 function makeManager(idleTimeoutMs = 60_000, script: TurnScript[] = []) {
@@ -963,6 +965,16 @@ class CapturingStore implements SessionStore {
       .filter((a) => a.ts > sinceMs && a.cost_micro_usd !== null)
       .reduce((sum, a) => sum + (a.cost_micro_usd ?? 0), 0);
   }
+
+  hasExecOptIn(teamId: string, userId: string): boolean {
+    return this.execOptIns.has(`${teamId}:${userId}`);
+  }
+
+  recordExecOptIn(teamId: string, userId: string, _atMs: number): void {
+    this.execOptIns.add(`${teamId}:${userId}`);
+  }
+
+  private readonly execOptIns = new Set<string>();
 }
 
 /** A fake VolumeReaper that records which keys it was asked to remove. */

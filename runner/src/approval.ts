@@ -13,6 +13,7 @@ import type {
   ApprovalVerdictMessage,
   BuildResultMessage,
   CloneResultMessage,
+  ExecResultMessage,
   PublishResultMessage,
   RunChecksResult,
   RunChecksResultMessage,
@@ -176,6 +177,7 @@ export type InboundParsed =
   | { kind: 'verdict'; msg: ApprovalVerdictMessage }
   | { kind: 'clone_result'; msg: CloneResultMessage }
   | { kind: 'build_result'; msg: BuildResultMessage }
+  | { kind: 'exec_result'; msg: ExecResultMessage }
   | { kind: 'publish_result'; msg: PublishResultMessage }
   | { kind: 'run_checks_result'; msg: RunChecksResultMessage }
   | { kind: 'bad'; error: string };
@@ -246,6 +248,24 @@ export function parseInbound(line: string): InboundParsed {
       msg = { type: 'build_result', id, ok: false };
     }
     return { kind: 'build_result', msg };
+  }
+  if (obj['type'] === 'exec_result') {
+    if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
+      return { kind: 'bad', error: 'unexpected exec_result shape' };
+    }
+    const ok = obj['ok'];
+    const id = obj['id'];
+    let msg: ExecResultMessage;
+    if (ok && typeof obj['prUrl'] === 'string') {
+      msg = { type: 'exec_result', id, ok: true, prUrl: obj['prUrl'] };
+    } else if (ok) {
+      msg = { type: 'exec_result', id, ok: true };
+    } else if (typeof obj['reason'] === 'string') {
+      msg = { type: 'exec_result', id, ok: false, reason: obj['reason'] };
+    } else {
+      msg = { type: 'exec_result', id, ok: false };
+    }
+    return { kind: 'exec_result', msg };
   }
   if (obj['type'] === 'publish_result') {
     if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
