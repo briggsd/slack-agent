@@ -15,3 +15,6 @@ design/
 
 # ai-code-review-factory output when run locally in a checkout/worktree
 .ai-review/
+
+# vitest cache (relocated out of node_modules via cacheDir in vitest.config.ts)
+.vite/

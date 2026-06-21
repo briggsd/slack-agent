@@ -1,13 +1,12 @@
 /**
- * Container-side publish coordinator.
+ * Container-side publish/edit/comment coordinators.
  *
- * The `publish`/`open_pr` tools call {@link PublishCoordinator.requestPublish} from inside a
- * live SDK turn. That emits a `request_publish` line to the gateway and blocks on a promise.
- * The runner's stdin dispatcher routes the gateway's `publish_result` back in via
- * {@link PublishCoordinator.handleResult}, which resolves the promise.
+ * The `publish`/`open_pr`, `edit_pr`, and `comment_pr` tools emit request_* lines to the gateway
+ * and block on promises. The runner's stdin dispatcher routes the matching *_result messages back
+ * in here so the waiting tools can resume.
  */
 
-import type { PublishResultMessage } from './protocol.js';
+import type { PublishResultMessage, PrEditResultMessage, PrCommentResultMessage } from './protocol.js';
 
 /** The outcome of publishing, as the publish tool sees it. */
 export type PublishOutcome =
@@ -20,56 +19,141 @@ export interface PublishInput {
   body?: string;
 }
 
+export type PrEditOutcome =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+export interface PrEditInput {
+  repo: string;
+  title?: string;
+  body?: string;
+}
+
+export type PrCommentOutcome =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+export interface PrCommentInput {
+  repo: string;
+  comment: string;
+}
+
 /** Emits a `request_publish` line. Injected so the coordinator never touches stdout directly. */
 export type EmitRequestPublishFn = (input: PublishInput, id: string) => void;
+export type EmitRequestPrEditFn = (input: PrEditInput, id: string) => void;
+export type EmitRequestPrCommentFn = (input: PrCommentInput, id: string) => void;
 
-export class PublishCoordinator {
-  private readonly pending = new Map<string, (outcome: PublishOutcome) => void>();
+class RequestCoordinator<TInput, TResultMessage extends { id: string }, TOutcome> {
+  private readonly pending = new Map<string, (outcome: TOutcome) => void>();
   private seq = 0;
-  /** Set once stdin closes: no result can arrive after this, so new publishes resolve immediately. */
   private drained = false;
 
-  constructor(private readonly emitRequest: EmitRequestPublishFn) {}
+  constructor(
+    private readonly prefix: string,
+    private readonly emitRequest: (input: TInput, id: string) => void,
+    private readonly fromMessage: (msg: TResultMessage) => TOutcome,
+    private readonly shutdownOutcome: TOutcome,
+  ) {}
 
-  /**
-   * Request publication: emit `request_publish` and resolve when the matching result arrives.
-   * Once {@link failAllPending} has drained (stdin closed), resolve immediately as a failure.
-   */
-  requestPublish(input: PublishInput): Promise<PublishOutcome> {
+  request(input: TInput): Promise<TOutcome> {
     if (this.drained) {
-      return Promise.resolve({ ok: false, reason: 'shutting down' });
+      return Promise.resolve(this.shutdownOutcome);
     }
-    const id = `publish-${++this.seq}`;
-    return new Promise<PublishOutcome>((resolve) => {
+    const id = `${this.prefix}-${++this.seq}`;
+    return new Promise<TOutcome>((resolve) => {
       this.pending.set(id, resolve);
       this.emitRequest(input, id);
     });
   }
 
-  /**
-   * Route an inbound `publish_result` to its waiting publish request. Returns true if it
-   * matched a pending request, false for an unknown or already-settled id.
-   */
-  handleResult(msg: PublishResultMessage): boolean {
+  handleResult(msg: TResultMessage): boolean {
     const resolve = this.pending.get(msg.id);
     if (resolve === undefined) return false;
     this.pending.delete(msg.id);
-    const outcome: PublishOutcome = msg.ok
-      ? { ok: true, prUrl: msg.prUrl ?? '' }
-      : { ok: false, reason: msg.reason ?? 'publish failed' };
-    resolve(outcome);
+    resolve(this.fromMessage(msg));
     return true;
   }
 
-  /**
-   * Resolve every still-pending publish as failed. Called when stdin closes so a tool parked
-   * on a result that will never come can't wedge the process at shutdown.
-   */
   failAllPending(): void {
     this.drained = true;
     for (const [id, resolve] of this.pending) {
       this.pending.delete(id);
-      resolve({ ok: false, reason: 'shutting down' });
+      resolve(this.shutdownOutcome);
     }
+  }
+}
+
+export class PublishCoordinator {
+  private readonly base: RequestCoordinator<PublishInput, PublishResultMessage, PublishOutcome>;
+
+  constructor(emitRequest: EmitRequestPublishFn) {
+    this.base = new RequestCoordinator(
+      'publish',
+      emitRequest,
+      (msg) => msg.ok ? { ok: true, prUrl: msg.prUrl ?? '' } : { ok: false, reason: msg.reason ?? 'publish failed' },
+      { ok: false, reason: 'shutting down' },
+    );
+  }
+
+  requestPublish(input: PublishInput): Promise<PublishOutcome> {
+    return this.base.request(input);
+  }
+
+  handleResult(msg: PublishResultMessage): boolean {
+    return this.base.handleResult(msg);
+  }
+
+  failAllPending(): void {
+    this.base.failAllPending();
+  }
+}
+
+export class EditPrCoordinator {
+  private readonly base: RequestCoordinator<PrEditInput, PrEditResultMessage, PrEditOutcome>;
+
+  constructor(emitRequest: EmitRequestPrEditFn) {
+    this.base = new RequestCoordinator(
+      'pr-edit',
+      emitRequest,
+      (msg) => msg.ok ? { ok: true } : { ok: false, reason: msg.reason ?? 'edit PR failed' },
+      { ok: false, reason: 'shutting down' },
+    );
+  }
+
+  requestEditPr(input: PrEditInput): Promise<PrEditOutcome> {
+    return this.base.request(input);
+  }
+
+  handleResult(msg: PrEditResultMessage): boolean {
+    return this.base.handleResult(msg);
+  }
+
+  failAllPending(): void {
+    this.base.failAllPending();
+  }
+}
+
+export class CommentPrCoordinator {
+  private readonly base: RequestCoordinator<PrCommentInput, PrCommentResultMessage, PrCommentOutcome>;
+
+  constructor(emitRequest: EmitRequestPrCommentFn) {
+    this.base = new RequestCoordinator(
+      'pr-comment',
+      emitRequest,
+      (msg) => msg.ok ? { ok: true } : { ok: false, reason: msg.reason ?? 'comment PR failed' },
+      { ok: false, reason: 'shutting down' },
+    );
+  }
+
+  requestCommentPr(input: PrCommentInput): Promise<PrCommentOutcome> {
+    return this.base.request(input);
+  }
+
+  handleResult(msg: PrCommentResultMessage): boolean {
+    return this.base.handleResult(msg);
+  }
+
+  failAllPending(): void {
+    this.base.failAllPending();
   }
 }

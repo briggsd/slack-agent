@@ -24,6 +24,8 @@ export type GatewayToRunnerMessage =
   | BuildResultMessage
   | ExecResultMessage
   | PublishResultMessage
+  | PrEditResultMessage
+  | PrCommentResultMessage
   | RunChecksResultMessage
   | ProvisionResultMessage;
 
@@ -119,6 +121,30 @@ export type PublishResultMessage = {
   reason?: string;  // present iff !ok — short, token-free
 };
 
+/**
+ * The gateway's result of editing this thread's PR the runner requested via a
+ * {@link RequestPrEditMessage}. `id` echoes the `request_pr_edit` this answers.
+ * `reason` is a short diagnostic (present iff `!ok`, token-free).
+ */
+export type PrEditResultMessage = {
+  type: 'pr_edit_result';
+  id: string;       // echoes the request_pr_edit this answers
+  ok: boolean;
+  reason?: string;  // present iff !ok — short, token-free
+};
+
+/**
+ * The gateway's result of commenting on this thread's PR the runner requested via a
+ * {@link RequestPrCommentMessage}. `id` echoes the `request_pr_comment` this answers.
+ * `reason` is a short diagnostic (present iff `!ok`, token-free).
+ */
+export type PrCommentResultMessage = {
+  type: 'pr_comment_result';
+  id: string;       // echoes the request_pr_comment this answers
+  ok: boolean;
+  reason?: string;  // present iff !ok — short, token-free
+};
+
 export type CheckKind = 'lint' | 'test';
 export type RunChecksKind = CheckKind | 'all';
 
@@ -170,6 +196,8 @@ export type RunnerToGatewayMessage =
   | RequestBuildMessage
   | RequestExecMessage
   | RequestPublishMessage
+  | RequestPrEditMessage
+  | RequestPrCommentMessage
   | RequestRunChecksMessage
   | RequestProvisionMessage
   | ErrorMessage;
@@ -304,6 +332,33 @@ export type RequestPublishMessage = {
   repo: string;   // "owner/name" — the verified repo candidate to publish
   title?: string; // optional PR title override
   body?: string;  // optional PR body override
+};
+
+/**
+ * The runner requests that the gateway replace this thread PR's title/body. Raised from INSIDE a
+ * turn: the agent calls the `edit_pr` tool, which emits this line and blocks until the gateway
+ * answers with a {@link PrEditResultMessage} bearing the same `id`. The gateway resolves the PR
+ * by this thread's deterministic head branch; the model never supplies a PR number.
+ */
+export type RequestPrEditMessage = {
+  type: 'request_pr_edit';
+  id: string;     // the runner's own pr-edit correlation id
+  repo: string;   // "owner/name"
+  title?: string; // optional new title
+  body?: string;  // optional new body
+};
+
+/**
+ * The runner requests that the gateway add a comment to this thread's PR. Raised from INSIDE a
+ * turn: the agent calls the `comment_pr` tool, which emits this line and blocks until the gateway
+ * answers with a {@link PrCommentResultMessage} bearing the same `id`. The gateway resolves the
+ * PR by this thread's deterministic head branch; the model never supplies a PR number.
+ */
+export type RequestPrCommentMessage = {
+  type: 'request_pr_comment';
+  id: string;      // the runner's own pr-comment correlation id
+  repo: string;    // "owner/name"
+  comment: string; // comment text
 };
 
 /**

@@ -12,6 +12,9 @@ import type {
   PushRequest,
   VerifyRepoRequest,
   OpenChangeRequest,
+  EditChangeRequest,
+  CommentChangeRequest,
+  ChangeRequestMutationResult,
   CheckRequest,
   CheckResult,
   ProvisionRuntimeRequest,
@@ -23,6 +26,8 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   public repoVerifications: VerifyRepoRequest[] = [];
   public pushes: PushRequest[] = [];
   public changeRequests: OpenChangeRequest[] = [];
+  public prEdits: EditChangeRequest[] = [];
+  public prComments: CommentChangeRequest[] = [];
   public checks: CheckRequest[] = [];
   public runtimeProvisions: ProvisionRuntimeRequest[] = [];
 
@@ -34,8 +39,12 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   private verifyRepoResult = true;
   private pushError: Error | null = null;
   private openChangeError: Error | null = null;
+  private editChangeError: Error | null = null;
+  private commentChangeError: Error | null = null;
   private checkError: Error | null = null;
   private provisionRuntimeError: Error | null = null;
+  private editChangeResult: ChangeRequestMutationResult;
+  private commentChangeResult: ChangeRequestMutationResult;
 
   /** Fixed fallback result when no queue entry is available. */
   private checkResults: Map<'lint' | 'test', CheckResult> = new Map();
@@ -49,6 +58,8 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
     this.prUrl = prUrl;
     this.prNumber = 1;
     this.prHeadSha = 'fake-head-sha';
+    this.editChangeResult = { prUrl: this.prUrl };
+    this.commentChangeResult = { prUrl: this.prUrl };
   }
 
   /** Script clone() to reject with the given error (for failure-path tests). */
@@ -74,6 +85,26 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   /** Script openChangeRequest() to reject with the given error (for failure-path tests). */
   failNextOpenChange(err: Error): void {
     this.openChangeError = err;
+  }
+
+  /** Script editChangeRequest() to reject with the given error. */
+  failNextEditChange(err: Error): void {
+    this.editChangeError = err;
+  }
+
+  /** Script commentChangeRequest() to reject with the given error. */
+  failNextCommentChange(err: Error): void {
+    this.commentChangeError = err;
+  }
+
+  /** Script editChangeRequest() to return a specific result. */
+  setEditChangeResult(result: ChangeRequestMutationResult): void {
+    this.editChangeResult = result;
+  }
+
+  /** Script commentChangeRequest() to return a specific result. */
+  setCommentChangeResult(result: ChangeRequestMutationResult): void {
+    this.commentChangeResult = result;
   }
 
   /** Script runCheck() to reject with the given error (for infrastructure failure tests). */
@@ -141,6 +172,26 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
       throw err;
     }
     return { url: this.prUrl, number: this.prNumber, headSha: this.prHeadSha };
+  }
+
+  async editChangeRequest(req: EditChangeRequest): Promise<ChangeRequestMutationResult> {
+    this.prEdits.push(req);
+    if (this.editChangeError !== null) {
+      const err = this.editChangeError;
+      this.editChangeError = null;
+      throw err;
+    }
+    return this.editChangeResult;
+  }
+
+  async commentChangeRequest(req: CommentChangeRequest): Promise<ChangeRequestMutationResult> {
+    this.prComments.push(req);
+    if (this.commentChangeError !== null) {
+      const err = this.commentChangeError;
+      this.commentChangeError = null;
+      throw err;
+    }
+    return this.commentChangeResult;
   }
 
   async runCheck(req: CheckRequest): Promise<CheckResult> {

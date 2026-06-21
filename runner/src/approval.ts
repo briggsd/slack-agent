@@ -15,6 +15,8 @@ import type {
   CloneResultMessage,
   ExecResultMessage,
   PublishResultMessage,
+  PrEditResultMessage,
+  PrCommentResultMessage,
   ProvisionResultMessage,
   RunChecksResult,
   RunChecksResultMessage,
@@ -180,6 +182,8 @@ export type InboundParsed =
   | { kind: 'build_result'; msg: BuildResultMessage }
   | { kind: 'exec_result'; msg: ExecResultMessage }
   | { kind: 'publish_result'; msg: PublishResultMessage }
+  | { kind: 'pr_edit_result'; msg: PrEditResultMessage }
+  | { kind: 'pr_comment_result'; msg: PrCommentResultMessage }
   | { kind: 'run_checks_result'; msg: RunChecksResultMessage }
   | { kind: 'provision_result'; msg: ProvisionResultMessage }
   | { kind: 'bad'; error: string };
@@ -286,6 +290,28 @@ export function parseInbound(line: string): InboundParsed {
       msg = { type: 'publish_result', id, ok: false };
     }
     return { kind: 'publish_result', msg };
+  }
+  if (obj['type'] === 'pr_edit_result') {
+    if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
+      return { kind: 'bad', error: 'unexpected pr_edit_result shape' };
+    }
+    const ok = obj['ok'];
+    const id = obj['id'];
+    const msg: PrEditResultMessage = !ok && typeof obj['reason'] === 'string'
+      ? { type: 'pr_edit_result', id, ok: false, reason: obj['reason'] }
+      : { type: 'pr_edit_result', id, ok };
+    return { kind: 'pr_edit_result', msg };
+  }
+  if (obj['type'] === 'pr_comment_result') {
+    if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
+      return { kind: 'bad', error: 'unexpected pr_comment_result shape' };
+    }
+    const ok = obj['ok'];
+    const id = obj['id'];
+    const msg: PrCommentResultMessage = !ok && typeof obj['reason'] === 'string'
+      ? { type: 'pr_comment_result', id, ok: false, reason: obj['reason'] }
+      : { type: 'pr_comment_result', id, ok };
+    return { kind: 'pr_comment_result', msg };
   }
   if (obj['type'] === 'run_checks_result') {
     if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
