@@ -148,6 +148,7 @@ async function main(): Promise<void> {
     factory,
     store,
     idleTimeoutMs: config.IDLE_TIMEOUT_MS,
+    planningIdleTimeoutMs: config.PLANNING_IDLE_TIMEOUT_MS,
     gateTimeoutMs: config.GATE_TIMEOUT_MS,
     botUserId,
     ...(volumeReaper !== undefined && { volumeReaper }),

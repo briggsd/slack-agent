@@ -46,6 +46,7 @@ function envString(name: string, defaultValue: string): string {
 
 const RUNNER_BACKEND = envString('RUNNER_BACKEND', 'fake');
 const IDLE_TIMEOUT_MS = envNumber('IDLE_TIMEOUT_MS', 10 * 60 * 1000);
+const PLANNING_IDLE_TIMEOUT_MS = envNumber('PLANNING_IDLE_TIMEOUT_MS', 4 * 60 * 60 * 1000);
 const BOT_USER_ID = 'UHARNESS';
 
 let baseFactory: RunnerFactory;
@@ -107,6 +108,7 @@ buildGateway({
   factory: dispatchingFactory,
   store,
   idleTimeoutMs: IDLE_TIMEOUT_MS,
+  planningIdleTimeoutMs: PLANNING_IDLE_TIMEOUT_MS,
   botUserId: BOT_USER_ID,
 });
 

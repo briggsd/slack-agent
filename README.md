@@ -119,6 +119,7 @@ and includes `git`, `curl`, and `ripgrep` as agent tools.
 | `ANTHROPIC_API_KEY` | yes | Passed to each container via `-e ANTHROPIC_API_KEY` (value never appears in `docker` argv) |
 | `RUNNER_IMAGE` | no (default `slackbot-runner:latest`) | Docker image to run |
 | `RUNNER_BACKEND` | no (default `fake`) | Set to `docker` to enable real containers |
+| `PLANNING_IDLE_TIMEOUT_MS` | no (default 4h) | How long an idle conversational planning session is kept alive before posting an expiry notice and reaping its container. |
 | `GITHUB_BOT_TOKEN` | no | Bot-account token for one-shot GitHub repo tasks. Stays gateway-side; never enters the agent sandbox. Without it, a `task`/`exec github:…` mention errors. |
 | `GATE_TIMEOUT_MS` | no (default 15 min) | How long a supervised (`task`) run waits at the plan-approval gate for a reply before abandoning. |
 | `GITLAB_BOT_TOKEN` | no | Same, for GitLab (provider not yet implemented). |
