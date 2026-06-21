@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { parseCheckCmds, parseRepoAllowlist, parseRuntimeCatalog } from '../src/config.js';
+import {
+  assertDogfoodGate,
+  parseCheckCmds,
+  parseRepoAllowlist,
+  parseRuntimeCatalog,
+} from '../src/config.js';
 
 describe('parseCheckCmds', () => {
   it('returns an empty map for undefined input', () => {
@@ -213,12 +218,57 @@ describe('parseRuntimeCatalog', () => {
   });
 });
 
+describe('assertDogfoodGate', () => {
+  it('does not throw when the self-repo is not allowlisted, including empty and ignored wrong-command maps', () => {
+    expect(() => assertDogfoodGate(new Set(), new Map())).not.toThrow();
+    expect(() => assertDogfoodGate(
+      new Set(['acme/widgets']),
+      new Map([['briggsd/slack-agent', { test: 'npm test' }]]),
+    )).not.toThrow();
+  });
+
+  it('does not throw when the self-repo is allowlisted and uses npm run gate as its test command', () => {
+    expect(() => assertDogfoodGate(
+      new Set(['briggsd/slack-agent']),
+      new Map([['briggsd/slack-agent', { test: 'npm run gate' }]]),
+    )).not.toThrow();
+  });
+
+  it('throws when the self-repo is allowlisted but has no check command entry', () => {
+    expect(() => assertDogfoodGate(
+      new Set(['briggsd/slack-agent']),
+      new Map(),
+    )).toThrow(/ONESHOT_CHECK_CMDS/);
+  });
+
+  it('throws when the self-repo is allowlisted but uses the wrong test command', () => {
+    expect(() => assertDogfoodGate(
+      new Set(['briggsd/slack-agent']),
+      new Map([['briggsd/slack-agent', { test: 'npm test' }]]),
+    )).toThrow(/npm run gate/);
+  });
+
+  it('throws when the self-repo is allowlisted but only lint is configured', () => {
+    expect(() => assertDogfoodGate(
+      new Set(['briggsd/slack-agent']),
+      new Map([['briggsd/slack-agent', { lint: 'npm run gate' }]]),
+    )).toThrow(/docs\/DOGFOODING\.md/);
+  });
+});
+
 describe('GATE_TIMEOUT_MS config', () => {
   // loadConfig() reads process.env directly and requires the two Slack tokens.
   // These tests stub the whole env (tokens + the var under test), call the real
   // loadConfig(), then restore — so they exercise the actual config path rather
   // than re-asserting arithmetic.
-  const TOUCHED = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'GATE_TIMEOUT_MS', 'PLANNING_IDLE_TIMEOUT_MS'] as const;
+  const TOUCHED = [
+    'SLACK_BOT_TOKEN',
+    'SLACK_APP_TOKEN',
+    'GATE_TIMEOUT_MS',
+    'PLANNING_IDLE_TIMEOUT_MS',
+    'CLONE_REPO_ALLOWLIST',
+    'ONESHOT_CHECK_CMDS',
+  ] as const;
   const saved: Record<string, string | undefined> = {};
 
   beforeEach(() => {
@@ -226,6 +276,8 @@ describe('GATE_TIMEOUT_MS config', () => {
     process.env['SLACK_BOT_TOKEN'] = 'xoxb-test';
     process.env['SLACK_APP_TOKEN'] = 'xapp-test';
     delete process.env['PLANNING_IDLE_TIMEOUT_MS'];
+    delete process.env['CLONE_REPO_ALLOWLIST'];
+    delete process.env['ONESHOT_CHECK_CMDS'];
   });
 
   afterEach(() => {
@@ -269,6 +321,15 @@ describe('GATE_TIMEOUT_MS config', () => {
     process.env['PLANNING_IDLE_TIMEOUT_MS'] = 'later';
     const { loadConfig } = await import('../src/config.js');
     expect(() => loadConfig()).toThrow(/PLANNING_IDLE_TIMEOUT_MS/);
+  });
+
+  it('surfaces the dogfood gate assertion during config load', async () => {
+    process.env['CLONE_REPO_ALLOWLIST'] = 'briggsd/slack-agent';
+    process.env['ONESHOT_CHECK_CMDS'] = JSON.stringify({
+      'briggsd/slack-agent': { test: 'npm test' },
+    });
+    const { loadConfig } = await import('../src/config.js');
+    expect(() => loadConfig()).toThrow(/docs\/DOGFOODING\.md/);
   });
 });
 
