@@ -53,6 +53,9 @@ export interface RepoCheckCmds {
   test?: string;
 }
 
+const SELF_REPO = 'briggsd/slack-agent';
+const REQUIRED_SELF_CHECK_CMD = 'npm run gate';
+
 export interface RuntimeCatalogEntry {
   version: string;
   url: string;
@@ -158,6 +161,19 @@ export function parseRepoAllowlist(raw: string | undefined): ReadonlySet<string>
     result.add(repo.toLowerCase());
   }
   return result;
+}
+
+export function assertDogfoodGate(
+  allowlist: ReadonlySet<string>,
+  checkCmds: ReadonlyMap<string, RepoCheckCmds>,
+): void {
+  if (!allowlist.has(SELF_REPO)) return;
+
+  if (checkCmds.get(SELF_REPO)?.test === REQUIRED_SELF_CHECK_CMD) return;
+
+  throw new Error(
+    `${SELF_REPO} is in CLONE_REPO_ALLOWLIST, so its ONESHOT_CHECK_CMDS test command must be ${REQUIRED_SELF_CHECK_CMD}. See docs/DOGFOODING.md.`,
+  );
 }
 
 function isRuntimeRecord(value: unknown): value is Record<string, unknown> {
@@ -287,6 +303,10 @@ export function loadConfig(): Config {
     );
   }
 
+  const cloneRepoAllowlist = parseRepoAllowlist(process.env['CLONE_REPO_ALLOWLIST']);
+  const checkCmds = parseCheckCmds(process.env['ONESHOT_CHECK_CMDS']);
+  assertDogfoodGate(cloneRepoAllowlist, checkCmds);
+
   return {
     SLACK_BOT_TOKEN: requireEnv('SLACK_BOT_TOKEN'),
     SLACK_APP_TOKEN: requireEnv('SLACK_APP_TOKEN'),
@@ -310,10 +330,10 @@ export function loadConfig(): Config {
       GIT_IMAGE: optionalEnvString('GIT_IMAGE', 'slackbot-runner:latest'),
       githubToken: optionalEnvMaybe('GITHUB_BOT_TOKEN'),
       gitlabToken: optionalEnvMaybe('GITLAB_BOT_TOKEN'),
-      cloneRepoAllowlist: parseRepoAllowlist(process.env['CLONE_REPO_ALLOWLIST']),
+      cloneRepoAllowlist,
       lintCommand: optionalEnvMaybe('ONESHOT_LINT_CMD'),
       testCommand: optionalEnvMaybe('ONESHOT_TEST_CMD'),
-      checkCmds: parseCheckCmds(process.env['ONESHOT_CHECK_CMDS']),
+      checkCmds,
       runtimeCatalog: readRuntimeCatalog(optionalEnvString('RUNTIME_CATALOG_PATH', 'config/runtimes.json')),
     },
     spendCaps: {
