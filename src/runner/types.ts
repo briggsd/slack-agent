@@ -17,7 +17,7 @@ export type RunnerEvent =
   // gateway-internal: a pull request was successfully opened. The gateway posts the URL to Slack
   // AND records an audit event. NOT a protocol/wire change — this event never crosses the
   // container boundary; it is synthesised by the open-pr node and handled in the drain loop.
-  | { type: 'pr_opened'; url: string }
+  | { type: 'pr_opened'; url: string; repo: string; number: number; headSha: string }
   // per-turn cost + tokens, emitted just before the terminal text/error (and on
   // error/abandoned turns too — they still cost). Recorded to the audit ledger;
   // never acted on as control. Does NOT terminate the stream.

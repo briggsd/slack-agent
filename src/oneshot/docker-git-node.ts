@@ -423,7 +423,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     await runDocker(this.spawnFn, args, req.lease.token, 'git push', `repo: ${req.repo}, branch: ${req.branch}`);
   }
 
-  async openChangeRequest(req: OpenChangeRequest): Promise<{ url: string }> {
+  async openChangeRequest(req: OpenChangeRequest): Promise<{ url: string; number: number; headSha: string }> {
     const provider = providerFor(req.lease.host);
 
     // Detect the repo's real default branch — not a hardcoded 'main'

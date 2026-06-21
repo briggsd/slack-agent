@@ -22,7 +22,7 @@ import type { SpendCapsConfig } from '../config.js';
  * (ignored) and `runBuild` (to translate into a `BuildOutcome`).
  */
 type DriveOutcome =
-  | { type: 'pr_opened'; url: string }
+  | { type: 'pr_opened'; url: string; repo: string; number: number; headSha: string }
   | { type: 'abandoned'; reason: string }
   | { type: 'error'; message: string }
   | { type: 'completed' };
@@ -771,7 +771,31 @@ export class SessionManager {
             result: 'opened',
           });
 
-          captured = { type: 'pr_opened', url: event.url };
+          // Best-effort: the PR is already open, so a metadata-write hiccup must not
+          // flip a successful turn into an error. Swallow + log (session key only),
+          // mirroring how audit() guards recordAudit.
+          try {
+            this.store.recordPullRequest({
+              session_key: session.key,
+              team_id: session.teamId ?? null,
+              repo: event.repo,
+              pr_number: event.number,
+              head_sha: event.headSha,
+              profile_id: session.profileId,
+              opened_at: this.now(),
+            });
+          } catch (prErr: unknown) {
+            const msg = prErr instanceof Error ? prErr.message : String(prErr);
+            console.error(`[session] store.recordPullRequest failed for ${session.key}: ${msg}`);
+          }
+
+          captured = {
+            type: 'pr_opened',
+            url: event.url,
+            repo: event.repo,
+            number: event.number,
+            headSha: event.headSha,
+          };
           // Don't break — let the loop drain to done
         } else if (event.type === 'usage') {
           // Slice A: record per-turn cost to the audit ledger. Measurement only — no

@@ -426,6 +426,46 @@ describe('SqliteSessionStore — audit_events', () => {
   });
 });
 
+describe('SqliteSessionStore — pull_requests', () => {
+  let store: SqliteSessionStore;
+
+  beforeEach(() => {
+    store = new SqliteSessionStore(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it('recordPullRequest + listOpenPullRequests round-trips the stored row with SQL defaults', () => {
+    store.recordPullRequest({
+      session_key: 'TEAM:C:TS',
+      team_id: 'TEAM1',
+      repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'abc123def456',
+      profile_id: 'repo-oneshot',
+      opened_at: 1_700_000_000_000,
+    });
+
+    const rows = store.listOpenPullRequests();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({
+      id: 1,
+      session_key: 'TEAM:C:TS',
+      team_id: 'TEAM1',
+      repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'abc123def456',
+      profile_id: 'repo-oneshot',
+      opened_at: 1_700_000_000_000,
+      state: 'open',
+      last_polled_at: null,
+      resolved_at: null,
+    });
+  });
+});
+
 // ─── SqliteSessionStore — durability, migration, and indexes ─────────────────
 // These tests use a real temp-file DB so two connections share the same underlying
 // file, proving that rows survive a store close/reopen cycle.

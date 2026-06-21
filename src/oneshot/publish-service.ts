@@ -78,7 +78,7 @@ export class RealPublishService implements PublishService {
       }
 
       try {
-        const { url } = await this.gitNodes.openChangeRequest({
+        const { url, number, headSha } = await this.gitNodes.openChangeRequest({
         lease,
         repo: req.repo,
         head: branch,
@@ -88,7 +88,7 @@ export class RealPublishService implements PublishService {
         title,
         body,
         });
-        return { ok: true, prUrl: url };
+        return { ok: true, prUrl: url, prNumber: number, headSha };
       } catch {
         return { ok: false, reason: 'open PR failed' };
       }

@@ -654,7 +654,13 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
       { type: 'text', text: 'router resumed' },
     ];
     const execScript: RunnerEvent[] = [
-      { type: 'pr_opened', url: 'https://github.com/acme/widgets/pull/42' },
+      {
+        type: 'pr_opened',
+        url: 'https://github.com/acme/widgets/pull/42',
+        repo: 'acme/widgets',
+        number: 42,
+        headSha: 'exec-head-sha',
+      },
       { type: 'text', text: 'exec done' },
     ];
     const routerFactory = new FakeRunnerFactory([[...routerScript]]);
@@ -714,7 +720,13 @@ describe('S12a — driveToThread extraction is behaviour-preserving', () => {
     const slack = new FakeSlackClient();
 
     const script: RunnerEvent[] = [
-      { type: 'pr_opened', url: 'https://example.test/pr/99' },
+      {
+        type: 'pr_opened',
+        url: 'https://example.test/pr/99',
+        repo: 'acme/widgets',
+        number: 99,
+        headSha: 'drive-head-sha',
+      },
     ];
 
     const factory = new FakeRunnerFactory([[...script]]);

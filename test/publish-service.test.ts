@@ -38,7 +38,12 @@ describe('RealPublishService', () => {
       body: 'Verified body',
     });
 
-    expect(outcome).toEqual({ ok: true, prUrl: 'https://github.com/owner/repo/pull/1' });
+    expect(outcome).toEqual({
+      ok: true,
+      prUrl: 'https://github.com/owner/repo/pull/1',
+      prNumber: 1,
+      headSha: 'fake-head-sha',
+    });
     expect(broker.leases).toHaveLength(1);
     expect(broker.leases[0]).toMatchObject({ host: 'github', repo: 'owner/repo' });
     expect(broker.revokes).toHaveLength(1);

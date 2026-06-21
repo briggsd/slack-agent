@@ -20,6 +20,8 @@ import type {
   NewSessionRow,
   SessionStatus,
   AuditEvent,
+  NewPullRequestRow,
+  PullRequestRow,
 } from '../src/sessions/store.js';
 import { FakeSlackClient } from './responder.test.js';
 import type { SlackClientLike } from '../src/slack/responder.js';
@@ -93,6 +95,7 @@ class BuildSpecGateRunnerFactory implements RunnerFactory {
 class SeededStore implements SessionStore {
   private rows = new Map<string, SessionRow>();
   public audits: AuditEvent[] = [];
+  public pullRequests: PullRequestRow[] = [];
   seed(row: SessionRow): void {
     this.rows.set(row.session_key, row);
   }
@@ -103,7 +106,17 @@ class SeededStore implements SessionStore {
     return this.rows.get(key);
   }
   recordAudit(event: AuditEvent): void { this.audits.push(event); }
+  recordPullRequest(row: NewPullRequestRow): void {
+    this.pullRequests.push({
+      id: this.pullRequests.length + 1,
+      ...row,
+      state: 'open',
+      last_polled_at: null,
+      resolved_at: null,
+    });
+  }
   getAuditEvents(_sessionKey: string): AuditEvent[] { return []; }
+  listOpenPullRequests(): PullRequestRow[] { return this.pullRequests.filter((row) => row.state === 'open'); }
   listExpired(_cutoffMs: number): SessionRow[] { return []; }
   deleteSession(key: string): void { this.rows.delete(key); }
   close(): void {}
@@ -930,6 +943,7 @@ describe('SessionManager — abandoned event', () => {
  */
 class CapturingStore implements SessionStore {
   public audits: AuditEvent[] = [];
+  public pullRequests: PullRequestRow[] = [];
   public deletedKeys: string[] = [];
   private rows = new Map<string, SessionRow>();
 
@@ -951,8 +965,20 @@ class CapturingStore implements SessionStore {
   recordAudit(event: AuditEvent): void {
     this.audits.push(event);
   }
+  recordPullRequest(row: NewPullRequestRow): void {
+    this.pullRequests.push({
+      id: this.pullRequests.length + 1,
+      ...row,
+      state: 'open',
+      last_polled_at: null,
+      resolved_at: null,
+    });
+  }
   getAuditEvents(sessionKey: string): AuditEvent[] {
     return this.audits.filter((a) => a.session_key === sessionKey);
+  }
+  listOpenPullRequests(): PullRequestRow[] {
+    return this.pullRequests.filter((row) => row.state === 'open');
   }
   listExpired(cutoffMs: number): SessionRow[] {
     return Array.from(this.rows.values()).filter(
@@ -1149,7 +1175,13 @@ class PrOpenedRunner implements SessionRunner {
   constructor(readonly sessionKey: string) {}
   async *send(_m: string): RunnerStream {
     yield { type: 'status', text: 'opening PR…' };
-    yield { type: 'pr_opened', url: 'http://x/pr/1' };
+    yield {
+      type: 'pr_opened',
+      url: 'http://x/pr/1',
+      repo: 'acme/widgets',
+      number: 7,
+      headSha: 'deadbeef1234',
+    };
   }
   async dispose(): Promise<void> {}
 }
@@ -1289,10 +1321,17 @@ describe('SessionManager — audit emission', () => {
   it('emits action/open-pr when pr_opened flows, and placeholder shows "Opened PR:"', async () => {
     const slack = new FakeSlackClient();
     const store = new CapturingStore();
+    const openedAt = 1_700_000_000_000;
     const factory: RunnerFactory = {
       create: async (key) => new PrOpenedRunner(key),
     };
-    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      now: () => openedAt,
+    });
 
     await manager.enqueueNew('TEAM:C:T', {
       message: 'task github:a/b do x',
@@ -1310,6 +1349,20 @@ describe('SessionManager — audit emission', () => {
     expect(prAudits[0]?.summary).toBe('http://x/pr/1'); // URL is metadata, not message content
     expect(prAudits[0]?.reasoning).toBeNull();
     expect(prAudits[0]?.cost_tokens).toBeNull();
+
+    expect(store.pullRequests).toEqual([{
+      id: 1,
+      session_key: 'TEAM:C:T',
+      team_id: 'TEAM',
+      repo: 'acme/widgets',
+      pr_number: 7,
+      head_sha: 'deadbeef1234',
+      profile_id: 'conversational',
+      opened_at: openedAt,
+      state: 'open',
+      last_polled_at: null,
+      resolved_at: null,
+    }]);
 
     // Slack placeholder must show exactly one "Opened PR: <url>" surface.
     const openPrUpdates = slack.updates.filter((u) => u.text === 'Opened PR: http://x/pr/1');
