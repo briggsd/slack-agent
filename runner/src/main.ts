@@ -158,10 +158,13 @@ const CLONE_SYSTEM_PROMPT_ADDITION =
   'write only /workspace/SPEC.md. When ready, call build_spec (which reads /workspace/SPEC.md and ' +
   'builds the approved plan).';
 
+// Keep in sync with src/oneshot/docker-git-node.ts's DIFF_BASE_REF, which creates the ref.
+const DIFF_BASE_REF = 'refs/slack-agent/base';
+
 const PUBLISH_SYSTEM_PROMPT_ADDITION =
   'After build_spec returns candidate-ready, inspect the cloned repo worktree with normal ' +
   'workspace tools before publishing; for example, use Bash to run git -C /workspace/<owner-name> ' +
-  'diff main...HEAD or equivalent, then read enough changed files to judge the diff against ' +
+  `diff ${DIFF_BASE_REF}...HEAD, then read enough changed files to judge the diff against ` +
   '/workspace/SPEC.md. Call run_checks (mcp__commit__run_checks) with the same "owner/name" repo ' +
   'and interpret every result: exitCode 0 with skipped false means that check ran green; skipped true ' +
   'is inconclusive, not green; any non-zero exit code is red even when the tool call succeeded. Use ' +
@@ -871,7 +874,14 @@ function buildCommitMcpServer(
     async (args) => {
       const outcome = await cloneRepo(args.repo);
       if (outcome.ok) {
-        return { content: [{ type: 'text' as const, text: `Cloned to ${outcome.workdir}` }] };
+        return {
+          content: [{
+            type: 'text' as const,
+            text:
+              `Cloned to ${outcome.workdir}. Diff base ref: ${DIFF_BASE_REF}. ` +
+              `After build_spec, inspect with git -C ${outcome.workdir} diff ${DIFF_BASE_REF}...HEAD.`,
+          }],
+        };
       }
       return { content: [{ type: 'text' as const, text: `Clone failed: ${outcome.error}` }] };
     },

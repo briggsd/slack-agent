@@ -298,6 +298,8 @@ describe('runner main — basic flow', () => {
     expect(typeof append).toBe('string');
     expect(append).toContain('SPEC.md');
     expect(append).toContain('diff');
+    expect(append).toContain('refs/slack-agent/base...HEAD');
+    expect(append).not.toContain('diff main...HEAD');
     expect(append).toContain('run_checks');
     expect(append).toContain('publish');
     expect(append).toContain('only after');
