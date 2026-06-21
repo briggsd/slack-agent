@@ -95,7 +95,7 @@ function turnId(fake: FakeChildProcess): string {
 }
 
 describe('DockerRunner — request_publish round-trip', () => {
-  it('request_publish → status + publish_result{ok:true} written back when publishService returns ok', async () => {
+  it('request_publish → status + publish_result{ok:true} + pr_opened when publishService returns ok', async () => {
     const publishService = new FakePublishService();
     publishService.setOutcome({ ok: true, prUrl: 'https://github.com/owner/repo/pull/1' });
     const { runner, fake } = await makeReadyRunner({ publishService, volume: 'slackbot-ws-test' });
@@ -124,6 +124,7 @@ describe('DockerRunner — request_publish round-trip', () => {
       ok: true,
       prUrl: 'https://github.com/owner/repo/pull/1',
     });
+    expect(fake.stdinLines.filter((l) => l.includes('publish_result'))).toHaveLength(1);
     expect(publishService.publishes).toEqual([{
       repo: 'owner/repo',
       volume: 'slackbot-ws-test',
@@ -131,9 +132,16 @@ describe('DockerRunner — request_publish round-trip', () => {
       body: 'Verified body',
     }]);
 
-    fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'done' }));
     const e2 = await e2Promise;
-    expect(e2.value).toEqual({ type: 'text', text: 'done' });
+    expect(e2.value).toEqual({
+      type: 'pr_opened',
+      url: 'https://github.com/owner/repo/pull/1',
+    });
+
+    const e3Promise = iter.next();
+    fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'done' }));
+    const e3 = await e3Promise;
+    expect(e3.value).toEqual({ type: 'text', text: 'done' });
     expect((await iter.next()).done).toBe(true);
   });
 
@@ -164,6 +172,7 @@ describe('DockerRunner — request_publish round-trip', () => {
     fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'reported failure' }));
     const e2 = await e2Promise;
     expect(e2.value).toEqual({ type: 'text', text: 'reported failure' });
+    expect((await iter.next()).done).toBe(true);
   });
 
   it('no publishService wired → publish_result{ok:false, reason:"publish unavailable"}', async () => {
@@ -191,6 +200,7 @@ describe('DockerRunner — request_publish round-trip', () => {
     fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'ok' }));
     const e2 = await e2Promise;
     expect(e2.value).toEqual({ type: 'text', text: 'ok' });
+    expect((await iter.next()).done).toBe(true);
   });
 
   it('malformed request_publish (has id but no repo) writes malformed result and does not call service', async () => {
