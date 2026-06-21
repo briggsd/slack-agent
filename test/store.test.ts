@@ -244,6 +244,7 @@ describe('SqliteSessionStore — audit_events', () => {
       session_key: 'T:C:TS',
       team_id: 'TEAM1',
       user_id: 'U1',
+      profile_id: 'repo-oneshot',
       ts: 1_700_000_000_000,
       kind: 'lifecycle',
       tool: 'session',
@@ -261,6 +262,7 @@ describe('SqliteSessionStore — audit_events', () => {
     expect(row?.session_key).toBe('T:C:TS');
     expect(row?.team_id).toBe('TEAM1');
     expect(row?.user_id).toBe('U1');
+    expect(row?.profile_id).toBe('repo-oneshot');
     expect(row?.ts).toBe(1_700_000_000_000);
     expect(row?.kind).toBe('lifecycle');
     expect(row?.tool).toBe('session');
@@ -280,6 +282,7 @@ describe('SqliteSessionStore — audit_events', () => {
       session_key: 'K1',
       team_id: null,
       user_id: null,
+      profile_id: null,
       ts: 1000,
       kind: 'lifecycle',
       tool: 'session',
@@ -293,6 +296,7 @@ describe('SqliteSessionStore — audit_events', () => {
       session_key: 'K2',
       team_id: null,
       user_id: null,
+      profile_id: null,
       ts: 2000,
       kind: 'lifecycle',
       tool: 'session',
@@ -313,6 +317,7 @@ describe('SqliteSessionStore — audit_events', () => {
       session_key: 'SEQ',
       team_id: null,
       user_id: null,
+      profile_id: null,
       summary: null,
       reasoning: null,
       cost_tokens: null,
@@ -335,6 +340,7 @@ describe('SqliteSessionStore — audit_events', () => {
       session_key: 'S:C:T',
       team_id: 'T1',
       user_id: 'U1',
+      profile_id: 'repo-oneshot',
       ts: 9000,
       kind: 'action',
       tool: 'open-pr',
@@ -349,6 +355,7 @@ describe('SqliteSessionStore — audit_events', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.kind).toBe('action');
     expect(rows[0]?.tool).toBe('open-pr');
+    expect(rows[0]?.profile_id).toBe('repo-oneshot');
     expect(rows[0]?.summary).toBe(url);
     expect(rows[0]?.result).toBe('opened');
   });
@@ -358,6 +365,7 @@ describe('SqliteSessionStore — audit_events', () => {
       session_key: 'NULL:TEST',
       team_id: null,
       user_id: null,
+      profile_id: null,
       ts: 1,
       kind: 'approval',
       tool: null,
@@ -371,6 +379,7 @@ describe('SqliteSessionStore — audit_events', () => {
     const rows = store.getAuditEvents('NULL:TEST');
     expect(rows[0]?.team_id).toBeNull();
     expect(rows[0]?.user_id).toBeNull();
+    expect(rows[0]?.profile_id).toBeNull();
     expect(rows[0]?.tool).toBeNull();
     expect(rows[0]?.summary).toBeNull();
     expect(rows[0]?.reasoning).toBeNull();
@@ -384,6 +393,7 @@ describe('SqliteSessionStore — audit_events', () => {
       session_key: 'COST:TEST',
       team_id: 'TEAM1',
       user_id: 'U1',
+      profile_id: 'supervised-repo-oneshot',
       ts: 1_700_000_001_000,
       kind: 'cost',
       tool: null,
@@ -401,6 +411,7 @@ describe('SqliteSessionStore — audit_events', () => {
     expect(rows[0]?.cost_micro_usd).toBe(12300);
     expect(rows[0]?.team_id).toBe('TEAM1');
     expect(rows[0]?.user_id).toBe('U1');
+    expect(rows[0]?.profile_id).toBe('supervised-repo-oneshot');
     expect(rows[0]?.tool).toBeNull();
   });
 
@@ -409,6 +420,7 @@ describe('SqliteSessionStore — audit_events', () => {
       session_key: 'COST:NULL',
       team_id: null,
       user_id: null,
+      profile_id: null,
       ts: 2_000,
       kind: 'cost',
       tool: null,
@@ -711,6 +723,7 @@ describe('SqliteSessionStore — durability', () => {
       session_key: 'DURABLE:K',
       team_id: null,
       user_id: null,
+      profile_id: null,
       ts: 1_000,
       kind: 'lifecycle',
       tool: null,
@@ -729,6 +742,7 @@ describe('SqliteSessionStore — durability', () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]?.result).toBe('created');
+    expect(rows[0]?.profile_id).toBeNull();
   });
 
   it('migrates a 10-column audit_events table (pre-cost_micro_usd) and preserves existing rows', () => {
@@ -768,6 +782,7 @@ describe('SqliteSessionStore — durability', () => {
       session_key: 'OLD:K',
       team_id: null,
       user_id: null,
+      profile_id: null,
       ts: 1_000,
       kind: 'cost',
       tool: null,
@@ -784,6 +799,61 @@ describe('SqliteSessionStore — durability', () => {
     expect(allRows).toHaveLength(2);
     const costRow = allRows.find((r) => r.kind === 'cost');
     expect(costRow?.cost_micro_usd).toBe(5_000);
+  });
+
+  it('migrates an 11-column audit_events table (pre-profile_id) and preserves existing rows', () => {
+    const rawDb = new Database(dbPath);
+    rawDb.exec(`
+      CREATE TABLE audit_events (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key    TEXT    NOT NULL,
+        team_id        TEXT,
+        user_id        TEXT,
+        ts             INTEGER NOT NULL,
+        kind           TEXT    NOT NULL,
+        tool           TEXT,
+        summary        TEXT,
+        reasoning      TEXT,
+        result         TEXT,
+        cost_tokens    INTEGER,
+        cost_micro_usd INTEGER
+      );
+      INSERT INTO audit_events (
+        session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd
+      )
+      VALUES ('OLD:PROFILE', 'T1', 'U1', 700, 'lifecycle', 'session', null, null, 'created', 42, 9_000);
+    `);
+    rawDb.close();
+
+    const store = new SqliteSessionStore(dbPath);
+
+    const rows = store.getAuditEvents('OLD:PROFILE');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.session_key).toBe('OLD:PROFILE');
+    expect(rows[0]?.cost_micro_usd).toBe(9000);
+    expect(rows[0]?.profile_id).toBeNull();
+
+    store.recordAudit({
+      session_key: 'OLD:PROFILE',
+      team_id: 'T1',
+      user_id: 'U1',
+      profile_id: 'conversational',
+      ts: 1_500,
+      kind: 'action',
+      tool: 'open-pr',
+      summary: 'https://github.com/acme/widgets/pull/9',
+      reasoning: null,
+      result: 'opened',
+      cost_tokens: null,
+      cost_micro_usd: null,
+    });
+
+    const allRows = store.getAuditEvents('OLD:PROFILE');
+    store.close();
+
+    expect(allRows).toHaveLength(2);
+    const newRow = allRows.find((row) => row.result === 'opened');
+    expect(newRow?.profile_id).toBe('conversational');
   });
 
   it('replaces pre-S05 placeholder shape (event_type/payload, no session_key) and works normally after', () => {
@@ -806,6 +876,7 @@ describe('SqliteSessionStore — durability', () => {
       session_key: 'POST:PLACEHOLDER',
       team_id: null,
       user_id: null,
+      profile_id: null,
       ts: 200,
       kind: 'lifecycle',
       tool: null,
@@ -856,6 +927,7 @@ describe('SqliteSessionStore — sumCostByTask / sumCostByUserSince / sumCostGlo
   const baseEvent = {
     team_id: null as null,
     user_id: null as null,
+    profile_id: null as null,
     kind: 'cost' as const,
     tool: null as null,
     summary: null as null,
@@ -938,6 +1010,7 @@ describe('SqliteSessionStore — sumCostByTask / sumCostByUserSince / sumCostGlo
       session_key: 'K1',
       team_id: null,
       user_id: 'U1',
+      profile_id: null,
       ts: 1000,
       kind: 'lifecycle',
       tool: 'session',

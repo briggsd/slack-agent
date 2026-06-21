@@ -264,6 +264,7 @@ export class SessionManager {
       session_key: key,
       team_id: item.teamId ?? null,
       user_id: item.userId ?? null,
+      profile_id: profile.id,
       kind: 'lifecycle',
       tool: 'session',
       result: origin,
@@ -377,6 +378,7 @@ export class SessionManager {
       threadTs: string;
       userId: string | undefined;
       teamId: string | undefined;
+      profileId: string;
     },
   ): void {
     const text = this.capMessage(cap, ctx.userId, ctx.sessionKey);
@@ -390,6 +392,7 @@ export class SessionManager {
       session_key: ctx.sessionKey,
       team_id: ctx.teamId ?? null,
       user_id: ctx.userId ?? null,
+      profile_id: ctx.profileId,
       kind: 'correction',
       tool: 'spend-cap',
       result: `${action}:${cap}`,
@@ -409,6 +412,7 @@ export class SessionManager {
         threadTs: item.threadTs,
         userId: item.userId,
         teamId: item.teamId,
+        profileId: getProfile(item.profileId ?? DEFAULT_PROFILE_ID).id,
       });
       return;
     }
@@ -459,6 +463,7 @@ export class SessionManager {
             session_key: session.key,
             team_id: session.teamId ?? null,
             user_id: item.userId ?? null,
+            profile_id: session.profileId,
             kind: 'approval',
             tool: session.pendingApproval.kind === 'build_spec' ? 'build_spec' : 'plan-gate',
             result: 'rejected_non_requestor',
@@ -491,6 +496,7 @@ export class SessionManager {
             session_key: session.key,
             team_id: session.teamId ?? null,
             user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
             kind: 'approval',
             tool: 'plan-gate',
             result: 'resolved',
@@ -507,6 +513,7 @@ export class SessionManager {
             threadTs: item.threadTs,
             userId: session.requestorUserId,
             teamId: session.teamId,
+            profileId: session.profileId,
           });
           return true;
         }
@@ -516,6 +523,7 @@ export class SessionManager {
           session_key: session.key,
           team_id: session.teamId ?? null,
           user_id: session.requestorUserId ?? null,
+          profile_id: session.profileId,
           kind: 'approval',
           tool: 'build_spec',
           result: 'resolved',
@@ -537,6 +545,7 @@ export class SessionManager {
           threadTs: item.threadTs,
           userId: session.requestorUserId,
           teamId: session.teamId,
+          profileId: session.profileId,
         });
         return true; // message was handled; thread is known
       }
@@ -564,6 +573,7 @@ export class SessionManager {
         threadTs: item.threadTs,
         userId: storedUserId,
         teamId: row.team_id ?? undefined,
+        profileId: row.profile_id,
       });
       return true; // message was handled; thread is known
     }
@@ -665,6 +675,7 @@ export class SessionManager {
       session_key: key,
       team_id: session.teamId ?? null,
       user_id: session.requestorUserId ?? null,
+      profile_id: session.profileId,
       kind: 'lifecycle',
       tool: 'session',
       result: 'reaped',
@@ -742,6 +753,7 @@ export class SessionManager {
             session_key: session.key,
             team_id: session.teamId ?? null,
             user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
             kind: 'approval',
             tool: 'build_spec',
             result: 'requested',
@@ -770,6 +782,7 @@ export class SessionManager {
             session_key: session.key,
             team_id: session.teamId ?? null,
             user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
             kind: event.reason === 'cancelled' ? 'correction' : 'approval',
             tool: 'plan-gate',
             result: event.reason === 'cancelled' ? 'cancelled' : 'timeout',
@@ -786,6 +799,7 @@ export class SessionManager {
             session_key: session.key,
             team_id: session.teamId ?? null,
             user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
             kind: 'action',
             tool: 'open-pr',
             summary: event.url,
@@ -825,6 +839,7 @@ export class SessionManager {
             session_key: session.key,
             team_id: session.teamId ?? null,
             user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
             kind: 'cost',
             tool: null,
             result: null,
@@ -878,6 +893,7 @@ export class SessionManager {
         threadTs: item.threadTs,
         userId: session.requestorUserId,
         teamId: session.teamId,
+        profileId: session.profileId,
       });
       return { ok: false, reason: 'spend budget reached before build' };
     }
@@ -944,6 +960,7 @@ export class SessionManager {
         session_key: session.key,
         team_id: session.teamId ?? null,
         user_id: null,
+        profile_id: session.profileId,
         kind: 'correction',
         tool: 'exec',
         result: 'refused_no_requestor',
@@ -955,6 +972,7 @@ export class SessionManager {
         session_key: session.key,
         team_id: session.teamId ?? null,
         user_id: actor,
+        profile_id: session.profileId,
         kind: 'correction',
         tool: 'exec',
         result: 'refused_no_opt_in',
@@ -973,6 +991,7 @@ export class SessionManager {
       session_key: session.key,
       team_id: session.teamId ?? null,
       user_id: actor,
+      profile_id: session.profileId,
       kind: 'action',
       tool: 'exec',
       result: 'started',
@@ -987,6 +1006,7 @@ export class SessionManager {
         session_key: session.key,
         team_id: session.teamId ?? null,
         user_id: actor,
+        profile_id: session.profileId,
         kind: 'action',
         tool: 'exec',
         result,
@@ -1050,6 +1070,7 @@ export class SessionManager {
           threadTs: item.threadTs,
           userId: session.requestorUserId,
           teamId: session.teamId,
+          profileId: session.profileId,
         });
         session.queue.length = 0; // drop any further queued turns
         break;
@@ -1128,6 +1149,7 @@ export class SessionManager {
       session_key: session.key,
       team_id: session.teamId ?? null,
       user_id: session.requestorUserId ?? null,
+      profile_id: session.profileId,
       kind: 'approval',
       tool: 'plan-gate',
       result: 'requested',

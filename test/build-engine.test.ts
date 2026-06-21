@@ -485,6 +485,7 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
         session_key: TEST_SESSION_KEY,
         team_id: 'TEAM',
         user_id: 'U1',
+        profile_id: 'conversational',
         ts: Date.now(),
         kind: 'cost',
         tool: null,
