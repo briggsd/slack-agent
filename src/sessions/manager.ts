@@ -878,7 +878,6 @@ export class SessionManager {
       result: 'started',
     });
 
-    const placeholder = await postPlaceholder(this.slack, item.channel, item.threadTs);
     // Terminal audit so every 'started' exec reconciles to an end state. Metadata only:
     // the PR URL is gateway-controlled (matches the 'open-pr' convention); failure reasons
     // are deliberately NOT recorded here — they may carry runtime text, and this is an
@@ -894,8 +893,12 @@ export class SessionManager {
         summary,
       });
     };
+    // postPlaceholder runs inside the try so a Slack failure still terminalizes the
+    // 'started' row via auditExecEnd('failed') rather than leaving it dangling.
+    let placeholder: Placeholder | null = null;
     let runner: SessionRunner | undefined;
     try {
+      placeholder = await postPlaceholder(this.slack, item.channel, item.threadTs);
       runner = await execFactory.createExecRunner(session.key, input);
       const outcome = await this.driveToThread(runner.send(''), placeholder, session, item);
       if (outcome.type === 'pr_opened') {

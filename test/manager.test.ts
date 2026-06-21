@@ -21,6 +21,7 @@ import type {
   AuditEvent,
 } from '../src/sessions/store.js';
 import { FakeSlackClient } from './responder.test.js';
+import type { SlackClientLike } from '../src/slack/responder.js';
 
 /**
  * A two-way runner that parks at an `await_approval` gate and records the resume
@@ -1262,6 +1263,56 @@ describe('SessionManager — audit emission', () => {
     );
     expect(refused).toHaveLength(1);
     expect(refused[0]?.user_id).toBe('U-OTHER'); // the replier, not the requestor
+  });
+
+  it('exec terminalizes (failed) when the placeholder post throws — no dangling started row', async () => {
+    const store = new CapturingStore();
+    store.recordExecOptIn('TEAM', 'U-REQ', Date.now());
+    const routerFactory = new FakeRunnerFactory([
+      [
+        { type: 'run_exec', host: 'github', repo: 'a/b', instruction: 'ship it' },
+        { type: 'text', text: 'router resumed' },
+      ] as RunnerEvent[],
+    ]);
+    const buildRunnerFactory: BuildRunnerFactory = {
+      createBuildRunner: () => Promise.reject(new Error('build not used in this test')),
+      createExecRunner: (key) => Promise.resolve(new PrOpenedRunner(key)),
+    };
+    // The exec placeholder is the second postMessage (the router turn posts the first);
+    // make that post fail so postPlaceholder throws inside runExec.
+    let posts = 0;
+    const slack: SlackClientLike = {
+      postMessage: () => {
+        posts += 1;
+        return posts >= 2
+          ? Promise.reject(new Error('slack down'))
+          : Promise.resolve({ ts: `ts-${posts}` });
+      },
+      update: () => Promise.resolve(),
+      uploadFile: () => Promise.resolve(),
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory: routerFactory,
+      slack,
+      store,
+      buildRunnerFactory,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'go',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // The started row must still reconcile to a terminal status even though the
+    // placeholder post threw before the runner was created.
+    const execAudits = store.audits.filter((a) => a.tool === 'exec');
+    expect(execAudits.map((a) => a.result)).toEqual(['started', 'failed']);
+    expect(execAudits[1]?.summary).toBeNull(); // no failure text leaked into the audit
   });
 
   it('emits a lifecycle/reaped event when a session is reaped', async () => {
