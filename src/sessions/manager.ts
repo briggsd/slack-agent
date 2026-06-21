@@ -48,6 +48,8 @@ interface Session {
   key: string;
   runner: SessionRunner | null;
   profileId: string;
+  channel: string;
+  threadTs: string;
   queue: QueueItem[];
   /** true while the drain loop is processing a message */
   draining: boolean;
@@ -79,6 +81,7 @@ const DISABLED_CAPS: SpendCapsConfig = {
   perGlobal24hMicroUsd: 0,
 };
 const DEFAULT_PENDING_APPROVAL_RETENTION_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_PLANNING_IDLE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
 const BUILD_SPEC_APPROVE = new Set(['approve', 'approved']);
 const BUILD_SPEC_REJECT = new Set(['cancel', 'abort', 'reject']);
@@ -105,6 +108,7 @@ function formatBuildSpecApprovalPrompt(prompt: string, assistantText?: string): 
 export class SessionManager {
   private sessions = new Map<string, Session>();
   private readonly idleTimeoutMs: number;
+  private readonly planningIdleTimeoutMs: number;
   private readonly gateTimeoutMs: number;
   private readonly factory: RunnerFactory;
   private readonly slack: SlackClientLike;
@@ -121,6 +125,8 @@ export class SessionManager {
 
   constructor(opts: {
     idleTimeoutMs: number;
+    /** Longer timeout for idle conversational planning sessions. Default 4h. */
+    planningIdleTimeoutMs?: number;
     /** How long a legacy `await_approval` gate waits for a reply before the
      *  fallback fires (the run resumes with a `timeout` resume). Default 15 min. */
     gateTimeoutMs?: number;
@@ -144,6 +150,8 @@ export class SessionManager {
     pendingApprovalRetentionMs?: number;
   }) {
     this.idleTimeoutMs = opts.idleTimeoutMs;
+    this.planningIdleTimeoutMs =
+      opts.planningIdleTimeoutMs ?? DEFAULT_PLANNING_IDLE_TIMEOUT_MS;
     this.gateTimeoutMs = opts.gateTimeoutMs ?? 15 * 60 * 1000;
     this.factory = opts.factory;
     this.slack = opts.slack;
@@ -204,6 +212,8 @@ export class SessionManager {
       key,
       runner,
       profileId: profile.id,
+      channel: item.channel,
+      threadTs: item.threadTs,
       queue: [],
       draining: false,
       idleTimer: null,
@@ -556,18 +566,51 @@ export class SessionManager {
     return true;
   }
 
-  private resetIdleTimer(session: Session, delayMs = this.idleTimeoutMs): void {
+  private isPlanningSession(session: Session): boolean {
+    return getProfile(session.profileId).mode === 'conversational';
+  }
+
+  private resetIdleTimer(session: Session, delayMs?: number): void {
     if (session.idleTimer !== null) {
       clearTimeout(session.idleTimer);
     }
+    const usePlanningTimer = delayMs === undefined && this.isPlanningSession(session);
+    const effectiveDelayMs =
+      delayMs ?? (usePlanningTimer ? this.planningIdleTimeoutMs : this.idleTimeoutMs);
     const timer = setTimeout(() => {
-      void this.reapSession(session.key);
-    }, delayMs);
+      if (usePlanningTimer) {
+        void this.expirePlanningSession(session.key);
+      } else {
+        void this.reapSession(session.key);
+      }
+    }, effectiveDelayMs);
     // Allow the process to exit even if this timer is pending
     if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
       (timer as { unref(): void }).unref();
     }
     session.idleTimer = timer;
+  }
+
+  private async expirePlanningSession(key: string): Promise<void> {
+    const session = this.sessions.get(key);
+    if (session === undefined) return;
+    if (session.draining) {
+      this.resetIdleTimer(session);
+      return;
+    }
+
+    void this.slack
+      .postMessage({
+        channel: session.channel,
+        thread_ts: session.threadTs,
+        text: 'Planning expired - mention me to resume.',
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[session] failed to post planning expiry for ${key}: ${msg}`);
+      });
+
+    await this.reapSession(key, true);
   }
 
   private async reapSession(key: string, force = false): Promise<void> {

@@ -233,7 +233,8 @@ container is ever executed on the host.
 | `ANTHROPIC_API_KEY` | — | Passed into each container; fund/spend-cap accordingly |
 | `RUNNER_BACKEND` | `fake` | `fake` = echo bot (no Docker); `docker` = real sandboxes |
 | `RUNNER_IMAGE` | `slackbot-runner:latest` | Built from `runner/Dockerfile` |
-| `IDLE_TIMEOUT_MS` | 600000 (10 min) | Reap idle sessions after this |
+| `IDLE_TIMEOUT_MS` | 600000 (10 min) | Reap idle non-planning sessions after this |
+| `PLANNING_IDLE_TIMEOUT_MS` | 14400000 (4 h) | Expire idle conversational planning sessions after this; posts a threaded expiry notice, reaps the container, and leaves the volume for normal volume-GC grace |
 | `VOLUME_TTL_MS` | 604800000 (7 days) | Volume GC: a session idle longer than this has its volume and session row removed |
 | `VOLUME_GC_INTERVAL_MS` | 3600000 (1 h) | How often the volume-GC sweep runs |
 | `RUNNER_READY_TIMEOUT_MS` | 30000 | Container boot handshake deadline |

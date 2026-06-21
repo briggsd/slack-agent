@@ -233,6 +233,7 @@ describe('SessionManager — idle reaping', () => {
       message: 'hello',
       channel: 'C',
       threadTs: 'T',
+      profileId: 'repo-oneshot',
     });
 
     // Drain all pending microtasks/promises by flushing the event loop
@@ -252,7 +253,12 @@ describe('SessionManager — idle reaping', () => {
     const [release, turn] = blockingTurn();
     const { manager, factory } = makeManager(TIMEOUT, [turn]);
 
-    await manager.enqueueNew('TEAM:C:T', { message: 'slow', channel: 'C', threadTs: 'T' });
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'slow',
+      channel: 'C',
+      threadTs: 'T',
+      profileId: 'repo-oneshot',
+    });
     await vi.advanceTimersByTimeAsync(0);
 
     // Turn is still in flight past the idle timeout — must NOT be reaped
@@ -276,6 +282,7 @@ describe('SessionManager — idle reaping', () => {
       message: 'first',
       channel: 'C',
       threadTs: 'T',
+      profileId: 'repo-oneshot',
     });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(TIMEOUT + 100);
@@ -286,6 +293,7 @@ describe('SessionManager — idle reaping', () => {
       message: 'second',
       channel: 'C',
       threadTs: 'T',
+      profileId: 'repo-oneshot',
     });
     await vi.advanceTimersByTimeAsync(0);
 
@@ -574,11 +582,12 @@ describe('SessionManager — build_spec approval_requested', () => {
     expect(slack.updates.some((u) => u.text === 'resumed:approve:approved')).toBe(true);
   });
 
-  it('can recreate the runner while approval is pending, then consume the requestor reply on the next turn', async () => {
+  it('keeps the runner alive while approval is pending, then consumes the requestor reply on the next turn', async () => {
     const slack = new FakeSlackClient();
     const factory = new BuildSpecGateRunnerFactory();
     const manager = new SessionManager({
       idleTimeoutMs: 20,
+      planningIdleTimeoutMs: 200,
       gateTimeoutMs: 60_000,
       factory,
       slack,
@@ -590,10 +599,11 @@ describe('SessionManager — build_spec approval_requested', () => {
       threadTs: 'T',
       userId: 'U-REQ',
     });
-    await new Promise((r) => setTimeout(r, 50)); // allow idle reap of the runner only
+    await new Promise((r) => setTimeout(r, 50)); // past normal idle; before planning timeout
 
     expect(manager.has('TEAM:C:T')).toBe(true);
     expect(factory.runners).toHaveLength(1);
+    expect(factory.runners[0]?.sendCount).toBe(1);
 
     await manager.enqueueExisting('TEAM:C:T', {
       message: 'needs more detail',
@@ -603,14 +613,14 @@ describe('SessionManager — build_spec approval_requested', () => {
     });
     await new Promise((r) => setTimeout(r, 30));
 
-    expect(factory.runners).toHaveLength(2);
-    expect(factory.runners[1]?.approvals[0]).toEqual({
+    expect(factory.runners).toHaveLength(1);
+    expect(factory.runners[0]?.approvals[1]).toEqual({
       id: 'appr-build-1',
       specRef: 'SPEC: do the thing',
       approved: false,
       feedback: 'needs more detail',
     });
-    expect(factory.runners[1]?.messages[0]).toBe('needs more detail');
+    expect(factory.runners[0]?.messages[1]).toBe('needs more detail');
   });
 
   it('checks spend caps before a build_spec approval reply starts the resume turn', async () => {
@@ -670,12 +680,13 @@ describe('SessionManager — build_spec approval_requested', () => {
     expect(resolved).toHaveLength(0);
   });
 
-  it('bounds in-memory retention after reaping a runner with pending build_spec approval', async () => {
+  it('bounds in-memory retention for pending build_spec approval at the planning timeout', async () => {
     const slack = new FakeSlackClient();
     const factory = new BuildSpecGateRunnerFactory();
     const store = new CapturingStore();
     const manager = new SessionManager({
       idleTimeoutMs: 10,
+      planningIdleTimeoutMs: 35,
       pendingApprovalRetentionMs: 35,
       gateTimeoutMs: 60_000,
       factory,
@@ -993,6 +1004,105 @@ class FakeVolumeReaper implements VolumeReaper {
     return this.returnValue;
   }
 }
+
+describe('SessionManager — planning lifecycle', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keeps conversational planning alive past normal idle, then expires it at planning timeout', async () => {
+    const idleTimeoutMs = 10;
+    const planningIdleTimeoutMs = 50;
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const store = new CapturingStore();
+    const manager = new SessionManager({
+      idleTimeoutMs,
+      planningIdleTimeoutMs,
+      factory,
+      slack,
+      store,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'plan this',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(idleTimeoutMs + 5);
+
+    expect(manager.has('TEAM:C:T')).toBe(true);
+    expect(factory.runners[0]?.disposed).toBe(false);
+    expect(store.get('TEAM:C:T')?.status).toBe('active');
+    expect(slack.posts.some((p) => p.text.includes('Planning expired'))).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(planningIdleTimeoutMs - idleTimeoutMs + 10);
+
+    expect(manager.has('TEAM:C:T')).toBe(false);
+    expect(factory.runners[0]?.disposed).toBe(true);
+    expect(store.get('TEAM:C:T')?.status).toBe('reaped');
+    expect(store.deletedKeys).toHaveLength(0);
+    expect(slack.posts).toContainEqual({
+      channel: 'C',
+      thread_ts: 'T',
+      text: 'Planning expired - mention me to resume.',
+    });
+
+    const reaped = store.audits.filter(
+      (a) => a.kind === 'lifecycle' && a.tool === 'session' && a.result === 'reaped',
+    );
+    expect(reaped).toHaveLength(1);
+    expect(reaped[0]?.team_id).toBe('TEAM');
+    expect(reaped[0]?.user_id).toBe('U1');
+  });
+
+  it('resets the planning timeout on later thread activity', async () => {
+    const idleTimeoutMs = 10;
+    const planningIdleTimeoutMs = 50;
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs,
+      planningIdleTimeoutMs,
+      factory,
+      slack,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'first',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U1',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(30);
+
+    const accepted = await manager.enqueueExisting('TEAM:C:T', {
+      message: 'still planning',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U1',
+    });
+    expect(accepted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(30);
+    expect(manager.has('TEAM:C:T')).toBe(true);
+    expect(factory.runners[0]?.disposed).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(25);
+    expect(manager.has('TEAM:C:T')).toBe(false);
+    expect(factory.runners[0]?.disposed).toBe(true);
+  });
+});
 
 /** A runner that yields a `pr_opened` event so the drain loop handles it. */
 class PrOpenedRunner implements SessionRunner {

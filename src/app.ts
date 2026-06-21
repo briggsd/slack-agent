@@ -21,6 +21,7 @@ export interface GatewayDeps {
   factory: RunnerFactory;
   store: SessionStore;
   idleTimeoutMs: number;
+  planningIdleTimeoutMs?: number;
   gateTimeoutMs?: number;
   botUserId: string;
   volumeReaper?: VolumeReaper;
@@ -33,6 +34,7 @@ export interface GatewayDeps {
 export function buildGateway(deps: GatewayDeps): { sessions: SessionManager } {
   const sessions = new SessionManager({
     idleTimeoutMs: deps.idleTimeoutMs,
+    ...(deps.planningIdleTimeoutMs !== undefined && { planningIdleTimeoutMs: deps.planningIdleTimeoutMs }),
     ...(deps.gateTimeoutMs !== undefined && { gateTimeoutMs: deps.gateTimeoutMs }),
     factory: deps.factory,
     slack: deps.slack,

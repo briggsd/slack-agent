@@ -159,13 +159,14 @@ describe('GATE_TIMEOUT_MS config', () => {
   // These tests stub the whole env (tokens + the var under test), call the real
   // loadConfig(), then restore — so they exercise the actual config path rather
   // than re-asserting arithmetic.
-  const TOUCHED = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'GATE_TIMEOUT_MS'] as const;
+  const TOUCHED = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'GATE_TIMEOUT_MS', 'PLANNING_IDLE_TIMEOUT_MS'] as const;
   const saved: Record<string, string | undefined> = {};
 
   beforeEach(() => {
     for (const key of TOUCHED) saved[key] = process.env[key];
     process.env['SLACK_BOT_TOKEN'] = 'xoxb-test';
     process.env['SLACK_APP_TOKEN'] = 'xapp-test';
+    delete process.env['PLANNING_IDLE_TIMEOUT_MS'];
   });
 
   afterEach(() => {
@@ -193,6 +194,23 @@ describe('GATE_TIMEOUT_MS config', () => {
     const { loadConfig } = await import('../src/config.js');
     expect(() => loadConfig()).toThrow(/GATE_TIMEOUT_MS/);
   });
+
+  it('defaults PLANNING_IDLE_TIMEOUT_MS to 4 hours when env var is absent', async () => {
+    const { loadConfig } = await import('../src/config.js');
+    expect(loadConfig().PLANNING_IDLE_TIMEOUT_MS).toBe(4 * 60 * 60 * 1000);
+  });
+
+  it('reads PLANNING_IDLE_TIMEOUT_MS from the environment when set', async () => {
+    process.env['PLANNING_IDLE_TIMEOUT_MS'] = '123456';
+    const { loadConfig } = await import('../src/config.js');
+    expect(loadConfig().PLANNING_IDLE_TIMEOUT_MS).toBe(123_456);
+  });
+
+  it('rejects a non-numeric PLANNING_IDLE_TIMEOUT_MS', async () => {
+    process.env['PLANNING_IDLE_TIMEOUT_MS'] = 'later';
+    const { loadConfig } = await import('../src/config.js');
+    expect(() => loadConfig()).toThrow(/PLANNING_IDLE_TIMEOUT_MS/);
+  });
 });
 
 describe('spendCaps config (Slice B1)', () => {
@@ -201,6 +219,7 @@ describe('spendCaps config (Slice B1)', () => {
     'SPEND_CAP_PER_TASK_USD',
     'SPEND_CAP_PER_USER_24H_USD',
     'SPEND_CAP_GLOBAL_24H_USD',
+    'PLANNING_IDLE_TIMEOUT_MS',
   ] as const;
   const REQUIRED = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'] as const;
   const saved: Record<string, string | undefined> = {};

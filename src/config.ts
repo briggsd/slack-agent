@@ -160,6 +160,8 @@ export interface Config {
   SLACK_BOT_TOKEN: string;
   SLACK_APP_TOKEN: string;
   IDLE_TIMEOUT_MS: number;
+  /** Longer timeout for idle conversational planning sessions. Default: 4 hours. */
+  PLANNING_IDLE_TIMEOUT_MS: number;
   /** Maximum time (ms) to wait for a human to approve the plan gate. Default: 15 min. */
   GATE_TIMEOUT_MS: number;
   /** TTL for volume GC eligibility in ms. Default: 7 days. */
@@ -191,6 +193,7 @@ export function loadConfig(): Config {
     SLACK_BOT_TOKEN: requireEnv('SLACK_BOT_TOKEN'),
     SLACK_APP_TOKEN: requireEnv('SLACK_APP_TOKEN'),
     IDLE_TIMEOUT_MS: optionalEnvNumber('IDLE_TIMEOUT_MS', 10 * 60 * 1000),
+    PLANNING_IDLE_TIMEOUT_MS: optionalEnvNumber('PLANNING_IDLE_TIMEOUT_MS', 4 * 60 * 60 * 1000),
     GATE_TIMEOUT_MS: optionalEnvNumber('GATE_TIMEOUT_MS', 15 * 60 * 1000),
     VOLUME_TTL_MS: optionalEnvNumber('VOLUME_TTL_MS', 7 * 24 * 60 * 60 * 1000),
     VOLUME_GC_INTERVAL_MS: optionalEnvNumber('VOLUME_GC_INTERVAL_MS', 60 * 60 * 1000),

@@ -710,7 +710,13 @@ describe('SessionManager — rehydrate-on-reply', () => {
     const key = 'TEAM:C:T';
 
     // 1. Create the session via enqueueNew (writes store row + creates runner #1).
-    await manager.enqueueNew(key, { message: 'hello', channel: 'C', threadTs: 'T', teamId: 'TEAM' });
+    await manager.enqueueNew(key, {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      profileId: 'repo-oneshot',
+    });
     // Flush microtasks so the drain loop completes and resets the idle timer.
     await vi.advanceTimersByTimeAsync(0);
 
