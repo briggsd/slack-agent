@@ -108,10 +108,11 @@ export interface SessionStore {
    */
   getAuditEvents(sessionKey: string): AuditEvent[];
   /**
-   * Reconciliation worklist helper: list only rows still marked open. NOT
-   * tenancy-scoped (no team_id filter). The slice-3 acceptance-rate rollup must
-   * scope by team (WHERE team_id = ?) before any user-facing query path consumes
-   * pull_requests data — the row carries team_id for exactly that.
+   * Reconciliation worklist helper: open rows, oldest-polled first, **bounded**
+   * (one sweep can't fan out to unbounded serial GitHub polls — the rest drains on
+   * later sweeps). NOT tenancy-scoped (no team_id filter). The slice-3 acceptance-rate
+   * rollup must scope by team (WHERE team_id = ?) before any user-facing query path
+   * consumes pull_requests data — the row carries team_id for exactly that.
    */
   listOpenPullRequests(): PullRequestRow[];
   /** Mark a tracked PR as terminal and stamp both resolved_at and last_polled_at. */
@@ -261,7 +262,10 @@ export class SqliteSessionStore implements SessionStore {
     `);
 
     this.stmtListOpenPullRequests = this.db.prepare<[], PullRequestRow>(
-      "SELECT * FROM pull_requests WHERE state = 'open' ORDER BY id",
+      // Bounded so one reconciliation sweep can't fan out to an unbounded set of serial
+      // GitHub polls; the remainder drains on subsequent sweeps. Oldest-polled first
+      // (never-polled rows sort first as NULL) so no open PR is starved.
+      "SELECT * FROM pull_requests WHERE state = 'open' ORDER BY last_polled_at LIMIT 500",
     );
 
     this.stmtResolvePullRequest = this.db.prepare<[string, number, number, number]>(

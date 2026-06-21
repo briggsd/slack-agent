@@ -512,6 +512,26 @@ describe('SqliteSessionStore — pull_requests', () => {
     expect(store.getPullRequest(1)?.last_polled_at).toBe(1_700_000_111_222);
     expect(store.getPullRequest(1)?.resolved_at).toBeNull();
   });
+
+  it('listOpenPullRequests returns never-polled rows before already-polled ones (oldest-polled first)', () => {
+    const base = {
+      team_id: 'TEAM1',
+      repo: 'owner/repo',
+      head_sha: 'sha',
+      profile_id: 'repo-oneshot',
+      opened_at: 1_700_000_000_000,
+    };
+    store.recordPullRequest({ ...base, session_key: 'A', pr_number: 1 });
+    store.recordPullRequest({ ...base, session_key: 'B', pr_number: 2 });
+    store.recordPullRequest({ ...base, session_key: 'C', pr_number: 3 });
+    // Poll #1 and #2 (give them last_polled_at); #3 stays never-polled (NULL).
+    store.touchPullRequestPolled(1, 5_000);
+    store.touchPullRequestPolled(2, 9_000);
+
+    // Never-polled (#3, NULL) sorts first, then oldest last_polled_at (#1 before #2),
+    // so the sweep drains the freshest-needed work first and starves nobody.
+    expect(store.listOpenPullRequests().map((r) => r.pr_number)).toEqual([3, 1, 2]);
+  });
 });
 
 // ─── SqliteSessionStore — durability, migration, and indexes ─────────────────
