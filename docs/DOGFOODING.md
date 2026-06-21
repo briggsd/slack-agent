@@ -82,5 +82,8 @@ the self-repo.
 allowlist, its `ONESHOT_CHECK_CMDS` entry must run `npm run gate`** — otherwise
 startup fails loud, naming this file. The point is that the full-gate prerequisite
 can't be silently dropped: you can't enable dogfooding with a check command too weak
-to enforce the invariants. Removing the self-repo from the allowlist turns dogfooding
+to enforce the invariants. The match is an exact literal string — the `test` command
+must be precisely `npm run gate`, so a functionally-equivalent spelling (e.g.
+`npm run check && npm run boundaries`, or a stray trailing space) still trips it; use
+the literal recipe above. Removing the self-repo from the allowlist turns dogfooding
 off and the guardrail goes quiet.
