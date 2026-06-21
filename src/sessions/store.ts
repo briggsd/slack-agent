@@ -82,11 +82,27 @@ export interface PullRequestRow {
 
 export type PullRequestTerminalState = 'merged_clean' | 'merged_intervened' | 'closed' | 'stale';
 
+export interface AcceptanceStats {
+  opened: number;
+  mergedClean: number;
+  mergedIntervened: number;
+  closed: number;
+  stale: number;
+  stillOpen: number;
+  resolved: number;
+  acceptanceRate: number | null;
+}
+
 /** Minimal shape required to record a newly opened pull request. */
 export type NewPullRequestRow = Pick<
   PullRequestRow,
   'session_key' | 'team_id' | 'repo' | 'pr_number' | 'head_sha' | 'profile_id' | 'opened_at'
 >;
+
+interface PullRequestStateCountRow {
+  state: string;
+  n: number;
+}
 
 export interface SessionStore {
   /** Insert or replace the row when a session is created. */
@@ -138,6 +154,16 @@ export interface SessionStore {
   sumCostByUserSince(userId: string, sinceMs: number): number;
   /** Σ cost_micro_usd across all sessions since `sinceMs`. 0 when none. */
   sumCostGlobalSince(sinceMs: number): number;
+  /**
+   * Operator-only rollup over PRs opened within the window (`opened_at >= sinceMs`).
+   * User-facing consumers must use the team-scoped variant below.
+   */
+  acceptanceStatsGlobalSince(sinceMs: number): AcceptanceStats;
+  /**
+   * Tenancy-scoped rollup over PRs opened within the window (`opened_at >= sinceMs`).
+   * This is the only safe variant for any user-facing consumer of pull_requests data.
+   */
+  acceptanceStatsByTeamSince(teamId: string, sinceMs: number): AcceptanceStats;
   /** True only when the gateway has a standing human opt-in for ungated exec. */
   hasExecOptIn(teamId: string, userId: string): boolean;
   /** Record a standing human opt-in for ungated exec. Admin/operator seam; not user-chat driven. */
@@ -189,6 +215,8 @@ export class SqliteSessionStore implements SessionStore {
   private readonly stmtSumByTask: Database.Statement<[string], { total: number }>;
   private readonly stmtSumByUserSince: Database.Statement<[string, number], { total: number }>;
   private readonly stmtSumGlobalSince: Database.Statement<[number], { total: number }>;
+  private readonly stmtAcceptanceGlobalSince: Database.Statement<[number], PullRequestStateCountRow>;
+  private readonly stmtAcceptanceByTeamSince: Database.Statement<[string, number], PullRequestStateCountRow>;
   private readonly stmtHasExecOptIn: Database.Statement<[string, string], { present: number }>;
   private readonly stmtRecordExecOptIn: Database.Statement<[string, string, number]>;
 
@@ -300,6 +328,14 @@ export class SqliteSessionStore implements SessionStore {
 
     this.stmtSumGlobalSince = this.db.prepare<[number], { total: number }>(
       'SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM audit_events WHERE ts > ?',
+    );
+
+    this.stmtAcceptanceGlobalSince = this.db.prepare<[number], PullRequestStateCountRow>(
+      'SELECT state, COUNT(*) AS n FROM pull_requests WHERE opened_at >= ? GROUP BY state',
+    );
+
+    this.stmtAcceptanceByTeamSince = this.db.prepare<[string, number], PullRequestStateCountRow>(
+      'SELECT state, COUNT(*) AS n FROM pull_requests WHERE team_id = ? AND opened_at >= ? GROUP BY state',
     );
 
     this.stmtHasExecOptIn = this.db.prepare<[string, string], { present: number }>(
@@ -511,6 +547,14 @@ export class SqliteSessionStore implements SessionStore {
     return this.stmtSumGlobalSince.get(sinceMs)?.total ?? 0;
   }
 
+  acceptanceStatsGlobalSince(sinceMs: number): AcceptanceStats {
+    return this.acceptanceStatsFromCounts(this.stmtAcceptanceGlobalSince.all(sinceMs));
+  }
+
+  acceptanceStatsByTeamSince(teamId: string, sinceMs: number): AcceptanceStats {
+    return this.acceptanceStatsFromCounts(this.stmtAcceptanceByTeamSince.all(teamId, sinceMs));
+  }
+
   hasExecOptIn(teamId: string, userId: string): boolean {
     return this.stmtHasExecOptIn.get(teamId, userId) !== undefined;
   }
@@ -521,6 +565,50 @@ export class SqliteSessionStore implements SessionStore {
 
   close(): void {
     this.db.close();
+  }
+
+  private acceptanceStatsFromCounts(rows: readonly PullRequestStateCountRow[]): AcceptanceStats {
+    let mergedClean = 0;
+    let mergedIntervened = 0;
+    let closed = 0;
+    let stale = 0;
+    let stillOpen = 0;
+
+    for (const row of rows) {
+      switch (row.state) {
+        case 'merged_clean':
+          mergedClean += row.n;
+          break;
+        case 'merged_intervened':
+          mergedIntervened += row.n;
+          break;
+        case 'closed':
+          closed += row.n;
+          break;
+        case 'stale':
+          stale += row.n;
+          break;
+        case 'open':
+          stillOpen += row.n;
+          break;
+        default:
+          break;
+      }
+    }
+
+    const opened = rows.reduce((total, row) => total + row.n, 0);
+    const resolved = mergedClean + mergedIntervened + closed + stale;
+
+    return {
+      opened,
+      mergedClean,
+      mergedIntervened,
+      closed,
+      stale,
+      stillOpen,
+      resolved,
+      acceptanceRate: resolved === 0 ? null : mergedClean / resolved,
+    };
   }
 }
 
@@ -545,6 +633,30 @@ export class NoopSessionStore implements SessionStore {
   sumCostByTask(_sessionKey: string): number { return 0; }
   sumCostByUserSince(_userId: string, _sinceMs: number): number { return 0; }
   sumCostGlobalSince(_sinceMs: number): number { return 0; }
+  acceptanceStatsGlobalSince(_sinceMs: number): AcceptanceStats {
+    return {
+      opened: 0,
+      mergedClean: 0,
+      mergedIntervened: 0,
+      closed: 0,
+      stale: 0,
+      stillOpen: 0,
+      resolved: 0,
+      acceptanceRate: null,
+    };
+  }
+  acceptanceStatsByTeamSince(_teamId: string, _sinceMs: number): AcceptanceStats {
+    return {
+      opened: 0,
+      mergedClean: 0,
+      mergedIntervened: 0,
+      closed: 0,
+      stale: 0,
+      stillOpen: 0,
+      resolved: 0,
+      acceptanceRate: null,
+    };
+  }
   hasExecOptIn(_teamId: string, _userId: string): boolean { return false; }
   recordExecOptIn(_teamId: string, _userId: string, _atMs: number): void { /* no-op */ }
 }
