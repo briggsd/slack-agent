@@ -1102,6 +1102,42 @@ describe('SessionManager — planning lifecycle', () => {
     expect(manager.has('TEAM:C:T')).toBe(false);
     expect(factory.runners[0]?.disposed).toBe(true);
   });
+
+  it('does not expire planning mid-turn; expires after the next idle planning window', async () => {
+    const idleTimeoutMs = 10;
+    const planningIdleTimeoutMs = 50;
+    const [release, turn] = blockingTurn();
+    const slack = new FakeSlackClient();
+    const factory = new FakeRunnerFactory([turn]);
+    const manager = new SessionManager({
+      idleTimeoutMs,
+      planningIdleTimeoutMs,
+      factory,
+      slack,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'slow planning',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U1',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(planningIdleTimeoutMs + 5);
+
+    expect(manager.has('TEAM:C:T')).toBe(true);
+    expect(factory.runners[0]?.disposed).toBe(false);
+    expect(slack.posts.some((p) => p.text.includes('Planning expired'))).toBe(false);
+
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(planningIdleTimeoutMs + 5);
+
+    expect(manager.has('TEAM:C:T')).toBe(false);
+    expect(factory.runners[0]?.disposed).toBe(true);
+    expect(slack.posts.some((p) => p.text.includes('Planning expired'))).toBe(true);
+  });
 });
 
 /** A runner that yields a `pr_opened` event so the drain loop handles it. */
