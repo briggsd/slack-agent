@@ -115,6 +115,13 @@ export class RealPublishService implements PublishService {
     const title = cleanOptionalText(req.title);
     const body = cleanOptionalText(req.body);
 
+    // Nothing to change → refuse before leasing. An empty PATCH would lease a credential,
+    // round-trip to GitHub for a no-op, and falsely narrate (and audit) a completed edit.
+    // Mirrors commentPr, which requires non-empty input.
+    if (title === undefined && body === undefined) {
+      return { ok: false, reason: 'nothing to edit (provide a title or body)' };
+    }
+
     let lease: CredentialLease;
     try {
       lease = await this.broker.lease({ host: 'github', repo: req.repo, taskId });

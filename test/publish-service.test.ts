@@ -191,18 +191,32 @@ describe('RealPublishService', () => {
     expect(broker.revokes).toHaveLength(1);
   });
 
-  it('editPr normalizes empty title/body to omitted fields', async () => {
+  it('editPr with neither title nor body refuses before leasing (no no-op PATCH)', async () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
     const svc = new RealPublishService(broker, gitNodes);
 
+    // Both empty/whitespace → both normalize to undefined → nothing to change.
     const outcome = await svc.editPr({ repo: 'owner/repo', volume: 'vol', title: ' ', body: '' });
+
+    expect(outcome).toEqual({ ok: false, reason: 'nothing to edit (provide a title or body)' });
+    expect(broker.leases).toHaveLength(0); // refused before any credential lease
+    expect(gitNodes.prEdits).toHaveLength(0); // no GitHub round-trip
+  });
+
+  it('editPr normalizes an empty sibling field but keeps the provided one', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const svc = new RealPublishService(broker, gitNodes);
+
+    const outcome = await svc.editPr({ repo: 'owner/repo', volume: 'vol', title: 'Updated', body: ' ' });
 
     expect(outcome).toEqual({ ok: true, prUrl: 'https://example.test/pr/1' });
     expect(gitNodes.prEdits[0]).toEqual({
       lease: expect.objectContaining({ host: 'github', repo: 'owner/repo' }),
       repo: 'owner/repo',
       head: 'slackbot/oneshot-vol',
+      title: 'Updated', // empty body dropped; provided title preserved
     });
   });
 
