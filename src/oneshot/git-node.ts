@@ -6,6 +6,7 @@
  */
 
 import type { CredentialLease } from '../broker/types.js';
+import type { RuntimeCatalogEntry } from '../runner/runtime-provision-service.js';
 
 export interface CloneRequest {
   lease: CredentialLease;
@@ -84,6 +85,13 @@ export interface CheckRequest {
   volume: string;
 }
 
+export interface ProvisionRuntimeRequest {
+  name: string;
+  entry: RuntimeCatalogEntry;
+  /** Docker volume name to mount at /workspace (e.g. slackbot-ws-<sanitized-key>). */
+  volume: string;
+}
+
 /**
  * Deterministic, credentialed git operations. Run trusted-side; never in the
  * agent sandbox.
@@ -103,4 +111,9 @@ export interface GitNodeExecutor {
    * thrown error. Only a true spawn/infrastructure failure rejects the promise.
    */
   runCheck(req: CheckRequest): Promise<CheckResult>;
+  /**
+   * Install a pinned, relocatable runtime onto the session volume using an
+   * ephemeral no-credential container. Idempotent when the runtime bin dir already exists.
+   */
+  provisionRuntime(req: ProvisionRuntimeRequest): Promise<void>;
 }

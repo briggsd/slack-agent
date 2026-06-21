@@ -22,6 +22,7 @@ import { DispatchingRunnerFactory } from './oneshot/dispatching-factory.js';
 import { RealCloneService } from './oneshot/clone-service.js';
 import { RealPublishService } from './oneshot/publish-service.js';
 import { RealCheckService } from './oneshot/check-service.js';
+import { RealRuntimeProvisionService } from './oneshot/runtime-provision-service.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -113,6 +114,7 @@ async function main(): Promise<void> {
     });
     const publishService = new RealPublishService(broker, gitNodes);
     const checkService = new RealCheckService(gitNodes);
+    const runtimeProvisionService = new RealRuntimeProvisionService(gitNodes, oc.runtimeCatalog);
 
     const dockerFactory = new DockerRunnerFactory({
       image: dc.RUNNER_IMAGE,
@@ -122,7 +124,7 @@ async function main(): Promise<void> {
       memory: dc.RUNNER_MEMORY,
       cpus: dc.RUNNER_CPUS,
       pidsLimit: dc.RUNNER_PIDS_LIMIT,
-    }, nodeSpawn, cloneService, publishService, checkService);
+    }, nodeSpawn, cloneService, publishService, checkService, runtimeProvisionService);
     baseFactory = dockerFactory;
     volumeReaper = dockerFactory;
     console.log(`[gateway] using DockerRunnerFactory (image=${dc.RUNNER_IMAGE})`);
