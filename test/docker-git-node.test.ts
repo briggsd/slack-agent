@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { PassThrough } from 'stream';
 import { EventEmitter } from 'events';
 import type { ChildProcess, SpawnOptions } from 'child_process';
-import { DockerGitNodeExecutor, credentialHelper } from '../src/oneshot/docker-git-node.js';
+import { DIFF_BASE_REF, DockerGitNodeExecutor, credentialHelper } from '../src/oneshot/docker-git-node.js';
 import { GithubProvider, providerFor } from '../src/oneshot/git-host.js';
 import type { SpawnFn } from '../src/runner/docker.js';
 import type { CredentialLease } from '../src/broker/types.js';
@@ -253,7 +253,7 @@ describe('DockerGitNodeExecutor — clone', () => {
 
     await exec.clone({ lease, repo: 'owner/repo', workdir, volume });
 
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     const { command, args } = calls[0]!;
     expect(command).toBe('docker');
     expect(args).toContain('run');
@@ -288,6 +288,32 @@ describe('DockerGitNodeExecutor — clone', () => {
     // Security opt
     expect(args).toContain('--security-opt');
     expect(args).toContain('no-new-privileges');
+  });
+
+  it('records a stable local diff-base ref after clone', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.clone({ lease: makeLease(token), repo: 'owner/repo', workdir, volume, shallow: true });
+
+    expect(calls).toHaveLength(2);
+    const cloneArgs = calls[0]?.args ?? [];
+    expect(cloneArgs).toContain('clone');
+    expect(cloneArgs).toContain('--depth');
+    expect(cloneArgs).toContain('--single-branch');
+
+    const baseRefCall = calls[1]!;
+    expect(baseRefCall.command).toBe('docker');
+    expect(baseRefCall.args).toContain('--entrypoint');
+    expect(baseRefCall.args[baseRefCall.args.indexOf('--entrypoint') + 1]).toBe('git');
+    expect(baseRefCall.args).toContain('-C');
+    expect(baseRefCall.args).toContain(workdir);
+    expect(baseRefCall.args).toContain('update-ref');
+    expect(baseRefCall.args).toContain(DIFF_BASE_REF);
+    expect(baseRefCall.args).toContain('HEAD');
+
+    const env = baseRefCall.options.env as Record<string, string | undefined>;
+    expect(env['GIT_TOKEN']).toBe('');
   });
 
   it('CREDENTIAL BOUNDARY: token is in spawn env.GIT_TOKEN and NOT anywhere in argv', async () => {

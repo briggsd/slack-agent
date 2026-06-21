@@ -186,6 +186,12 @@ function runDocker(
  *  guard so a stalled `docker run git clone` can't hang the turn. Not a tuning knob. */
 const DEFAULT_CLONE_TIMEOUT_MS = 120_000;
 
+/**
+ * Stable local ref pointing at the freshly cloned default-branch HEAD.
+ * Keep in sync with runner/src/main.ts's DIFF_BASE_REF prompt guidance.
+ */
+export const DIFF_BASE_REF = 'refs/slack-agent/base';
+
 function normalizeRemoteUrl(url: string): string {
   return url.trim().replace(/\.git$/, '').toLowerCase();
 }
@@ -254,6 +260,25 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
 
     const args = this.dockerRunArgs(req.volume, gitArgs);
     await runDocker(this.spawnFn, args, req.lease.token, 'git clone', `repo: ${req.repo}`, this.cloneTimeoutMs);
+
+    // Capture the clone's checked-out default-branch HEAD under a stable local ref.
+    // Later build work happens on a branch from this commit, so the coordinator can
+    // reliably inspect `DIFF_BASE_REF...HEAD` without assuming the default branch is
+    // named "main" or that an origin/<default> ref exists in a shallow clone.
+    const baseRefArgs = this.dockerRunArgs(req.volume, [
+      '-C', req.workdir,
+      'update-ref',
+      DIFF_BASE_REF,
+      'HEAD',
+    ]);
+    await runDocker(
+      this.spawnFn,
+      baseRefArgs,
+      '',
+      'git diff base ref',
+      `repo: ${req.repo}`,
+      this.cloneTimeoutMs,
+    );
   }
 
   async branch(req: BranchRequest): Promise<void> {
