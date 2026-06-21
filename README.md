@@ -125,6 +125,11 @@ and includes `git`, `curl`, and `ripgrep` as agent tools.
 | `GIT_IMAGE` | no (default `slackbot-runner:latest`) | Image for the ephemeral credentialed git nodes (clone/push) |
 | `CLONE_REPO_ALLOWLIST` | no (default empty) | Comma-separated exact GitHub `owner/name` slugs the conversational `clone_repo` tool may clone. Empty/unset denies model-chosen clones. |
 
+> Upgrade note: conversational `clone_repo` is deny-by-default. Existing deployments
+> that rely on the coordinator cloning repositories must set `CLONE_REPO_ALLOWLIST`;
+> otherwise clone attempts return `repo not allowed`. Entries must be bare
+> `owner/name` slugs, not URLs or `.git` URLs; malformed entries fail startup.
+
 ## One-shot repo tasks
 
 Mention the bot with a leading keyword and a `host:owner/repo` target to run a

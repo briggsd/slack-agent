@@ -166,9 +166,12 @@ function runDocker(
         // containers behind when the daemon keeps the run alive.
         if (timeoutContainerName !== undefined) {
           try {
-            spawnFn('docker', ['rm', '-f', timeoutContainerName], {
+            const cleanup = spawnFn('docker', ['rm', '-f', timeoutContainerName], {
               env: dockerCheckEnv(),
               stdio: 'ignore',
+            });
+            cleanup.once('error', () => {
+              /* best-effort cleanup */
             });
           } catch {
             /* best-effort cleanup */
