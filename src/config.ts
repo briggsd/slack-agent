@@ -164,6 +164,12 @@ function isRuntimeRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isSafeRuntimeName(value: string): boolean {
+  // The catalog key is interpolated into /workspace/.runtimes/<name> (rm -rf + mv target),
+  // so keep it a single safe path segment even though only operators write the catalog.
+  return value !== '.' && value !== '..' && /^[a-zA-Z0-9._-]+$/.test(value);
+}
+
 function isSafeRuntimeBinSubdir(value: string): boolean {
   if (value === '' || value.startsWith('/')) return false;
   const segments = value.split('/');
@@ -192,8 +198,8 @@ export function parseRuntimeCatalog(raw: string | undefined): ReadonlyMap<string
 
   const result = new Map<string, RuntimeCatalogEntry>();
   for (const [name, value] of Object.entries(parsed)) {
-    if (name.trim() === '') {
-      throw new Error('Invalid runtime catalog entry: runtime name must be non-empty');
+    if (!isSafeRuntimeName(name)) {
+      throw new Error(`Invalid runtime catalog entry "${name}": name must be a safe path segment (letters, digits, ., _, -)`);
     }
     if (!isRuntimeRecord(value)) {
       throw new Error(`Invalid runtime catalog entry "${name}": expected an object`);

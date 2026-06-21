@@ -352,7 +352,7 @@ export async function runProvisionRuntime(
 ): Promise<string> {
   const outcome = await provisionRuntime(input);
   return outcome.ok
-    ? `RUNTIME PROVISIONED: ${input.name}. The runtime is available on PATH for later run_checks and shell commands through /workspace/.runtimes.`
+    ? `RUNTIME PROVISIONED: ${input.name}. It is on PATH for run_checks; in your own shell invoke it by absolute path under /workspace/.runtimes/${input.name}/.`
     : `RUNTIME NOT PROVISIONED: ${outcome.error}. Tell the user the short failure reason; do not fetch an arbitrary runtime yourself.`;
 }
 

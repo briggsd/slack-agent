@@ -203,6 +203,14 @@ describe('parseRuntimeCatalog', () => {
       }))).toThrow(/binSubdir/);
     }
   });
+
+  it('throws for unsafe runtime names (catalog keys interpolate into the rm -rf/mv target)', () => {
+    for (const name of ['.', '..', '../evil', 'py/bin', 'a b']) {
+      expect(() => parseRuntimeCatalog(JSON.stringify({
+        [name]: valid.python,
+      }))).toThrow(/name/);
+    }
+  });
 });
 
 describe('GATE_TIMEOUT_MS config', () => {
