@@ -181,6 +181,11 @@ writable memory would let any user's thread influence every other user's context
   `docker` argv (visible in `ps`) or in logs. Slack tokens never enter containers at all.
 - Message contents are never logged by gateway or runner; logs carry keys, lifecycle
   events, filenames and sizes only.
+- Runtime provisioning is catalog-gated: the model can request a runtime name such
+  as `python`, but the gateway chooses the pinned URL and SHA256 from
+  `config/runtimes.json`. The provision container carries no git token or API key,
+  verifies the checksum before extraction, and installs only onto that session's
+  volume under `/workspace/.runtimes`.
 
 ### What it does NOT provide (be aware)
 
@@ -244,6 +249,7 @@ container is ever executed on the host.
 | `GITHUB_BOT_TOKEN` / `GITLAB_BOT_TOKEN` | — | Bot-account tokens for one-shot repo tasks. Held gateway-side; carried only by the deterministic git nodes, never injected into the agent sandbox. Under `RUNNER_BACKEND=fake` the broker is faked and these are unused. |
 | `GIT_IMAGE` | `slackbot-runner:latest` | Image for the ephemeral credentialed git nodes (clone/push) |
 | `CLONE_REPO_ALLOWLIST` | empty | Comma-separated exact GitHub `owner/name` slugs the conversational `clone_repo` tool may clone. Empty/unset denies model-chosen clones before leasing or spawning Docker; malformed entries fail startup. |
+| `RUNTIME_CATALOG_PATH` | `config/runtimes.json` | JSON catalog for the conversational `provision_runtime` tool. Missing/empty catalog denies all runtime requests; malformed entries fail startup. |
 
 ---
 

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (value === undefined || value === '') {
@@ -51,6 +53,13 @@ export interface RepoCheckCmds {
   test?: string;
 }
 
+export interface RuntimeCatalogEntry {
+  version: string;
+  url: string;
+  sha256: string;
+  binSubdir: string;
+}
+
 export interface OneShotConfig {
   /** Docker image used for the ephemeral credentialed git nodes (clone/push). */
   GIT_IMAGE: string;
@@ -71,6 +80,10 @@ export interface OneShotConfig {
    * the global lintCommand/testCommand overrides. Empty map = no per-repo overrides.
    */
   checkCmds: ReadonlyMap<string, RepoCheckCmds>;
+  /**
+   * Gateway-curated relocatable runtime catalog. Empty map = provision_runtime deny-all.
+   */
+  runtimeCatalog: ReadonlyMap<string, RuntimeCatalogEntry>;
 }
 
 /**
@@ -147,6 +160,85 @@ export function parseRepoAllowlist(raw: string | undefined): ReadonlySet<string>
   return result;
 }
 
+function isRuntimeRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isSafeRuntimeBinSubdir(value: string): boolean {
+  if (value === '' || value.startsWith('/')) return false;
+  const segments = value.split('/');
+  return segments.every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+}
+
+/**
+ * Parse a pinned runtime catalog JSON map.
+ *
+ * Malformed catalog entries fail startup rather than silently widening or weakening the
+ * model-facing provision_runtime gate. An empty/absent catalog is represented by an empty map.
+ */
+export function parseRuntimeCatalog(raw: string | undefined): ReadonlyMap<string, RuntimeCatalogEntry> {
+  if (raw === undefined || raw.trim() === '') return new Map();
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Invalid runtime catalog JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (!isRuntimeRecord(parsed)) {
+    throw new Error('Invalid runtime catalog: expected a JSON object');
+  }
+
+  const result = new Map<string, RuntimeCatalogEntry>();
+  for (const [name, value] of Object.entries(parsed)) {
+    if (name.trim() === '') {
+      throw new Error('Invalid runtime catalog entry: runtime name must be non-empty');
+    }
+    if (!isRuntimeRecord(value)) {
+      throw new Error(`Invalid runtime catalog entry "${name}": expected an object`);
+    }
+
+    const version = value['version'];
+    const url = value['url'];
+    const sha256 = value['sha256'];
+    const binSubdir = value['binSubdir'];
+    if (
+      typeof version !== 'string' || version === '' ||
+      typeof url !== 'string' ||
+      typeof sha256 !== 'string' ||
+      typeof binSubdir !== 'string'
+    ) {
+      throw new Error(`Invalid runtime catalog entry "${name}": expected version, url, sha256, binSubdir strings`);
+    }
+    if (!url.startsWith('https://')) {
+      throw new Error(`Invalid runtime catalog entry "${name}": url must use https://`);
+    }
+    if (!/^[a-fA-F0-9]{64}$/.test(sha256)) {
+      throw new Error(`Invalid runtime catalog entry "${name}": sha256 must be 64 hex characters`);
+    }
+    if (!isSafeRuntimeBinSubdir(binSubdir)) {
+      throw new Error(`Invalid runtime catalog entry "${name}": binSubdir must be a safe relative path`);
+    }
+
+    result.set(name, { version, url, sha256: sha256.toLowerCase(), binSubdir });
+  }
+  return result;
+}
+
+function readRuntimeCatalog(path: string): ReadonlyMap<string, RuntimeCatalogEntry> {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf-8');
+  } catch (err) {
+    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
+      return new Map();
+    }
+    throw err;
+  }
+  return parseRuntimeCatalog(raw);
+}
+
 export interface SpendCapsConfig {
   /** Lifetime per-session cap, micro-USD. 0 = disabled. */
   perTaskMicroUsd: number;
@@ -216,6 +308,7 @@ export function loadConfig(): Config {
       lintCommand: optionalEnvMaybe('ONESHOT_LINT_CMD'),
       testCommand: optionalEnvMaybe('ONESHOT_TEST_CMD'),
       checkCmds: parseCheckCmds(process.env['ONESHOT_CHECK_CMDS']),
+      runtimeCatalog: readRuntimeCatalog(optionalEnvString('RUNTIME_CATALOG_PATH', 'config/runtimes.json')),
     },
     spendCaps: {
       perTaskMicroUsd:      usdToMicro(optionalEnvNumber('SPEND_CAP_PER_TASK_USD', 20)),

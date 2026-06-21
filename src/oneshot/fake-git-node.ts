@@ -14,6 +14,7 @@ import type {
   OpenChangeRequest,
   CheckRequest,
   CheckResult,
+  ProvisionRuntimeRequest,
 } from './git-node.js';
 
 export class FakeGitNodeExecutor implements GitNodeExecutor {
@@ -23,6 +24,7 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   public pushes: PushRequest[] = [];
   public changeRequests: OpenChangeRequest[] = [];
   public checks: CheckRequest[] = [];
+  public runtimeProvisions: ProvisionRuntimeRequest[] = [];
 
   private readonly prUrl: string;
   private cloneError: Error | null = null;
@@ -31,6 +33,7 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   private pushError: Error | null = null;
   private openChangeError: Error | null = null;
   private checkError: Error | null = null;
+  private provisionRuntimeError: Error | null = null;
 
   /** Fixed fallback result when no queue entry is available. */
   private checkResults: Map<'lint' | 'test', CheckResult> = new Map();
@@ -72,6 +75,11 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   /** Script runCheck() to reject with the given error (for infrastructure failure tests). */
   failNextCheck(err: Error): void {
     this.checkError = err;
+  }
+
+  /** Script provisionRuntime() to reject with the given error. */
+  failNextProvisionRuntime(err: Error): void {
+    this.provisionRuntimeError = err;
   }
 
   /** Script runCheck() to always return a specific result for the given kind. */
@@ -150,5 +158,14 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
     }
 
     return this.checkResults.get(req.kind) ?? { exitCode: 0, output: '', skipped: false };
+  }
+
+  async provisionRuntime(req: ProvisionRuntimeRequest): Promise<void> {
+    this.runtimeProvisions.push(req);
+    if (this.provisionRuntimeError !== null) {
+      const err = this.provisionRuntimeError;
+      this.provisionRuntimeError = null;
+      throw err;
+    }
   }
 }

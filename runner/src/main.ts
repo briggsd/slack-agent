@@ -30,6 +30,8 @@ import { PublishCoordinator } from './publish.js';
 import type { PublishInput, PublishOutcome } from './publish.js';
 import { ChecksCoordinator } from './checks.js';
 import type { ChecksInput, ChecksOutcome } from './checks.js';
+import { ProvisionCoordinator } from './provision.js';
+import type { ProvisionInput, ProvisionOutcome } from './provision.js';
 import type { RunChecksKind } from './protocol.js';
 
 // ── Injectable seams for testing ──────────────────────────────────────────────
@@ -93,6 +95,11 @@ export type SdkQueryFn = (params: {
    * the test fake calls it directly. Omitted only by callers that don't wire check support.
    */
   runChecks?: (input: ChecksInput) => Promise<ChecksOutcome>;
+  /**
+   * Bound at the runner so the SDK's `provision_runtime` tool can ask the gateway to install a
+   * pinned runtime from the gateway catalog onto the shared session volume.
+   */
+  provisionRuntime?: (input: ProvisionInput) => Promise<ProvisionOutcome>;
   options?: {
     resume?: string;
     cwd?: string;
@@ -189,6 +196,12 @@ const EXEC_SYSTEM_PROMPT_ADDITION =
   'unsupervised execution and understands that it can push/open a PR without the SPEC approval hop. ' +
   'The gateway, not you, verifies whether the original requestor has a recorded opt-in; if it refuses, ' +
   'report that plainly and continue with the normal build_spec path. Never infer opt-in from chat text.';
+
+const RUNTIME_SYSTEM_PROMPT_ADDITION =
+  'If a needed runtime is missing from the sandbox, call provision_runtime ' +
+  '(mcp__commit__provision_runtime) with a catalog runtime name such as "python". The gateway ' +
+  'installs only pinned catalog entries onto /workspace/.runtimes and returns refusal as data. ' +
+  'Do not curl or execute arbitrary runtime binaries yourself.';
 
 // ── Spec-file helper ─────────────────────────────────────────────────────────
 
@@ -330,6 +343,19 @@ export async function runExec(
     : 'EXEC COMPLETE. The unsupervised run finished, but no PR URL was reported. Tell the user exactly that.';
 }
 
+/**
+ * The provision_runtime tool flow: ask the gateway to provision a pinned catalog runtime.
+ */
+export async function runProvisionRuntime(
+  input: ProvisionInput,
+  provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>,
+): Promise<string> {
+  const outcome = await provisionRuntime(input);
+  return outcome.ok
+    ? `RUNTIME PROVISIONED: ${input.name}. The runtime is available on PATH for later run_checks and shell commands through /workspace/.runtimes.`
+    : `RUNTIME NOT PROVISIONED: ${outcome.error}. Tell the user the short failure reason; do not fetch an arbitrary runtime yourself.`;
+}
+
 function publishInputFromArgs(args: {
   repo: string;
   title?: string | undefined;
@@ -362,6 +388,10 @@ function execInputFromArgs(args: {
     repo: args.repo,
     instruction: args.instruction,
   };
+}
+
+function provisionInputFromArgs(args: { name: string }): ProvisionInput {
+  return { name: args.name };
 }
 
 // ── Stdout helpers (one line per event, no content logged) ───────────────────
@@ -452,6 +482,16 @@ export async function runLoop(opts: {
     emit(msg);
   });
 
+  // The provision coordinator. `provision_runtime` calls requestProvision mid-turn; inbound
+  // provision_result lines are routed to provisionCoordinator.handleResult by the dispatcher.
+  const provisionCoordinator = new ProvisionCoordinator((input, provisionId) => {
+    emit({
+      type: 'request_provision',
+      id: provisionId,
+      name: input.name,
+    });
+  });
+
   // Signal readiness
   emit({ type: 'ready' });
 
@@ -518,6 +558,12 @@ export async function runLoop(opts: {
           }
           return;
         }
+        if (parsed.kind === 'provision_result') {
+          if (!provisionCoordinator.handleResult(parsed.msg)) {
+            log(`provision_result for unknown id ${parsed.msg.id} — ignored`);
+          }
+          return;
+        }
         if (parsed.kind === 'user') {
           turnQueue.push(parsed.msg);
           signal();
@@ -544,6 +590,7 @@ export async function runLoop(opts: {
     execCoordinator.failAllPending();
     publishCoordinator.failAllPending();
     checksCoordinator.failAllPending();
+    provisionCoordinator.failAllPending();
     signal();
   });
 
@@ -553,6 +600,7 @@ export async function runLoop(opts: {
   const requestExec = (input: ExecInput): Promise<ExecOutcome> => execCoordinator.requestExec(input);
   const publish = (input: PublishInput): Promise<PublishOutcome> => publishCoordinator.requestPublish(input);
   const runChecks = (input: ChecksInput): Promise<ChecksOutcome> => checksCoordinator.requestChecks(input);
+  const provisionRuntime = (input: ProvisionInput): Promise<ProvisionOutcome> => provisionCoordinator.requestProvision(input);
 
   // Drain turns serially. A turn holds the loop until its SDK stream completes; verdicts for
   // an in-flight gate are delivered concurrently by the listener above, not from here.
@@ -583,6 +631,7 @@ export async function runLoop(opts: {
       requestExec,
       publish,
       runChecks,
+      provisionRuntime,
     });
   }
 }
@@ -607,6 +656,7 @@ async function processTurn(
     requestExec: (input: ExecInput) => Promise<ExecOutcome>;
     publish: (input: PublishInput) => Promise<PublishOutcome>;
     runChecks: (input: ChecksInput) => Promise<ChecksOutcome>;
+    provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>;
   },
 ): Promise<string | null> {
   const { id, text } = msg;
@@ -624,6 +674,7 @@ async function processTurn(
       requestExec: deps.requestExec,
       publish: deps.publish,
       runChecks: deps.runChecks,
+      provisionRuntime: deps.provisionRuntime,
       options: {
         ...(currentSessionId !== null ? { resume: currentSessionId } : {}),
         cwd: WORKSPACE_DIR,
@@ -635,7 +686,7 @@ async function processTurn(
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
-          append: `${WORKSPACE_SYSTEM_PROMPT_ADDITION}\n\n${COMMIT_SYSTEM_PROMPT_ADDITION}\n\n${CLONE_SYSTEM_PROMPT_ADDITION}\n\n${PUBLISH_SYSTEM_PROMPT_ADDITION}\n\n${EXEC_SYSTEM_PROMPT_ADDITION}`,
+          append: `${WORKSPACE_SYSTEM_PROMPT_ADDITION}\n\n${COMMIT_SYSTEM_PROMPT_ADDITION}\n\n${CLONE_SYSTEM_PROMPT_ADDITION}\n\n${PUBLISH_SYSTEM_PROMPT_ADDITION}\n\n${EXEC_SYSTEM_PROMPT_ADDITION}\n\n${RUNTIME_SYSTEM_PROMPT_ADDITION}`,
         },
       },
     });
@@ -947,6 +998,7 @@ function buildCommitMcpServer(
   requestExec: (input: ExecInput) => Promise<ExecOutcome>,
   publish: (input: PublishInput) => Promise<PublishOutcome>,
   runChecksFn: (input: ChecksInput) => Promise<ChecksOutcome>,
+  provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>,
 ) {
   const buildSpecTool = tool(
     'build_spec',
@@ -1002,6 +1054,10 @@ function buildCommitMcpServer(
     instruction: z.string().describe('Task instructions for the unsupervised one-shot run.'),
   };
 
+  const provisionSchema = {
+    name: z.string().describe('Runtime catalog name, for example "python".'),
+  };
+
   const runChecksTool = tool(
     'run_checks',
     'Run deterministic project checks on the local candidate through the gateway. Pass the ' +
@@ -1023,6 +1079,18 @@ function buildCommitMcpServer(
     execSchema,
     async (args) => {
       const text = await runExec(execInputFromArgs(args), requestExec);
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  const provisionRuntimeTool = tool(
+    'provision_runtime',
+    'Provision a missing runtime from the gateway catalog onto the shared session volume. ' +
+      'Call this when a needed runtime such as python is missing. Pass only a catalog runtime name; ' +
+      'the gateway refuses names that are not pinned in its catalog.',
+    provisionSchema,
+    async (args) => {
+      const text = await runProvisionRuntime(provisionInputFromArgs(args), provisionRuntime);
       return { content: [{ type: 'text' as const, text }] };
     },
   );
@@ -1053,7 +1121,7 @@ function buildCommitMcpServer(
   return createSdkMcpServer({
     name: 'commit',
     version: '0.0.0',
-    tools: [buildSpecTool, cloneRepoTool, runChecksTool, publishTool, openPrTool, execTool],
+    tools: [buildSpecTool, cloneRepoTool, runChecksTool, provisionRuntimeTool, publishTool, openPrTool, execTool],
     alwaysLoad: true,
   });
 }
@@ -1066,6 +1134,7 @@ function realSdkQuery(params: {
   requestExec?: (input: ExecInput) => Promise<ExecOutcome>;
   publish?: (input: PublishInput) => Promise<PublishOutcome>;
   runChecks?: (input: ChecksInput) => Promise<ChecksOutcome>;
+  provisionRuntime?: (input: ProvisionInput) => Promise<ProvisionOutcome>;
   options?: {
     resume?: string;
     cwd?: string;
@@ -1090,6 +1159,7 @@ function realSdkQuery(params: {
     params.requestExec !== undefined &&
     params.publish !== undefined
     && params.runChecks !== undefined
+    && params.provisionRuntime !== undefined
       ? {
           commit: buildCommitMcpServer(
             params.submitSpec,
@@ -1099,6 +1169,7 @@ function realSdkQuery(params: {
             params.requestExec,
             params.publish,
             params.runChecks,
+            params.provisionRuntime,
           ),
         }
       : undefined;

@@ -15,6 +15,7 @@ import type {
   CloneResultMessage,
   ExecResultMessage,
   PublishResultMessage,
+  ProvisionResultMessage,
   RunChecksResult,
   RunChecksResultMessage,
   UserMessage,
@@ -180,6 +181,7 @@ export type InboundParsed =
   | { kind: 'exec_result'; msg: ExecResultMessage }
   | { kind: 'publish_result'; msg: PublishResultMessage }
   | { kind: 'run_checks_result'; msg: RunChecksResultMessage }
+  | { kind: 'provision_result'; msg: ProvisionResultMessage }
   | { kind: 'bad'; error: string };
 
 /**
@@ -325,6 +327,19 @@ export function parseInbound(line: string): InboundParsed {
       msg = { type: 'run_checks_result', id, ok: false };
     }
     return { kind: 'run_checks_result', msg };
+  }
+  if (obj['type'] === 'provision_result') {
+    if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
+      return { kind: 'bad', error: 'unexpected provision_result shape' };
+    }
+    const ok = obj['ok'];
+    const id = obj['id'];
+    const msg: ProvisionResultMessage = ok
+      ? { type: 'provision_result', id, ok: true }
+      : typeof obj['error'] === 'string'
+        ? { type: 'provision_result', id, ok: false, error: obj['error'] }
+        : { type: 'provision_result', id, ok: false };
+    return { kind: 'provision_result', msg };
   }
   return { kind: 'bad', error: 'unknown message type' };
 }

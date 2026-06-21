@@ -125,11 +125,20 @@ and includes `git`, `curl`, and `ripgrep` as agent tools.
 | `GITLAB_BOT_TOKEN` | no | Same, for GitLab (provider not yet implemented). |
 | `GIT_IMAGE` | no (default `slackbot-runner:latest`) | Image for the ephemeral credentialed git nodes (clone/push) |
 | `CLONE_REPO_ALLOWLIST` | no (default empty) | Comma-separated exact GitHub `owner/name` slugs the conversational `clone_repo` tool may clone. Empty/unset denies model-chosen clones. |
+| `RUNTIME_CATALOG_PATH` | no (default `config/runtimes.json`) | JSON catalog of pinned relocatable runtimes available to `provision_runtime`. Missing/empty catalog denies all runtime requests; malformed entries fail startup. |
 
 > Upgrade note: conversational `clone_repo` is deny-by-default. Existing deployments
 > that rely on the coordinator cloning repositories must set `CLONE_REPO_ALLOWLIST`;
 > otherwise clone attempts return `repo not allowed`. Entries must be bare
 > `owner/name` slugs, not URLs or `.git` URLs; malformed entries fail startup.
+
+The conversational runner also exposes `mcp__commit__provision_runtime` for
+missing toolchains. The model can name only a catalog runtime such as `python`;
+the gateway resolves that name to the pinned URL and SHA256 in
+`config/runtimes.json`, downloads it in an ephemeral no-credential container,
+verifies the checksum, and extracts it onto the session volume under
+`/workspace/.runtimes`. `run_checks` prepends provisioned runtime `bin`
+directories to `PATH`.
 
 ## One-shot repo tasks
 

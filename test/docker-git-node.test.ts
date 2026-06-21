@@ -712,6 +712,22 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     expect(shellCmd).toContain('package.json');
   });
 
+  it('prepends provisioned runtime bin directories to PATH without injecting credentials', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    const shellCmd = args[cIdx + 1] ?? '';
+    expect(shellCmd).toContain('find /workspace/.runtimes');
+    expect(shellCmd).toContain('-type d -name bin');
+    expect(shellCmd).toContain('export PATH="${runtime_bins}$PATH"');
+    expect(shellCmd).toContain('npm run lint');
+    expect(args).not.toContain('GIT_TOKEN');
+  });
+
   it('uses lintCmd override when configured', async () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, lintCmd: 'make lint' });
@@ -720,7 +736,8 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toBe('make lint');
+    expect(args[cIdx + 1]).toContain('/workspace/.runtimes');
+    expect(args[cIdx + 1]).toContain('make lint');
   });
 
   it('uses testCmd override when configured', async () => {
@@ -731,7 +748,8 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toBe('make test');
+    expect(args[cIdx + 1]).toContain('/workspace/.runtimes');
+    expect(args[cIdx + 1]).toContain('make test');
   });
 
   it('a non-zero exit RESOLVES with that exitCode (does not reject)', async () => {
@@ -816,7 +834,8 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toBe('ruff check .');
+    expect(args[cIdx + 1]).toContain('/workspace/.runtimes');
+    expect(args[cIdx + 1]).toContain('ruff check .');
     expect(result.skipped).toBe(false);
   });
 
@@ -829,7 +848,8 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toBe('pytest');
+    expect(args[cIdx + 1]).toContain('/workspace/.runtimes');
+    expect(args[cIdx + 1]).toContain('pytest');
     expect(result.skipped).toBe(false);
   });
 
@@ -843,7 +863,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
     // per-repo wins over global
-    expect(args[cIdx + 1]).toBe('ruff check .');
+    expect(args[cIdx + 1]).toContain('ruff check .');
   });
 
   it('repo NOT in the map falls back to the global lintCmd override', async () => {
@@ -855,7 +875,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toBe('make lint');
+    expect(args[cIdx + 1]).toContain('make lint');
   });
 
   it('repo NOT in the map falls back to npm auto-detect shellCmd when no global override', async () => {
@@ -882,7 +902,7 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toBe('make lint');
+    expect(args[cIdx + 1]).toContain('make lint');
   });
 
   it('per-repo override is never marked skipped even if it exits with reserved code 97', async () => {
@@ -893,5 +913,79 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const result = await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
     expect(result.skipped).toBe(false);
     expect(result.exitCode).toBe(97);
+  });
+});
+
+// ── DockerGitNodeExecutor — provisionRuntime ─────────────────────────────────
+
+describe('DockerGitNodeExecutor — provisionRuntime', () => {
+  const image = 'slackbot-runner:test';
+  const volume = 'slackbot-ws-team01-c123-t456';
+  const entry = {
+    version: '3.12.13+20260610',
+    url: 'https://example.test/python.tar.gz',
+    sha256: 'a'.repeat(64),
+    binSubdir: 'python/bin',
+  };
+
+  it('spawns a named no-credential provision container with sha256 verification before extraction', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.provisionRuntime({ name: 'python', entry, volume });
+
+    expect(calls).toHaveLength(1);
+    const { command, args, options } = calls[0]!;
+    expect(command).toBe('docker');
+    expect(args).toContain('run');
+    expect(args).toContain('--rm');
+    expect(args).toContain('--name');
+    const nameIdx = args.indexOf('--name');
+    expect(args[nameIdx + 1]).toMatch(/^slackbot-runtime-provision-python-/);
+
+    const vIdx = args.indexOf('-v');
+    expect(args[vIdx + 1]).toBe(`${volume}:/workspace`);
+    expect(args).toContain('--security-opt');
+    expect(args).toContain('no-new-privileges');
+    expect(args).not.toContain('-e');
+    expect(args).not.toContain('GIT_TOKEN');
+
+    const env = options.env as Record<string, string | undefined>;
+    expect(env['GIT_TOKEN']).toBeUndefined();
+
+    const cIdx = args.indexOf('-c');
+    const shellCmd = args[cIdx + 1] ?? '';
+    expect(shellCmd).toContain('if [ -d "$bin_dir" ]; then exit 0; fi');
+    expect(shellCmd).toContain('curl -L --fail');
+    expect(shellCmd).toContain(entry.url);
+    expect(shellCmd).toContain('sha256sum "$archive"');
+    expect(shellCmd).toContain(entry.sha256);
+    expect(shellCmd.indexOf('sha256sum "$archive"')).toBeLessThan(shellCmd.indexOf('tar -xzf "$archive"'));
+    expect(shellCmd).toContain('/workspace/.runtimes/python/python/bin');
+  });
+
+  it('TIMEOUT: stalled provision removes the named container and kills the docker client', async () => {
+    let killed = false;
+    const runFake = new FakeChildProcess();
+    const cleanupFake = new FakeChildProcess();
+    runFake.kill = (): boolean => { killed = true; return true; };
+    const calls: SpawnCall[] = [];
+    const spawnFn: SpawnFn = (command, args, options) => {
+      const fake = calls.length === 0 ? runFake : cleanupFake;
+      calls.push({ command, args, options, fake });
+      return fake.asChildProcess();
+    };
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, provisionTimeoutMs: 10 });
+
+    await expect(exec.provisionRuntime({ name: 'python', entry, volume })).rejects.toThrow(/runtime provision timed out/);
+
+    expect(killed).toBe(true);
+    expect(calls).toHaveLength(2);
+    const nameIdx = calls[0]?.args.indexOf('--name') ?? -1;
+    const containerName = calls[0]?.args[nameIdx + 1];
+    expect(containerName).toMatch(/^slackbot-runtime-provision-python-/);
+    expect(calls[1]?.args).toEqual(['rm', '-f', containerName]);
+    const cleanupEnv = calls[1]?.options.env as Record<string, string | undefined>;
+    expect(cleanupEnv['GIT_TOKEN']).toBeUndefined();
   });
 });

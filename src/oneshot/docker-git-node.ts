@@ -14,7 +14,7 @@
 import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import type { SpawnFn } from '../runner/docker.js';
-import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, VerifyRepoRequest, OpenChangeRequest, CheckRequest, CheckResult } from './git-node.js';
+import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, VerifyRepoRequest, OpenChangeRequest, CheckRequest, CheckResult, ProvisionRuntimeRequest } from './git-node.js';
 import { providerFor, type FetchFn } from './git-host.js';
 
 /** Env vars the docker CLI itself may need; everything else (incl. host secrets) is dropped. */
@@ -129,10 +129,10 @@ function dockerCheckEnv(): NodeJS.ProcessEnv {
  * The conversational clone path passes one so a hung `docker run git clone` cannot wedge
  * the turn (and the in-container `clone_repo` tool parked on its result) indefinitely.
  */
-function runDocker(
+function runDockerWithEnv(
   spawnFn: SpawnFn,
   args: string[],
-  token: string,
+  env: NodeJS.ProcessEnv,
   what: string,
   context: string,
   timeoutMs?: number,
@@ -140,7 +140,7 @@ function runDocker(
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const child: ChildProcess = spawnFn('docker', args, {
-      env: dockerCliEnv(token),
+      env,
       stdio: ['ignore', 'ignore', 'pipe'],
     });
 
@@ -197,9 +197,51 @@ function runDocker(
   });
 }
 
+function runDocker(
+  spawnFn: SpawnFn,
+  args: string[],
+  token: string,
+  what: string,
+  context: string,
+  timeoutMs?: number,
+  timeoutContainerName?: string,
+): Promise<void> {
+  return runDockerWithEnv(
+    spawnFn,
+    args,
+    dockerCliEnv(token),
+    what,
+    context,
+    timeoutMs,
+    timeoutContainerName,
+  );
+}
+
+function runDockerNoCreds(
+  spawnFn: SpawnFn,
+  args: string[],
+  what: string,
+  context: string,
+  timeoutMs?: number,
+  timeoutContainerName?: string,
+): Promise<void> {
+  return runDockerWithEnv(
+    spawnFn,
+    args,
+    dockerCheckEnv(),
+    what,
+    context,
+    timeoutMs,
+    timeoutContainerName,
+  );
+}
+
 /** Default bound on a single clone (ms). Generous for a shallow clone; just a liveness
  *  guard so a stalled `docker run git clone` can't hang the turn. Not a tuning knob. */
 const DEFAULT_CLONE_TIMEOUT_MS = 120_000;
+
+/** Bound on a single runtime provision fetch/extract (ms). */
+const DEFAULT_PROVISION_TIMEOUT_MS = 180_000;
 
 /**
  * Stable local ref pointing at the freshly cloned default-branch HEAD.
@@ -221,6 +263,20 @@ function gitCloneContainerName(repo: string): string {
   return `slackbot-git-clone-${dockerNamePart(repo)}-${suffix}`;
 }
 
+function runtimeProvisionContainerName(name: string): string {
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `slackbot-runtime-provision-${dockerNamePart(name)}-${suffix}`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function runtimePathPrefixScript(): string {
+  return 'runtime_bins="$(find /workspace/.runtimes -mindepth 2 -maxdepth 3 -type d -name bin -print 2>/dev/null | tr \'\\n\' :)"; ' +
+    'if [ -n "$runtime_bins" ]; then export PATH="${runtime_bins}$PATH"; fi';
+}
+
 export class DockerGitNodeExecutor implements GitNodeExecutor {
   private readonly image: string;
   private readonly spawnFn: SpawnFn;
@@ -229,6 +285,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
   private readonly testCmd: string | undefined;
   private readonly checkCmds: ReadonlyMap<string, { lint?: string; test?: string }>;
   private readonly cloneTimeoutMs: number;
+  private readonly provisionTimeoutMs: number;
 
   constructor(opts: {
     image: string;
@@ -239,6 +296,8 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     checkCmds?: ReadonlyMap<string, { lint?: string; test?: string }>;
     /** Bound on a single clone in ms (default 120000). A stalled clone is killed and rejects. */
     cloneTimeoutMs?: number;
+    /** Bound on a single runtime provision in ms (default 180000). */
+    provisionTimeoutMs?: number;
   }) {
     this.image = opts.image;
     this.spawnFn = opts.spawn ?? nodeSpawn;
@@ -247,6 +306,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     this.testCmd = opts.testCmd;
     this.checkCmds = opts.checkCmds ?? new Map();
     this.cloneTimeoutMs = opts.cloneTimeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS;
+    this.provisionTimeoutMs = opts.provisionTimeoutMs ?? DEFAULT_PROVISION_TIMEOUT_MS;
   }
 
   /**
@@ -386,11 +446,51 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
    * credential (defense-in-depth on the boundary).
    */
   private dockerCheckArgs(volume: string, workdir: string, shellCmd: string): string[] {
+    const wrappedShellCmd = `${runtimePathPrefixScript()}; ${shellCmd}`;
     return [
       'run',
       '--rm',
       '-v', `${volume}:/workspace`,
       '-w', workdir,
+      '--security-opt', 'no-new-privileges',
+      '--entrypoint', 'sh',
+      this.image,
+      '-c', wrappedShellCmd,
+    ];
+  }
+
+  private dockerProvisionArgs(req: ProvisionRuntimeRequest, containerName: string): string[] {
+    const target = `/workspace/.runtimes/${req.name}`;
+    const binDir = `${target}/${req.entry.binSubdir}`;
+    const tmpDir = `${target}.tmp`;
+    const shellCmd = [
+      'set -eu',
+      `target=${shellQuote(target)}`,
+      `bin_dir=${shellQuote(binDir)}`,
+      `tmp_dir=${shellQuote(tmpDir)}`,
+      `url=${shellQuote(req.entry.url)}`,
+      `expected=${shellQuote(req.entry.sha256)}`,
+      'if [ -d "$bin_dir" ]; then exit 0; fi',
+      'archive="$(mktemp /tmp/runtime.XXXXXX.tar.gz)"',
+      'cleanup() { rm -f "$archive"; rm -rf "$tmp_dir"; }',
+      'trap cleanup EXIT',
+      'mkdir -p /workspace/.runtimes',
+      'curl -L --fail --silent --show-error --proto "=https" --tlsv1.2 "$url" -o "$archive"',
+      'actual="$(sha256sum "$archive" | awk \'{print $1}\')"',
+      'if [ "$actual" != "$expected" ]; then echo "sha256 mismatch" >&2; exit 23; fi',
+      'rm -rf "$tmp_dir"',
+      'mkdir -p "$tmp_dir"',
+      'tar -xzf "$archive" -C "$tmp_dir"',
+      'rm -rf "$target"',
+      'mv "$tmp_dir" "$target"',
+      'test -d "$bin_dir"',
+    ].join('; ');
+
+    return [
+      'run',
+      '--rm',
+      '--name', containerName,
+      '-v', `${req.volume}:/workspace`,
       '--security-opt', 'no-new-privileges',
       '--entrypoint', 'sh',
       this.image,
@@ -427,5 +527,18 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
       return { exitCode: 0, output: raw.output, skipped: true };
     }
     return { exitCode: raw.exitCode, output: raw.output, skipped: false };
+  }
+
+  async provisionRuntime(req: ProvisionRuntimeRequest): Promise<void> {
+    const containerName = runtimeProvisionContainerName(req.name);
+    const args = this.dockerProvisionArgs(req, containerName);
+    await runDockerNoCreds(
+      this.spawnFn,
+      args,
+      'runtime provision',
+      `runtime: ${req.name}`,
+      this.provisionTimeoutMs,
+      containerName,
+    );
   }
 }

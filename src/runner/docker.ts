@@ -33,6 +33,7 @@ import type {
   ExecResultMessage,
   PublishResultMessage,
   RunChecksResultMessage,
+  ProvisionResultMessage,
 } from './protocol.js';
 import type { CloneService } from './clone-service.js';
 import type { CloneOutcome } from './clone-service.js';
@@ -40,6 +41,8 @@ import type { PublishService } from './publish-service.js';
 import type { PublishOutcome, PublishServiceRequest } from './publish-service.js';
 import type { CheckService } from './check-service.js';
 import type { CheckOutcome, CheckServiceRequest, RunChecksKind } from './check-service.js';
+import type { RuntimeProvisionService } from './runtime-provision-service.js';
+import type { ProvisionOutcome, RuntimeProvisionRequest } from './runtime-provision-service.js';
 
 // ── Config types ──────────────────────────────────────────────────────────────
 
@@ -117,6 +120,7 @@ export class DockerRunner implements SessionRunner {
   private readonly volume?: string;
   private readonly publishService?: PublishService;
   private readonly checkService?: CheckService;
+  private readonly runtimeProvisionService?: RuntimeProvisionService;
   private disposed = false;
 
   /** Buffer for partial stdout data (NDJSON framing — may receive split chunks) */
@@ -143,6 +147,7 @@ export class DockerRunner implements SessionRunner {
     volume?: string,
     publishService?: PublishService,
     checkService?: CheckService,
+    runtimeProvisionService?: RuntimeProvisionService,
   ) {
     this.child = child;
     this.config = config;
@@ -151,6 +156,7 @@ export class DockerRunner implements SessionRunner {
     if (volume !== undefined) this.volume = volume;
     if (publishService !== undefined) this.publishService = publishService;
     if (checkService !== undefined) this.checkService = checkService;
+    if (runtimeProvisionService !== undefined) this.runtimeProvisionService = runtimeProvisionService;
 
     // A broken pipe (container died mid-write) must not crash the gateway
     child.stdin?.on('error', () => {});
@@ -648,6 +654,50 @@ export class DockerRunner implements SessionRunner {
             // the post-check continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
             continue;
+          } else if (parsed.type === 'request_provision') {
+            // The container requested a pinned runtime be provisioned onto the session volume.
+            // Validate as data; the catalog inside RuntimeProvisionService is the authorization gate.
+            if (typeof parsed.id !== 'string') {
+              console.error('[gateway] malformed request_provision: missing id — skipping');
+              continue;
+            }
+            const provisionId = parsed.id;
+            if (typeof parsed.name !== 'string') {
+              const fallback: GatewayToRunnerMessage = {
+                type: 'provision_result',
+                id: provisionId,
+                ok: false,
+                error: 'malformed request',
+              };
+              if (self.child.stdin?.writable) {
+                self.child.stdin.write(JSON.stringify(fallback) + '\n');
+              }
+              continue;
+            }
+            const provisionReq: RuntimeProvisionRequest = {
+              name: parsed.name,
+              volume: self.volume ?? '',
+            };
+            yield { type: 'status', text: `provisioning runtime ${provisionReq.name}...` } as RunnerEvent;
+
+            let provisionOutcome: ProvisionOutcome;
+            if (self.runtimeProvisionService !== undefined && self.volume !== undefined) {
+              provisionOutcome = await self.runtimeProvisionService.provision(provisionReq);
+            } else {
+              provisionOutcome = { ok: false, error: 'runtime provision unavailable' };
+            }
+
+            if (!self.child.stdin?.writable) {
+              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              return;
+            }
+            const provisionResult: ProvisionResultMessage = provisionOutcome.ok
+              ? { type: 'provision_result', id: provisionId, ok: true }
+              : { type: 'provision_result', id: provisionId, ok: false, error: provisionOutcome.error };
+            self.child.stdin.write(JSON.stringify(provisionResult satisfies GatewayToRunnerMessage) + '\n');
+            // Provisioning is gateway-side work; give the post-provision continuation a fresh turn budget.
+            deadline = Date.now() + turnTimeoutMs;
+            continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
             yield { type: 'error', message: parsed.message } as RunnerEvent;
             break;
@@ -724,6 +774,7 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
   private readonly cloneService?: CloneService;
   private readonly publishService?: PublishService;
   private readonly checkService?: CheckService;
+  private readonly runtimeProvisionService?: RuntimeProvisionService;
 
   constructor(
     config: DockerRunnerConfig,
@@ -731,12 +782,14 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
     cloneService?: CloneService,
     publishService?: PublishService,
     checkService?: CheckService,
+    runtimeProvisionService?: RuntimeProvisionService,
   ) {
     this.config = config;
     this.spawnFn = spawnFn;
     if (cloneService !== undefined) this.cloneService = cloneService;
     if (publishService !== undefined) this.publishService = publishService;
     if (checkService !== undefined) this.checkService = checkService;
+    if (runtimeProvisionService !== undefined) this.runtimeProvisionService = runtimeProvisionService;
   }
 
   /** Remove the Docker volume backing `sessionKey`. Resolves true when the volume is
@@ -836,7 +889,7 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
     const runner = new DockerRunner(child, this.config, {
       containerName,
       spawnFn: this.spawnFn,
-    }, this.cloneService, volumeName, this.publishService, this.checkService);
+    }, this.cloneService, volumeName, this.publishService, this.checkService, this.runtimeProvisionService);
 
     await DockerRunner.waitReady(runner, this.config.readyTimeoutMs);
 

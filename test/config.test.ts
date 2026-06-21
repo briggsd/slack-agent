@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { parseCheckCmds, parseRepoAllowlist } from '../src/config.js';
+import { parseCheckCmds, parseRepoAllowlist, parseRuntimeCatalog } from '../src/config.js';
 
 describe('parseCheckCmds', () => {
   it('returns an empty map for undefined input', () => {
@@ -150,6 +150,57 @@ describe('parseRepoAllowlist', () => {
   it('rejects malformed entries instead of silently widening policy', () => {
     for (const bad of ['owner', 'owner/repo/extra', '../repo', 'owner/re po']) {
       expect(() => parseRepoAllowlist(bad)).toThrow(/CLONE_REPO_ALLOWLIST/);
+    }
+  });
+});
+
+describe('parseRuntimeCatalog', () => {
+  const valid = {
+    python: {
+      version: '3.12.13+20260610',
+      url: 'https://example.test/python.tar.gz',
+      sha256: 'a'.repeat(64),
+      binSubdir: 'python/bin',
+    },
+  };
+
+  it('returns an empty map for undefined or empty input', () => {
+    expect(parseRuntimeCatalog(undefined).size).toBe(0);
+    expect(parseRuntimeCatalog('').size).toBe(0);
+  });
+
+  it('parses a valid catalog entry into a map', () => {
+    const result = parseRuntimeCatalog(JSON.stringify(valid));
+
+    expect(result.size).toBe(1);
+    expect(result.get('python')).toEqual(valid.python);
+  });
+
+  it('throws for malformed JSON and non-object catalogs', () => {
+    expect(() => parseRuntimeCatalog('{nope')).toThrow(/runtime catalog/i);
+    expect(() => parseRuntimeCatalog('[]')).toThrow(/runtime catalog/i);
+  });
+
+  it('throws for bad sha256 length or charset', () => {
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { ...valid.python, sha256: 'a'.repeat(63) },
+    }))).toThrow(/sha256/);
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { ...valid.python, sha256: `${'a'.repeat(63)}z` },
+    }))).toThrow(/sha256/);
+  });
+
+  it('throws for non-https urls', () => {
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { ...valid.python, url: 'http://example.test/python.tar.gz' },
+    }))).toThrow(/https/);
+  });
+
+  it('throws for unsafe binSubdir values', () => {
+    for (const binSubdir of ['../bin', 'python/../bin', '/python/bin']) {
+      expect(() => parseRuntimeCatalog(JSON.stringify({
+        python: { ...valid.python, binSubdir },
+      }))).toThrow(/binSubdir/);
     }
   });
 });

@@ -11,6 +11,7 @@
  * This file must NOT import @slack/bolt.
  */
 import * as readline from 'node:readline';
+import { readFileSync } from 'node:fs';
 import { FakeSlackApp, CapturingSlackClient } from './fake-slack.js';
 import { FakeRunnerFactory } from '../runner/fake.js';
 import { DockerRunnerFactory } from '../runner/docker.js';
@@ -21,12 +22,13 @@ import { BotAccountBroker } from '../broker/bot-account.js';
 import { FakeBroker } from '../broker/fake.js';
 import type { GitHost } from '../broker/types.js';
 import { DockerGitNodeExecutor } from '../oneshot/docker-git-node.js';
-import { parseCheckCmds, parseRepoAllowlist } from '../config.js';
+import { parseCheckCmds, parseRepoAllowlist, parseRuntimeCatalog } from '../config.js';
 import { FakeGitNodeExecutor } from '../oneshot/fake-git-node.js';
 import { DispatchingRunnerFactory } from '../oneshot/dispatching-factory.js';
 import { RealCloneService } from '../oneshot/clone-service.js';
 import { RealPublishService } from '../oneshot/publish-service.js';
 import { RealCheckService } from '../oneshot/check-service.js';
+import { RealRuntimeProvisionService } from '../oneshot/runtime-provision-service.js';
 
 // ─── Minimal config (does not call loadConfig — avoids requiring Slack tokens) ─
 
@@ -40,6 +42,18 @@ function envNumber(name: string, defaultValue: number): number {
 function envString(name: string, defaultValue: string): string {
   const raw = process.env[name];
   return raw !== undefined && raw !== '' ? raw : defaultValue;
+}
+
+function loadHarnessRuntimeCatalog(): ReturnType<typeof parseRuntimeCatalog> {
+  const path = envString('RUNTIME_CATALOG_PATH', 'config/runtimes.json');
+  try {
+    return parseRuntimeCatalog(readFileSync(path, 'utf-8'));
+  } catch (err) {
+    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
+      return new Map();
+    }
+    throw err;
+  }
 }
 
 // ─── Wire up ──────────────────────────────────────────────────────────────────
@@ -74,6 +88,7 @@ if (RUNNER_BACKEND === 'docker') {
   });
   const publishService = new RealPublishService(broker, gitNodes);
   const checkService = new RealCheckService(gitNodes);
+  const runtimeProvisionService = new RealRuntimeProvisionService(gitNodes, loadHarnessRuntimeCatalog());
   baseFactory = new DockerRunnerFactory({
     image: envString('RUNNER_IMAGE', 'slackbot-runner:latest'),
     readyTimeoutMs: envNumber('RUNNER_READY_TIMEOUT_MS', 30_000),
@@ -82,7 +97,7 @@ if (RUNNER_BACKEND === 'docker') {
     memory: envString('RUNNER_MEMORY', '512m'),
     cpus: envString('RUNNER_CPUS', '1.0'),
     pidsLimit: envNumber('RUNNER_PIDS_LIMIT', 256),
-  }, undefined, cloneService, publishService, checkService);
+  }, undefined, cloneService, publishService, checkService, runtimeProvisionService);
   console.log('[harness] using DockerRunnerFactory');
 
   dispatchingFactory = new DispatchingRunnerFactory(baseFactory, broker, gitNodes);

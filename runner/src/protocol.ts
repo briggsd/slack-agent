@@ -24,7 +24,8 @@ export type GatewayToRunnerMessage =
   | BuildResultMessage
   | ExecResultMessage
   | PublishResultMessage
-  | RunChecksResultMessage;
+  | RunChecksResultMessage
+  | ProvisionResultMessage;
 
 export type UserMessage = {
   type: 'user_message';
@@ -144,6 +145,18 @@ export type RunChecksResultMessage = {
   reason?: string;            // present iff !ok — short, token-free
 };
 
+/**
+ * The gateway's result of provisioning a pinned runtime the runner requested via a
+ * {@link RequestProvisionMessage}. `id` echoes the `request_provision` this answers.
+ * `error` is a short diagnostic (present iff `!ok`, token-free).
+ */
+export type ProvisionResultMessage = {
+  type: 'provision_result';
+  id: string;
+  ok: boolean;
+  error?: string;
+};
+
 // ── Runner → Gateway ──────────────────────────────────────────────────────────
 
 export type RunnerToGatewayMessage =
@@ -158,6 +171,7 @@ export type RunnerToGatewayMessage =
   | RequestExecMessage
   | RequestPublishMessage
   | RequestRunChecksMessage
+  | RequestProvisionMessage
   | ErrorMessage;
 
 /** Emitted once when the runner is ready to accept input. */
@@ -304,6 +318,18 @@ export type RequestRunChecksMessage = {
   id: string;             // the runner's own checks-correlation id
   repo: string;           // "owner/name" — the local candidate to check
   kind?: RunChecksKind;   // omitted means "all"
+};
+
+/**
+ * The runner requests a pinned runtime be provisioned onto the shared session volume. Raised from
+ * INSIDE a turn: the agent calls the `provision_runtime` tool, naming a catalog runtime such as
+ * "python". The gateway resolves that name against its curated catalog and either installs the
+ * pinned artifact or returns a refusal as data. The model never supplies a URL or checksum.
+ */
+export type RequestProvisionMessage = {
+  type: 'request_provision';
+  id: string;    // the runner's own provision-correlation id
+  name: string;  // runtime catalog name, e.g. "python"
 };
 
 /** Per-message failure. The runner remains usable after an error. */
