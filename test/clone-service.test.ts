@@ -9,11 +9,21 @@ import { RealCloneService } from '../src/oneshot/clone-service.js';
 import { FakeBroker } from '../src/broker/fake.js';
 import { FakeGitNodeExecutor } from '../src/oneshot/fake-git-node.js';
 
+function makeService(
+  broker: FakeBroker,
+  gitNodes: FakeGitNodeExecutor,
+  allowedRepos: readonly string[] = ['owner/repo', 'my-org/my-repo'],
+): RealCloneService {
+  return new RealCloneService(broker, gitNodes, {
+    allowedRepos: new Set(allowedRepos.map((repo) => repo.toLowerCase())),
+  });
+}
+
 describe('RealCloneService', () => {
   it('leases github credential, clones with workdir+volume+shallow:true, revokes', async () => {
     const broker = new FakeBroker('test-token');
     const gitNodes = new FakeGitNodeExecutor();
-    const svc = new RealCloneService(broker, gitNodes);
+    const svc = makeService(broker, gitNodes);
 
     const outcome = await svc.clone({ repo: 'owner/repo', volume: 'slackbot-ws-test' });
 
@@ -33,7 +43,7 @@ describe('RealCloneService', () => {
   it('derives workdir by replacing slashes with dashes', async () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
-    const svc = new RealCloneService(broker, gitNodes);
+    const svc = makeService(broker, gitNodes);
 
     const outcome = await svc.clone({ repo: 'my-org/my-repo', volume: 'some-vol' });
 
@@ -44,7 +54,7 @@ describe('RealCloneService', () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
     gitNodes.failNextClone(new Error('auth failed'));
-    const svc = new RealCloneService(broker, gitNodes);
+    const svc = makeService(broker, gitNodes);
 
     const outcome = await svc.clone({ repo: 'owner/repo', volume: 'vol' });
 
@@ -55,7 +65,7 @@ describe('RealCloneService', () => {
   it('rejects an invalid repo slug before leasing or cloning (defense-in-depth)', async () => {
     const broker = new FakeBroker();
     const gitNodes = new FakeGitNodeExecutor();
-    const svc = new RealCloneService(broker, gitNodes);
+    const svc = makeService(broker, gitNodes);
 
     for (const bad of ['../etc/passwd', 'owner', 'owner/repo/extra', 'owner/re po', '']) {
       const outcome = await svc.clone({ repo: bad, volume: 'vol' });
@@ -66,11 +76,35 @@ describe('RealCloneService', () => {
     expect(gitNodes.clones).toHaveLength(0);
   });
 
+  it('rejects a safe but unlisted repo before leasing or cloning', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const svc = makeService(broker, gitNodes, ['owner/repo']);
+
+    const outcome = await svc.clone({ repo: 'other/repo', volume: 'vol' });
+
+    expect(outcome).toEqual({ ok: false, error: 'repo not allowed' });
+    expect(broker.leases).toHaveLength(0);
+    expect(gitNodes.clones).toHaveLength(0);
+  });
+
+  it('an empty allowlist denies every model-chosen clone', async () => {
+    const broker = new FakeBroker();
+    const gitNodes = new FakeGitNodeExecutor();
+    const svc = makeService(broker, gitNodes, []);
+
+    const outcome = await svc.clone({ repo: 'owner/repo', volume: 'vol' });
+
+    expect(outcome).toEqual({ ok: false, error: 'repo not allowed' });
+    expect(broker.leases).toHaveLength(0);
+    expect(gitNodes.clones).toHaveLength(0);
+  });
+
   it('on broker failure: returns ok:false+error, no clone called', async () => {
     const broker = new FakeBroker();
     broker.lease = async () => { throw new Error('no token'); };
     const gitNodes = new FakeGitNodeExecutor();
-    const svc = new RealCloneService(broker, gitNodes);
+    const svc = makeService(broker, gitNodes);
 
     const outcome = await svc.clone({ repo: 'owner/repo', volume: 'vol' });
 

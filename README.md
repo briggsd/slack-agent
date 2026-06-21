@@ -123,6 +123,7 @@ and includes `git`, `curl`, and `ripgrep` as agent tools.
 | `GATE_TIMEOUT_MS` | no (default 15 min) | How long a supervised (`task`) run waits at the plan-approval gate for a reply before abandoning. |
 | `GITLAB_BOT_TOKEN` | no | Same, for GitLab (provider not yet implemented). |
 | `GIT_IMAGE` | no (default `slackbot-runner:latest`) | Image for the ephemeral credentialed git nodes (clone/push) |
+| `CLONE_REPO_ALLOWLIST` | no (default empty) | Comma-separated exact GitHub `owner/name` slugs the conversational `clone_repo` tool may clone. Empty/unset denies model-chosen clones. |
 
 ## One-shot repo tasks
 

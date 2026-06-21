@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { parseCheckCmds } from '../src/config.js';
+import { parseCheckCmds, parseRepoAllowlist } from '../src/config.js';
 
 describe('parseCheckCmds', () => {
   it('returns an empty map for undefined input', () => {
@@ -125,6 +125,31 @@ describe('parseCheckCmds', () => {
     ];
     for (const input of weirdInputs) {
       expect(() => parseCheckCmds(input)).not.toThrow();
+    }
+  });
+});
+
+describe('parseRepoAllowlist', () => {
+  it('returns an empty set for undefined or empty input', () => {
+    expect(parseRepoAllowlist(undefined).size).toBe(0);
+    expect(parseRepoAllowlist('   ').size).toBe(0);
+  });
+
+  it('parses comma-separated owner/name slugs case-insensitively', () => {
+    const result = parseRepoAllowlist('Owner/Repo, acme/widgets ');
+
+    expect([...result].sort()).toEqual(['acme/widgets', 'owner/repo']);
+  });
+
+  it('skips empty comma entries', () => {
+    const result = parseRepoAllowlist('owner/repo,,acme/widgets,');
+
+    expect([...result].sort()).toEqual(['acme/widgets', 'owner/repo']);
+  });
+
+  it('rejects malformed entries instead of silently widening policy', () => {
+    for (const bad of ['owner', 'owner/repo/extra', '../repo', 'owner/re po']) {
+      expect(() => parseRepoAllowlist(bad)).toThrow(/CLONE_REPO_ALLOWLIST/);
     }
   });
 });

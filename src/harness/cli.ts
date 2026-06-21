@@ -21,7 +21,7 @@ import { BotAccountBroker } from '../broker/bot-account.js';
 import { FakeBroker } from '../broker/fake.js';
 import type { GitHost } from '../broker/types.js';
 import { DockerGitNodeExecutor } from '../oneshot/docker-git-node.js';
-import { parseCheckCmds } from '../config.js';
+import { parseCheckCmds, parseRepoAllowlist } from '../config.js';
 import { FakeGitNodeExecutor } from '../oneshot/fake-git-node.js';
 import { DispatchingRunnerFactory } from '../oneshot/dispatching-factory.js';
 import { RealCloneService } from '../oneshot/clone-service.js';
@@ -68,7 +68,9 @@ if (RUNNER_BACKEND === 'docker') {
     ...(testCmdRaw !== undefined && testCmdRaw !== '' ? { testCmd: testCmdRaw } : {}),
     ...(checkCmds.size > 0 ? { checkCmds } : {}),
   });
-  const cloneService = new RealCloneService(broker, gitNodes);
+  const cloneService = new RealCloneService(broker, gitNodes, {
+    allowedRepos: parseRepoAllowlist(process.env['CLONE_REPO_ALLOWLIST']),
+  });
   const publishService = new RealPublishService(broker, gitNodes);
   const checkService = new RealCheckService(gitNodes);
   baseFactory = new DockerRunnerFactory({
