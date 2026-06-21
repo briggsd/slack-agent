@@ -20,6 +20,7 @@ import type {
   RunnerFactory,
   VolumeReaper,
   BuildOutcome,
+  ExecOutcome,
 } from './types.js';
 import type { Profile } from '../profiles/registry.js';
 import type {
@@ -29,6 +30,7 @@ import type {
   CloneResultMessage,
   RequestCloneMessage,
   RequestBuildMessage,
+  ExecResultMessage,
   PublishResultMessage,
   RunChecksResultMessage,
 } from './protocol.js';
@@ -490,6 +492,54 @@ export class DockerRunner implements SessionRunner {
             self.child.stdin.write(JSON.stringify(buildResult) + '\n');
             // The build is gateway-side work (a fresh container producing a local candidate), not the agent's — give the
             // post-build continuation a fresh turn budget, the same reasoning the approval/clone branches use.
+            deadline = Date.now() + turnTimeoutMs;
+            continue;
+          } else if (parsed.type === 'request_exec') {
+            // The container's exec tool asked the gateway to run the ungated repo-oneshot
+            // blueprint. Validate as data; authorization and execution are owned by the manager.
+            if (typeof parsed.id !== 'string') {
+              console.error('[gateway] malformed request_exec: missing id — skipping');
+              continue;
+            }
+            const execId = parsed.id;
+            if (
+              (parsed.host !== 'github' && parsed.host !== 'gitlab') ||
+              typeof parsed.repo !== 'string' ||
+              typeof parsed.instruction !== 'string'
+            ) {
+              const fallback: GatewayToRunnerMessage = {
+                type: 'exec_result',
+                id: execId,
+                ok: false,
+                reason: 'malformed request',
+              };
+              if (self.child.stdin?.writable) self.child.stdin.write(JSON.stringify(fallback) + '\n');
+              continue;
+            }
+            const resume = yield {
+              type: 'run_exec',
+              host: parsed.host,
+              repo: parsed.repo,
+              instruction: parsed.instruction,
+            } as RunnerEvent;
+            if (!self.child.stdin?.writable) {
+              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              return;
+            }
+            const outcome = resume as ExecOutcome | undefined;
+            const execResult: ExecResultMessage =
+              outcome !== undefined && outcome.ok
+                ? (outcome.prUrl !== undefined
+                    ? { type: 'exec_result', id: execId, ok: true, prUrl: outcome.prUrl }
+                    : { type: 'exec_result', id: execId, ok: true })
+                : {
+                    type: 'exec_result',
+                    id: execId,
+                    ok: false,
+                    reason: outcome !== undefined && !outcome.ok ? outcome.reason : 'exec failed',
+                  };
+            self.child.stdin.write(JSON.stringify(execResult satisfies GatewayToRunnerMessage) + '\n');
+            // Exec is gateway-side work, so give the post-exec continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_publish') {

@@ -9,7 +9,7 @@
  * For 'conversational' profiles: delegates directly to the base factory.
  */
 
-import type { RunnerFactory, SessionRunner, BuildRunnerFactory } from '../runner/types.js';
+import type { RunnerFactory, SessionRunner, BuildRunnerFactory, ExecInput } from '../runner/types.js';
 import type { Profile } from '../profiles/registry.js';
 import { getProfile } from '../profiles/registry.js';
 import type { CredentialBroker } from '../broker/types.js';
@@ -52,6 +52,20 @@ export class DispatchingRunnerFactory implements RunnerFactory, BuildRunnerFacto
     return new OneShotOrchestrator(
       inner, this.broker, this.gitNodes, sessionKey,
       taskIdForSessionKey(sessionKey), 'build-tail', { host: 'github', repo, instruction },
+    );
+  }
+
+  async createExecRunner(sessionKey: string, input: ExecInput): Promise<SessionRunner> {
+    // Fresh inner container on the shared volume, distinct name so it can co-exist with the router.
+    const inner = await this.agentFactory.create(sessionKey, getProfile('conversational'), { nameSuffix: 'exec' });
+    return new OneShotOrchestrator(
+      inner,
+      this.broker,
+      this.gitNodes,
+      sessionKey,
+      undefined,
+      'repo-oneshot',
+      { host: input.host, repo: input.repo, instruction: input.instruction },
     );
   }
 }

@@ -21,7 +21,8 @@ import { DispatchingRunnerFactory } from '../src/oneshot/dispatching-factory.js'
 import { DockerRunnerFactory, sanitizeKey, volumeNameFor } from '../src/runner/docker.js';
 import type { DockerRunnerConfig, SpawnFn } from '../src/runner/docker.js';
 import { SessionManager } from '../src/sessions/manager.js';
-import type { BuildRunnerFactory } from '../src/runner/types.js';
+import { SqliteSessionStore } from '../src/sessions/store.js';
+import type { BuildRunnerFactory, ExecInput } from '../src/runner/types.js';
 import type { SessionRunner, RunnerStream, RunnerEvent } from '../src/runner/types.js';
 import { FakeSlackClient } from './responder.test.js';
 
@@ -249,10 +250,13 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
    */
   class FakeBuildFactory implements BuildRunnerFactory {
     public createCalls: Array<{ sessionKey: string; repo: string }> = [];
+    public execCreateCalls: Array<{ sessionKey: string; input: ExecInput }> = [];
     private tailScript: RunnerEvent[][];
+    private execScript: RunnerEvent[][];
 
-    constructor(tailScript: RunnerEvent[][] = []) {
+    constructor(tailScript: RunnerEvent[][] = [], execScript: RunnerEvent[][] = []) {
       this.tailScript = tailScript;
+      this.execScript = execScript;
     }
 
     public disposedRunners: FakeRunner[] = [];
@@ -261,6 +265,19 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
       this.createCalls.push({ sessionKey, repo });
       const runner = new FakeRunner(sessionKey, this.tailScript);
       // Track disposal via wrapper
+      const self = this;
+      return {
+        send: (msg: string): RunnerStream => runner.send(msg),
+        async dispose(): Promise<void> {
+          await runner.dispose();
+          self.disposedRunners.push(runner);
+        },
+      };
+    }
+
+    async createExecRunner(sessionKey: string, input: ExecInput): Promise<SessionRunner> {
+      this.execCreateCalls.push({ sessionKey, input });
+      const runner = new FakeRunner(sessionKey, this.execScript);
       const self = this;
       return {
         send: (msg: string): RunnerStream => runner.send(msg),
@@ -402,6 +419,9 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
       createBuildRunner(): Promise<SessionRunner> {
         return Promise.reject(new Error('container spawn failed'));
       },
+      createExecRunner(): Promise<SessionRunner> {
+        return Promise.reject(new Error('should not run exec'));
+      },
     };
 
     const manager = new SessionManager({
@@ -423,6 +443,107 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
     expect(slack.updates.some((u) => u.text.includes('Build failed to start'))).toBe(true);
     // …and the router turn continued past the build (the {ok:false} resume was fed back).
     expect(slack.updates.some((u) => u.text === 'after build')).toBe(true);
+  });
+
+  it('run_exec without a recorded requestor refuses before creating an exec runner', async () => {
+    const slack = new FakeSlackClient();
+    const routerScript: RunnerEvent[] = [
+      { type: 'run_exec', host: 'github', repo: 'acme/widgets', instruction: 'ship it' },
+      { type: 'text', text: 'router resumed' },
+    ];
+    const routerFactory = new FakeRunnerFactory([[...routerScript]]);
+    const buildFactory = new FakeBuildFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory: routerFactory,
+      slack,
+      buildRunnerFactory: buildFactory,
+    });
+
+    await manager.enqueueNew(TEST_SESSION_KEY, {
+      message: 'go',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(buildFactory.execCreateCalls).toHaveLength(0);
+    expect(slack.updates.some((u) => u.text === 'router resumed')).toBe(true);
+  });
+
+  it('run_exec without requestor opt-in refuses before creating an exec runner', async () => {
+    const slack = new FakeSlackClient();
+    const store = new SqliteSessionStore(':memory:');
+    const routerScript: RunnerEvent[] = [
+      { type: 'run_exec', host: 'github', repo: 'acme/widgets', instruction: 'ship it' },
+      { type: 'text', text: 'router resumed' },
+    ];
+    const routerFactory = new FakeRunnerFactory([[...routerScript]]);
+    const buildFactory = new FakeBuildFactory();
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory: routerFactory,
+      slack,
+      store,
+      buildRunnerFactory: buildFactory,
+    });
+
+    await manager.enqueueNew(TEST_SESSION_KEY, {
+      message: 'go',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(buildFactory.execCreateCalls).toHaveLength(0);
+    expect(slack.updates.some((u) => u.text === 'router resumed')).toBe(true);
+    store.close();
+  });
+
+  it('run_exec with recorded requestor opt-in runs repo-oneshot and resumes the router', async () => {
+    const slack = new FakeSlackClient();
+    const store = new SqliteSessionStore(':memory:');
+    store.recordExecOptIn('TEAM', 'U1', Date.now());
+    const routerScript: RunnerEvent[] = [
+      { type: 'run_exec', host: 'github', repo: 'acme/widgets', instruction: 'ship it' },
+      { type: 'text', text: 'router resumed' },
+    ];
+    const execScript: RunnerEvent[] = [
+      { type: 'pr_opened', url: 'https://github.com/acme/widgets/pull/42' },
+      { type: 'text', text: 'exec done' },
+    ];
+    const routerFactory = new FakeRunnerFactory([[...routerScript]]);
+    const buildFactory = new FakeBuildFactory([], [[...execScript]]);
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory: routerFactory,
+      slack,
+      store,
+      buildRunnerFactory: buildFactory,
+    });
+
+    await manager.enqueueNew(TEST_SESSION_KEY, {
+      message: 'go',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(buildFactory.execCreateCalls).toEqual([
+      {
+        sessionKey: TEST_SESSION_KEY,
+        input: { host: 'github', repo: 'acme/widgets', instruction: 'ship it' },
+      },
+    ]);
+    expect(buildFactory.disposedRunners).toHaveLength(1);
+    expect(slack.updates.some((u) => u.text === 'Opened PR: https://github.com/acme/widgets/pull/42')).toBe(true);
+    expect(slack.updates.some((u) => u.text === 'router resumed')).toBe(true);
+    store.close();
   });
 });
 

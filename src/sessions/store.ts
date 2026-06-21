@@ -95,6 +95,10 @@ export interface SessionStore {
   sumCostByUserSince(userId: string, sinceMs: number): number;
   /** Σ cost_micro_usd across all sessions since `sinceMs`. 0 when none. */
   sumCostGlobalSince(sinceMs: number): number;
+  /** True only when the gateway has a standing human opt-in for ungated exec. */
+  hasExecOptIn(teamId: string, userId: string): boolean;
+  /** Record a standing human opt-in for ungated exec. Admin/operator seam; not user-chat driven. */
+  recordExecOptIn(teamId: string, userId: string, atMs: number): void;
 }
 
 // ─── SQLite implementation ────────────────────────────────────────────────────
@@ -134,6 +138,8 @@ export class SqliteSessionStore implements SessionStore {
   private readonly stmtSumByTask: Database.Statement<[string], { total: number }>;
   private readonly stmtSumByUserSince: Database.Statement<[string, number], { total: number }>;
   private readonly stmtSumGlobalSince: Database.Statement<[number], { total: number }>;
+  private readonly stmtHasExecOptIn: Database.Statement<[string, string], { present: number }>;
+  private readonly stmtRecordExecOptIn: Database.Statement<[string, string, number]>;
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
@@ -216,6 +222,16 @@ export class SqliteSessionStore implements SessionStore {
     this.stmtSumGlobalSince = this.db.prepare<[number], { total: number }>(
       'SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM audit_events WHERE ts > ?',
     );
+
+    this.stmtHasExecOptIn = this.db.prepare<[string, string], { present: number }>(
+      'SELECT 1 AS present FROM exec_opt_ins WHERE team_id = ? AND user_id = ? LIMIT 1',
+    );
+
+    this.stmtRecordExecOptIn = this.db.prepare<[string, string, number]>(`
+      INSERT INTO exec_opt_ins (team_id, user_id, granted_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(team_id, user_id) DO UPDATE SET granted_at = excluded.granted_at
+    `);
   }
 
   /**
@@ -292,6 +308,15 @@ export class SqliteSessionStore implements SessionStore {
       CREATE INDEX IF NOT EXISTS audit_by_user_ts ON audit_events (user_id, ts);
       CREATE INDEX IF NOT EXISTS audit_by_ts      ON audit_events (ts);
     `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS exec_opt_ins (
+        team_id    TEXT    NOT NULL,
+        user_id    TEXT    NOT NULL,
+        granted_at INTEGER NOT NULL,
+        PRIMARY KEY (team_id, user_id)
+      );
+    `);
   }
 
   recordSession(row: NewSessionRow): void {
@@ -360,6 +385,14 @@ export class SqliteSessionStore implements SessionStore {
     return this.stmtSumGlobalSince.get(sinceMs)?.total ?? 0;
   }
 
+  hasExecOptIn(teamId: string, userId: string): boolean {
+    return this.stmtHasExecOptIn.get(teamId, userId) !== undefined;
+  }
+
+  recordExecOptIn(teamId: string, userId: string, atMs: number): void {
+    this.stmtRecordExecOptIn.run(teamId, userId, atMs);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -381,4 +414,6 @@ export class NoopSessionStore implements SessionStore {
   sumCostByTask(_sessionKey: string): number { return 0; }
   sumCostByUserSince(_userId: string, _sinceMs: number): number { return 0; }
   sumCostGlobalSince(_sinceMs: number): number { return 0; }
+  hasExecOptIn(_teamId: string, _userId: string): boolean { return false; }
+  recordExecOptIn(_teamId: string, _userId: string, _atMs: number): void { /* no-op */ }
 }

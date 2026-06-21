@@ -22,6 +22,7 @@ export type GatewayToRunnerMessage =
   | ApprovalVerdictMessage
   | CloneResultMessage
   | BuildResultMessage
+  | ExecResultMessage
   | PublishResultMessage
   | RunChecksResultMessage;
 
@@ -87,6 +88,22 @@ export type BuildResultMessage = {
 };
 
 /**
+ * The gateway's result of an unsupervised exec run the router requested via a
+ * {@link RequestExecMessage}. `id` echoes the `request_exec` this answers. `prUrl` is present
+ * when the unchanged repo-oneshot blueprint opened a PR; `reason` is a short diagnostic or
+ * authorization refusal (present iff `!ok`, token-free). The gateway, not the container, decides
+ * whether the requestor has an explicit recorded opt-in. (`exactOptionalPropertyTypes` is on —
+ * `prUrl` and `reason` are genuinely optional, never `undefined`-valued.)
+ */
+export type ExecResultMessage = {
+  type: 'exec_result';
+  id: string;       // echoes the request_exec this answers
+  ok: boolean;
+  prUrl?: string;   // present iff ok and a PR was opened
+  reason?: string;  // present iff !ok — short, token-free
+};
+
+/**
  * The gateway's result of publishing a verified local candidate the runner requested via a
  * {@link RequestPublishMessage}. `id` echoes the `request_publish` this answers. `prUrl` is the
  * opened PR URL (present iff `ok`). `reason` is a short diagnostic (present iff `!ok`, token-free).
@@ -138,6 +155,7 @@ export type RunnerToGatewayMessage =
   | RequestApprovalMessage
   | RequestCloneMessage
   | RequestBuildMessage
+  | RequestExecMessage
   | RequestPublishMessage
   | RequestRunChecksMessage
   | ErrorMessage;
@@ -238,6 +256,23 @@ export type RequestBuildMessage = {
   type: 'request_build';
   id: string;    // the runner's own build-correlation id
   repo: string;  // "owner/name" — the cloned repo the coordinator wants built
+};
+
+export type ExecHost = 'github' | 'gitlab';
+
+/**
+ * The runner requests unsupervised execution via the unchanged repo-oneshot blueprint. Raised from
+ * INSIDE a turn: the agent calls its `exec` tool, which emits this line and blocks until the gateway
+ * answers with an {@link ExecResultMessage} bearing the same `id`. The gateway services this only
+ * when the original requestor has an explicit recorded opt-in; no-requestor contexts fail closed.
+ * `instruction` is the task text for repo-oneshot and is treated as untrusted data by the gateway.
+ */
+export type RequestExecMessage = {
+  type: 'request_exec';
+  id: string;             // the runner's own exec-correlation id
+  host: ExecHost;
+  repo: string;           // "owner/name"
+  instruction: string;    // task text for the unsupervised blueprint
 };
 
 /**
