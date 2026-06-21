@@ -440,6 +440,7 @@ describe('SqliteSessionStore — pull_requests', () => {
   it('recordPullRequest + listOpenPullRequests round-trips the stored row with SQL defaults', () => {
     store.recordPullRequest({
       session_key: 'TEAM:C:TS',
+      team_id: 'TEAM1',
       repo: 'owner/repo',
       pr_number: 42,
       head_sha: 'abc123def456',
@@ -452,6 +453,7 @@ describe('SqliteSessionStore — pull_requests', () => {
     expect(rows[0]).toEqual({
       id: 1,
       session_key: 'TEAM:C:TS',
+      team_id: 'TEAM1',
       repo: 'owner/repo',
       pr_number: 42,
       head_sha: 'abc123def456',

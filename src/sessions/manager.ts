@@ -771,14 +771,23 @@ export class SessionManager {
             result: 'opened',
           });
 
-          this.store.recordPullRequest({
-            session_key: session.key,
-            repo: event.repo,
-            pr_number: event.number,
-            head_sha: event.headSha,
-            profile_id: session.profileId,
-            opened_at: this.now(),
-          });
+          // Best-effort: the PR is already open, so a metadata-write hiccup must not
+          // flip a successful turn into an error. Swallow + log (session key only),
+          // mirroring how audit() guards recordAudit.
+          try {
+            this.store.recordPullRequest({
+              session_key: session.key,
+              team_id: session.teamId ?? null,
+              repo: event.repo,
+              pr_number: event.number,
+              head_sha: event.headSha,
+              profile_id: session.profileId,
+              opened_at: this.now(),
+            });
+          } catch (prErr: unknown) {
+            const msg = prErr instanceof Error ? prErr.message : String(prErr);
+            console.error(`[session] store.recordPullRequest failed for ${session.key}: ${msg}`);
+          }
 
           captured = {
             type: 'pr_opened',

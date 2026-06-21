@@ -1353,6 +1353,7 @@ describe('SessionManager — audit emission', () => {
     expect(store.pullRequests).toEqual([{
       id: 1,
       session_key: 'TEAM:C:T',
+      team_id: 'TEAM',
       repo: 'acme/widgets',
       pr_number: 7,
       head_sha: 'deadbeef1234',

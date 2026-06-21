@@ -69,6 +69,7 @@ export interface AuditEvent {
 export interface PullRequestRow {
   id: number;
   session_key: string;
+  team_id: string | null;
   repo: string;
   pr_number: number;
   head_sha: string;
@@ -82,7 +83,7 @@ export interface PullRequestRow {
 /** Minimal shape required to record a newly opened pull request. */
 export type NewPullRequestRow = Pick<
   PullRequestRow,
-  'session_key' | 'repo' | 'pr_number' | 'head_sha' | 'profile_id' | 'opened_at'
+  'session_key' | 'team_id' | 'repo' | 'pr_number' | 'head_sha' | 'profile_id' | 'opened_at'
 >;
 
 export interface SessionStore {
@@ -104,7 +105,12 @@ export interface SessionStore {
    * ? AND team_id = ?) before any user-facing query path consumes this.
    */
   getAuditEvents(sessionKey: string): AuditEvent[];
-  /** Reconciliation worklist helper: list only rows still marked open. */
+  /**
+   * Reconciliation worklist helper: list only rows still marked open. NOT
+   * tenancy-scoped (no team_id filter). The slice-3 acceptance-rate rollup must
+   * scope by team (WHERE team_id = ?) before any user-facing query path consumes
+   * pull_requests data — the row carries team_id for exactly that.
+   */
   listOpenPullRequests(): PullRequestRow[];
   /** Rows whose last_active_at is strictly older than `cutoffMs` (uses the
    *  sessions_last_active_at index). For the volume-GC sweep. */
@@ -158,7 +164,7 @@ export class SqliteSessionStore implements SessionStore {
     number | null,
   ]>;
   private readonly stmtRecordPullRequest: Database.Statement<
-    [string, string, number, string, string, number]
+    [string, string | null, string, number, string, string, number]
   >;
   private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
   private readonly stmtListOpenPullRequests: Database.Statement<[], PullRequestRow>;
@@ -232,11 +238,11 @@ export class SqliteSessionStore implements SessionStore {
     );
 
     this.stmtRecordPullRequest = this.db.prepare<
-      [string, string, number, string, string, number]
+      [string, string | null, string, number, string, string, number]
     >(`
       INSERT INTO pull_requests
-        (session_key, repo, pr_number, head_sha, profile_id, opened_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+        (session_key, team_id, repo, pr_number, head_sha, profile_id, opened_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
     this.stmtListOpenPullRequests = this.db.prepare<[], PullRequestRow>(
@@ -355,6 +361,7 @@ export class SqliteSessionStore implements SessionStore {
       CREATE TABLE IF NOT EXISTS pull_requests (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
         session_key    TEXT    NOT NULL,
+        team_id        TEXT,
         repo           TEXT    NOT NULL,
         pr_number      INTEGER NOT NULL,
         head_sha       TEXT    NOT NULL,
@@ -428,6 +435,7 @@ export class SqliteSessionStore implements SessionStore {
   recordPullRequest(row: NewPullRequestRow): void {
     this.stmtRecordPullRequest.run(
       row.session_key,
+      row.team_id,
       row.repo,
       row.pr_number,
       row.head_sha,
