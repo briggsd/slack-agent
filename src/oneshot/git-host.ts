@@ -35,6 +35,13 @@ export interface GitHostProvider {
   credentialUsername(): string;
   /** The repo's default branch (PR base). */
   defaultBranch(repo: string, token: string, fetchFn: FetchFn): Promise<string>;
+  /** Read the current state of a PR/MR and the branch head it points at. */
+  getChangeRequestState(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+  }): Promise<{ status: 'open' | 'merged' | 'closed'; headSha: string }>;
   /** Open a PR/MR; returns its web url. */
   openChangeRequest(req: {
     repo: string;
@@ -126,6 +133,44 @@ export class GithubProvider implements GitHostProvider {
       throw new Error('GitHub API returned no head.sha for the pull request');
     }
     return { url: data.html_url, number: data.number, headSha: data.head.sha };
+  }
+
+  async getChangeRequestState(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+  }): Promise<{ status: 'open' | 'merged' | 'closed'; headSha: string }> {
+    const url = `https://api.github.com/repos/${req.repo}/pulls/${req.number}`;
+    const res = await req.fetchFn(url, {
+      headers: {
+        Authorization: `Bearer ${req.token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'slack-agent',
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub API error ${res.status} fetching pull request${await safeReason(res)}`);
+    }
+
+    const data = (await res.json()) as {
+      merged?: unknown;
+      state?: unknown;
+      head?: { sha?: unknown };
+    };
+    if (typeof data.merged !== 'boolean') {
+      throw new Error('GitHub API returned no merged flag for the pull request');
+    }
+    if (typeof data.state !== 'string' || data.state === '') {
+      throw new Error('GitHub API returned no state for the pull request');
+    }
+    if (typeof data.head?.sha !== 'string' || data.head.sha === '') {
+      throw new Error('GitHub API returned no head.sha for the pull request');
+    }
+
+    const status = data.merged ? 'merged' : data.state === 'closed' ? 'closed' : 'open';
+    return { status, headSha: data.head.sha };
   }
 }
 

@@ -14,6 +14,7 @@ import type { SlackClientLike } from './slack/responder.js';
 import type { BoltAppLike } from './slack/listener.js';
 import { registerSlackHandlers } from './slack/listener.js';
 import type { SpendCapsConfig } from './config.js';
+import type { PrStateReader } from './sessions/pr-state-reader.js';
 
 export interface GatewayDeps {
   app: BoltAppLike;
@@ -27,6 +28,7 @@ export interface GatewayDeps {
   volumeReaper?: VolumeReaper;
   volumeTtlMs?: number;
   gcIntervalMs?: number;
+  prStateReader?: PrStateReader;
   spendCaps?: SpendCapsConfig;
   buildRunnerFactory?: BuildRunnerFactory;
 }
@@ -42,6 +44,7 @@ export function buildGateway(deps: GatewayDeps): { sessions: SessionManager } {
     ...(deps.volumeReaper !== undefined && { volumeReaper: deps.volumeReaper }),
     ...(deps.volumeTtlMs !== undefined && { volumeTtlMs: deps.volumeTtlMs }),
     ...(deps.gcIntervalMs !== undefined && { gcIntervalMs: deps.gcIntervalMs }),
+    ...(deps.prStateReader !== undefined && { prStateReader: deps.prStateReader }),
     ...(deps.spendCaps !== undefined && { spendCaps: deps.spendCaps }),
     ...(deps.buildRunnerFactory !== undefined && { buildRunnerFactory: deps.buildRunnerFactory }),
   });

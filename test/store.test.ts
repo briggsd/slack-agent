@@ -464,6 +464,54 @@ describe('SqliteSessionStore — pull_requests', () => {
       resolved_at: null,
     });
   });
+
+  it('resolvePullRequest moves the row out of the open worklist and stamps terminal fields', () => {
+    store.recordPullRequest({
+      session_key: 'TEAM:C:TS',
+      team_id: 'TEAM1',
+      repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'abc123def456',
+      profile_id: 'repo-oneshot',
+      opened_at: 1_700_000_000_000,
+    });
+
+    store.resolvePullRequest(1, 'merged_clean', 1_700_000_123_456);
+
+    expect(store.listOpenPullRequests()).toEqual([]);
+    expect(store.getPullRequest(1)).toEqual({
+      id: 1,
+      session_key: 'TEAM:C:TS',
+      team_id: 'TEAM1',
+      repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'abc123def456',
+      profile_id: 'repo-oneshot',
+      opened_at: 1_700_000_000_000,
+      state: 'merged_clean',
+      last_polled_at: 1_700_000_123_456,
+      resolved_at: 1_700_000_123_456,
+    });
+  });
+
+  it('touchPullRequestPolled updates last_polled_at while the row stays open', () => {
+    store.recordPullRequest({
+      session_key: 'TEAM:C:TS',
+      team_id: 'TEAM1',
+      repo: 'owner/repo',
+      pr_number: 42,
+      head_sha: 'abc123def456',
+      profile_id: 'repo-oneshot',
+      opened_at: 1_700_000_000_000,
+    });
+
+    store.touchPullRequestPolled(1, 1_700_000_111_222);
+
+    expect(store.listOpenPullRequests()).toHaveLength(1);
+    expect(store.getPullRequest(1)?.state).toBe('open');
+    expect(store.getPullRequest(1)?.last_polled_at).toBe(1_700_000_111_222);
+    expect(store.getPullRequest(1)?.resolved_at).toBeNull();
+  });
 });
 
 // ─── SqliteSessionStore — durability, migration, and indexes ─────────────────
