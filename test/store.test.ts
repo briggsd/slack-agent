@@ -534,6 +534,155 @@ describe('SqliteSessionStore — pull_requests', () => {
   });
 });
 
+describe('SqliteSessionStore — acceptance stats', () => {
+  let store: SqliteSessionStore;
+
+  beforeEach(() => {
+    store = new SqliteSessionStore(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  function recordTrackedPullRequest(params: {
+    id: number;
+    sessionKey: string;
+    teamId: string | null;
+    prNumber: number;
+    openedAt: number;
+    state?: 'open' | 'merged_clean' | 'merged_intervened' | 'closed' | 'stale';
+  }): void {
+    store.recordPullRequest({
+      session_key: params.sessionKey,
+      team_id: params.teamId,
+      repo: 'owner/repo',
+      pr_number: params.prNumber,
+      head_sha: `sha-${params.prNumber}`,
+      profile_id: 'repo-oneshot',
+      opened_at: params.openedAt,
+    });
+
+    if (params.state !== undefined && params.state !== 'open') {
+      store.resolvePullRequest(params.id, params.state, params.openedAt + 10);
+    }
+  }
+
+  it('acceptanceStatsGlobalSince counts each state for PRs opened within the window', () => {
+    const since = 1_700_000_100_000;
+
+    recordTrackedPullRequest({ id: 1, sessionKey: 'TEAM1:1', teamId: 'TEAM1', prNumber: 1, openedAt: since, state: 'open' });
+    recordTrackedPullRequest({ id: 2, sessionKey: 'TEAM1:2', teamId: 'TEAM1', prNumber: 2, openedAt: since + 1, state: 'merged_clean' });
+    recordTrackedPullRequest({ id: 3, sessionKey: 'TEAM1:3', teamId: 'TEAM1', prNumber: 3, openedAt: since + 2, state: 'merged_intervened' });
+    recordTrackedPullRequest({ id: 4, sessionKey: 'TEAM2:4', teamId: 'TEAM2', prNumber: 4, openedAt: since + 3, state: 'closed' });
+    recordTrackedPullRequest({ id: 5, sessionKey: 'TEAM2:5', teamId: 'TEAM2', prNumber: 5, openedAt: since + 4, state: 'stale' });
+
+    // Older PRs are outside the opened_at >= since window and must be excluded.
+    recordTrackedPullRequest({ id: 6, sessionKey: 'TEAM1:6', teamId: 'TEAM1', prNumber: 6, openedAt: since - 1, state: 'merged_clean' });
+    recordTrackedPullRequest({ id: 7, sessionKey: 'TEAM2:7', teamId: 'TEAM2', prNumber: 7, openedAt: since - 2, state: 'open' });
+
+    expect(store.acceptanceStatsGlobalSince(since)).toEqual({
+      opened: 5,
+      mergedClean: 1,
+      mergedIntervened: 1,
+      closed: 1,
+      stale: 1,
+      stillOpen: 1,
+      resolved: 4,
+      acceptanceRate: 0.25,
+    });
+  });
+
+  it('acceptanceRate is null when no PR opened in the window has resolved', () => {
+    const since = 5_000;
+
+    recordTrackedPullRequest({ id: 1, sessionKey: 'TEAM1:1', teamId: 'TEAM1', prNumber: 1, openedAt: since, state: 'open' });
+    recordTrackedPullRequest({ id: 2, sessionKey: 'TEAM1:2', teamId: 'TEAM1', prNumber: 2, openedAt: since + 1, state: 'open' });
+    recordTrackedPullRequest({ id: 3, sessionKey: 'TEAM1:3', teamId: 'TEAM1', prNumber: 3, openedAt: since - 1, state: 'merged_clean' });
+
+    expect(store.acceptanceStatsGlobalSince(since)).toEqual({
+      opened: 2,
+      mergedClean: 0,
+      mergedIntervened: 0,
+      closed: 0,
+      stale: 0,
+      stillOpen: 2,
+      resolved: 0,
+      acceptanceRate: null,
+    });
+  });
+
+  it('acceptanceStatsByTeamSince isolates one team', () => {
+    const since = 10_000;
+
+    recordTrackedPullRequest({ id: 1, sessionKey: 'TEAM1:1', teamId: 'TEAM1', prNumber: 1, openedAt: since, state: 'merged_clean' });
+    recordTrackedPullRequest({ id: 2, sessionKey: 'TEAM1:2', teamId: 'TEAM1', prNumber: 2, openedAt: since + 1, state: 'closed' });
+    recordTrackedPullRequest({ id: 3, sessionKey: 'TEAM1:3', teamId: 'TEAM1', prNumber: 3, openedAt: since + 2, state: 'open' });
+    recordTrackedPullRequest({ id: 4, sessionKey: 'TEAM2:4', teamId: 'TEAM2', prNumber: 4, openedAt: since + 3, state: 'merged_intervened' });
+    recordTrackedPullRequest({ id: 5, sessionKey: 'TEAM2:5', teamId: 'TEAM2', prNumber: 5, openedAt: since + 4, state: 'stale' });
+    recordTrackedPullRequest({ id: 6, sessionKey: 'NULLTEAM:6', teamId: null, prNumber: 6, openedAt: since + 5, state: 'merged_clean' });
+
+    expect(store.acceptanceStatsByTeamSince('TEAM1', since)).toEqual({
+      opened: 3,
+      mergedClean: 1,
+      mergedIntervened: 0,
+      closed: 1,
+      stale: 0,
+      stillOpen: 1,
+      resolved: 2,
+      acceptanceRate: 0.5,
+    });
+  });
+
+  it('counts an unexpected state toward opened only and does not throw', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sa-store-acceptance-'));
+    const dbPath = path.join(tmpDir, 'test.db');
+    let fileStore: SqliteSessionStore | undefined;
+
+    try {
+      fileStore = new SqliteSessionStore(dbPath);
+      fileStore.recordPullRequest({
+        session_key: 'TEAM1:1',
+        team_id: 'TEAM1',
+        repo: 'owner/repo',
+        pr_number: 1,
+        head_sha: 'sha-1',
+        profile_id: 'repo-oneshot',
+        opened_at: 20_000,
+      });
+      fileStore.recordPullRequest({
+        session_key: 'TEAM1:2',
+        team_id: 'TEAM1',
+        repo: 'owner/repo',
+        pr_number: 2,
+        head_sha: 'sha-2',
+        profile_id: 'repo-oneshot',
+        opened_at: 20_001,
+      });
+      fileStore.resolvePullRequest(2, 'merged_clean', 20_010);
+
+      const rawDb = new Database(dbPath);
+      rawDb.prepare('UPDATE pull_requests SET state = ? WHERE id = ?').run('future_state', 1);
+      rawDb.close();
+
+      const stats = fileStore.acceptanceStatsGlobalSince(20_000);
+      expect(stats).toEqual({
+        opened: 2,
+        mergedClean: 1,
+        mergedIntervened: 0,
+        closed: 0,
+        stale: 0,
+        stillOpen: 0,
+        resolved: 1,
+        acceptanceRate: 1,
+      });
+    } finally {
+      fileStore?.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
 // ─── SqliteSessionStore — durability, migration, and indexes ─────────────────
 // These tests use a real temp-file DB so two connections share the same underlying
 // file, proving that rows survive a store close/reopen cycle.
