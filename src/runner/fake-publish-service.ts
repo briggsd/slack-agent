@@ -6,7 +6,12 @@ import type { PublishOutcome, PublishService, PublishServiceRequest } from './pu
  */
 export class FakePublishService implements PublishService {
   public publishes: PublishServiceRequest[] = [];
-  private nextOutcome: PublishOutcome = { ok: true, prUrl: 'https://example.test/pr/1' };
+  private nextOutcome: PublishOutcome = {
+    ok: true,
+    prUrl: 'https://example.test/pr/1',
+    prNumber: 1,
+    headSha: 'fake-head-sha',
+  };
 
   /** Script the next publish() outcome (can set repeatedly). */
   setOutcome(outcome: PublishOutcome): void {

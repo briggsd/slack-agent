@@ -66,7 +66,7 @@ export const openPrNode: OneShotNode = {
     const title = titleFromInstruction(ctx.instruction);
     const body = composePrBody(ctx, title);
 
-    const { url } = await deps.gitNodes.openChangeRequest({
+    const { url, number, headSha } = await deps.gitNodes.openChangeRequest({
       lease: ctx.lease,
       repo: ctx.repo,
       head: ctx.branch,
@@ -76,8 +76,10 @@ export const openPrNode: OneShotNode = {
     });
 
     ctx.prUrl = url;
+    ctx.prNumber = number;
+    ctx.prHeadSha = headSha;
     // Yield the gateway-internal pr_opened event (not a protocol/wire event). The gateway's
     // drain loop handles it: posts "Opened PR: <url>" to Slack AND records an audit action.
-    yield { type: 'pr_opened', url };
+    yield { type: 'pr_opened', url, repo: ctx.repo, number, headSha };
   },
 };

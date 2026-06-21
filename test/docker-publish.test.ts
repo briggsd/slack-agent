@@ -97,7 +97,12 @@ function turnId(fake: FakeChildProcess): string {
 describe('DockerRunner — request_publish round-trip', () => {
   it('request_publish → status + publish_result{ok:true} + pr_opened when publishService returns ok', async () => {
     const publishService = new FakePublishService();
-    publishService.setOutcome({ ok: true, prUrl: 'https://github.com/owner/repo/pull/1' });
+    publishService.setOutcome({
+      ok: true,
+      prUrl: 'https://github.com/owner/repo/pull/1',
+      prNumber: 17,
+      headSha: 'publish-head-sha',
+    });
     const { runner, fake } = await makeReadyRunner({ publishService, volume: 'slackbot-ws-test' });
 
     const iter = runner.send('publish it')[Symbol.asyncIterator]();
@@ -136,6 +141,9 @@ describe('DockerRunner — request_publish round-trip', () => {
     expect(e2.value).toEqual({
       type: 'pr_opened',
       url: 'https://github.com/owner/repo/pull/1',
+      repo: 'owner/repo',
+      number: 17,
+      headSha: 'publish-head-sha',
     });
 
     const e3Promise = iter.next();

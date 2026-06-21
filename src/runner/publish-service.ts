@@ -14,7 +14,7 @@ export interface PublishServiceRequest {
 }
 
 export type PublishOutcome =
-  | { ok: true; prUrl: string }
+  | { ok: true; prUrl: string; prNumber: number; headSha: string }
   | { ok: false; reason: string };
 
 export interface PublishService {

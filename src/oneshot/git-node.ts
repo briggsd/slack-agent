@@ -103,7 +103,7 @@ export interface GitNodeExecutor {
   /** Verify the local worktree's origin matches `repo`; no credential required. */
   verifyRepo(req: VerifyRepoRequest): Promise<boolean>;
   push(req: PushRequest): Promise<void>;
-  openChangeRequest(req: OpenChangeRequest): Promise<{ url: string }>;
+  openChangeRequest(req: OpenChangeRequest): Promise<{ url: string; number: number; headSha: string }>;
   /**
    * Run the project's lint or test command in an ephemeral container on the volume.
    * No credential is injected (defense-in-depth: the token never reaches lint/test).

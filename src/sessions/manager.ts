@@ -22,7 +22,7 @@ import type { SpendCapsConfig } from '../config.js';
  * (ignored) and `runBuild` (to translate into a `BuildOutcome`).
  */
 type DriveOutcome =
-  | { type: 'pr_opened'; url: string }
+  | { type: 'pr_opened'; url: string; repo: string; number: number; headSha: string }
   | { type: 'abandoned'; reason: string }
   | { type: 'error'; message: string }
   | { type: 'completed' };
@@ -771,7 +771,22 @@ export class SessionManager {
             result: 'opened',
           });
 
-          captured = { type: 'pr_opened', url: event.url };
+          this.store.recordPullRequest({
+            session_key: session.key,
+            repo: event.repo,
+            pr_number: event.number,
+            head_sha: event.headSha,
+            profile_id: session.profileId,
+            opened_at: this.now(),
+          });
+
+          captured = {
+            type: 'pr_opened',
+            url: event.url,
+            repo: event.repo,
+            number: event.number,
+            headSha: event.headSha,
+          };
           // Don't break — let the loop drain to done
         } else if (event.type === 'usage') {
           // Slice A: record per-turn cost to the audit ledger. Measurement only — no

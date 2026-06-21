@@ -27,6 +27,8 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
   public runtimeProvisions: ProvisionRuntimeRequest[] = [];
 
   private readonly prUrl: string;
+  private readonly prNumber: number;
+  private readonly prHeadSha: string;
   private cloneError: Error | null = null;
   private branchError: Error | null = null;
   private verifyRepoResult = true;
@@ -45,6 +47,8 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
 
   constructor(prUrl = 'https://example.test/pr/1') {
     this.prUrl = prUrl;
+    this.prNumber = 1;
+    this.prHeadSha = 'fake-head-sha';
   }
 
   /** Script clone() to reject with the given error (for failure-path tests). */
@@ -129,14 +133,14 @@ export class FakeGitNodeExecutor implements GitNodeExecutor {
     }
   }
 
-  async openChangeRequest(req: OpenChangeRequest): Promise<{ url: string }> {
+  async openChangeRequest(req: OpenChangeRequest): Promise<{ url: string; number: number; headSha: string }> {
     this.changeRequests.push(req);
     if (this.openChangeError !== null) {
       const err = this.openChangeError;
       this.openChangeError = null;
       throw err;
     }
-    return { url: this.prUrl };
+    return { url: this.prUrl, number: this.prNumber, headSha: this.prHeadSha };
   }
 
   async runCheck(req: CheckRequest): Promise<CheckResult> {

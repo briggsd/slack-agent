@@ -36,6 +36,8 @@ export interface OneShotAgenticContext {
   lintResult?: CheckResult;
   testResult?: CheckResult;
   prUrl?: string;
+  prNumber?: number;
+  prHeadSha?: string;
 }
 
 /**

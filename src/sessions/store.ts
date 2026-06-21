@@ -66,6 +66,25 @@ export interface AuditEvent {
   cost_micro_usd: number | null;
 }
 
+export interface PullRequestRow {
+  id: number;
+  session_key: string;
+  repo: string;
+  pr_number: number;
+  head_sha: string;
+  profile_id: string;
+  opened_at: number;
+  state: string;
+  last_polled_at: number | null;
+  resolved_at: number | null;
+}
+
+/** Minimal shape required to record a newly opened pull request. */
+export type NewPullRequestRow = Pick<
+  PullRequestRow,
+  'session_key' | 'repo' | 'pr_number' | 'head_sha' | 'profile_id' | 'opened_at'
+>;
+
 export interface SessionStore {
   /** Insert or replace the row when a session is created. */
   recordSession(row: NewSessionRow): void;
@@ -77,12 +96,16 @@ export interface SessionStore {
   get(key: string): SessionRow | undefined;
   /** Append an audit event row (best-effort — callers must catch). */
   recordAudit(event: AuditEvent): void;
+  /** Record a newly opened PR for later reconciliation. */
+  recordPullRequest(row: NewPullRequestRow): void;
   /**
    * Read back audit rows for a session key. Test/diagnostic helper only — it is NOT
    * tenancy-scoped (no team_id filter). Add a mandatory team scope (WHERE session_key =
    * ? AND team_id = ?) before any user-facing query path consumes this.
    */
   getAuditEvents(sessionKey: string): AuditEvent[];
+  /** Reconciliation worklist helper: list only rows still marked open. */
+  listOpenPullRequests(): PullRequestRow[];
   /** Rows whose last_active_at is strictly older than `cutoffMs` (uses the
    *  sessions_last_active_at index). For the volume-GC sweep. */
   listExpired(cutoffMs: number): SessionRow[];
@@ -134,7 +157,11 @@ export class SqliteSessionStore implements SessionStore {
     number | null,
     number | null,
   ]>;
+  private readonly stmtRecordPullRequest: Database.Statement<
+    [string, string, number, string, string, number]
+  >;
   private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
+  private readonly stmtListOpenPullRequests: Database.Statement<[], PullRequestRow>;
   private readonly stmtListExpired: Database.Statement<[number], SessionRow>;
   private readonly stmtDeleteSession: Database.Statement<[string]>;
   private readonly stmtSumByTask: Database.Statement<[string], { total: number }>;
@@ -202,6 +229,18 @@ export class SqliteSessionStore implements SessionStore {
 
     this.stmtGetAudit = this.db.prepare<[string], AuditEvent>(
       'SELECT session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd FROM audit_events WHERE session_key = ? ORDER BY id',
+    );
+
+    this.stmtRecordPullRequest = this.db.prepare<
+      [string, string, number, string, string, number]
+    >(`
+      INSERT INTO pull_requests
+        (session_key, repo, pr_number, head_sha, profile_id, opened_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    this.stmtListOpenPullRequests = this.db.prepare<[], PullRequestRow>(
+      "SELECT * FROM pull_requests WHERE state = 'open' ORDER BY id",
     );
 
     this.stmtListExpired = this.db.prepare<[number], SessionRow>(
@@ -313,6 +352,23 @@ export class SqliteSessionStore implements SessionStore {
     `);
 
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pull_requests (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key    TEXT    NOT NULL,
+        repo           TEXT    NOT NULL,
+        pr_number      INTEGER NOT NULL,
+        head_sha       TEXT    NOT NULL,
+        profile_id     TEXT    NOT NULL,
+        opened_at      INTEGER NOT NULL,
+        state          TEXT    NOT NULL DEFAULT 'open',
+        last_polled_at INTEGER,
+        resolved_at    INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS pr_by_state ON pull_requests (state);
+    `);
+
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS exec_opt_ins (
         team_id    TEXT    NOT NULL,
         user_id    TEXT    NOT NULL,
@@ -369,6 +425,21 @@ export class SqliteSessionStore implements SessionStore {
     return this.stmtGetAudit.all(sessionKey);
   }
 
+  recordPullRequest(row: NewPullRequestRow): void {
+    this.stmtRecordPullRequest.run(
+      row.session_key,
+      row.repo,
+      row.pr_number,
+      row.head_sha,
+      row.profile_id,
+      row.opened_at,
+    );
+  }
+
+  listOpenPullRequests(): PullRequestRow[] {
+    return this.stmtListOpenPullRequests.all();
+  }
+
   listExpired(cutoffMs: number): SessionRow[] {
     return this.stmtListExpired.all(cutoffMs);
   }
@@ -411,7 +482,9 @@ export class NoopSessionStore implements SessionStore {
   setStatus(_key: string, _status: SessionStatus): void { /* no-op */ }
   get(_key: string): SessionRow | undefined { return undefined; }
   recordAudit(_event: AuditEvent): void { /* no-op */ }
+  recordPullRequest(_row: NewPullRequestRow): void { /* no-op */ }
   getAuditEvents(_sessionKey: string): AuditEvent[] { return []; }
+  listOpenPullRequests(): PullRequestRow[] { return []; }
   listExpired(_cutoffMs: number): SessionRow[] { return []; }
   deleteSession(_key: string): void { /* no-op */ }
   close(): void { /* no-op */ }

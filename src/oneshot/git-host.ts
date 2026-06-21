@@ -44,7 +44,7 @@ export interface GitHostProvider {
     body: string;
     token: string;
     fetchFn: FetchFn;
-  }): Promise<{ url: string }>;
+  }): Promise<{ url: string; number: number; headSha: string }>;
 }
 
 /** GitHub implementation. Credentials travel as Bearer tokens; never embedded in URLs. */
@@ -88,7 +88,7 @@ export class GithubProvider implements GitHostProvider {
     body: string;
     token: string;
     fetchFn: FetchFn;
-  }): Promise<{ url: string }> {
+  }): Promise<{ url: string; number: number; headSha: string }> {
     const url = `https://api.github.com/repos/${req.repo}/pulls`;
     const res = await req.fetchFn(url, {
       method: 'POST',
@@ -111,11 +111,21 @@ export class GithubProvider implements GitHostProvider {
       throw new Error(`GitHub API error ${res.status} creating pull request${await safeReason(res)}`);
     }
 
-    const data = (await res.json()) as { html_url?: unknown };
+    const data = (await res.json()) as {
+      html_url?: unknown;
+      number?: unknown;
+      head?: { sha?: unknown };
+    };
     if (typeof data.html_url !== 'string' || data.html_url === '') {
       throw new Error('GitHub API returned no html_url for the pull request');
     }
-    return { url: data.html_url };
+    if (typeof data.number !== 'number') {
+      throw new Error('GitHub API returned no numeric pull request number');
+    }
+    if (typeof data.head?.sha !== 'string' || data.head.sha === '') {
+      throw new Error('GitHub API returned no head.sha for the pull request');
+    }
+    return { url: data.html_url, number: data.number, headSha: data.head.sha };
   }
 }
 

@@ -156,7 +156,11 @@ describe('GithubProvider', () => {
     const fetchCalls: { url: string; init: RequestInit }[] = [];
     const fakeFetch = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       fetchCalls.push({ url: String(url), init: init ?? {} });
-      return Promise.resolve(makeResponse({ html_url: 'https://github.com/owner/repo/pull/7', number: 7 }));
+      return Promise.resolve(makeResponse({
+        html_url: 'https://github.com/owner/repo/pull/7',
+        number: 7,
+        head: { sha: 'abc123' },
+      }));
     };
 
     const result = await provider.openChangeRequest({
@@ -170,6 +174,8 @@ describe('GithubProvider', () => {
     });
 
     expect(result.url).toBe('https://github.com/owner/repo/pull/7');
+    expect(result.number).toBe(7);
+    expect(result.headSha).toBe('abc123');
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]?.url).toBe('https://api.github.com/repos/owner/repo/pulls');
     expect(fetchCalls[0]?.init.method).toBe('POST');
@@ -206,6 +212,36 @@ describe('GithubProvider', () => {
         expect(err.message).not.toContain(token);
       }
     });
+  });
+
+  it('openChangeRequest throws when the response omits a numeric PR number', async () => {
+    const fakeFetch = (): Promise<Response> =>
+      Promise.resolve(makeResponse({ html_url: 'https://github.com/owner/repo/pull/7', head: { sha: 'abc123' } }));
+
+    await expect(provider.openChangeRequest({
+      repo: 'owner/repo',
+      head: 'feat',
+      base: 'main',
+      title: 'T',
+      body: 'B',
+      token: 'tok',
+      fetchFn: fakeFetch as typeof fetch,
+    })).rejects.toThrow('GitHub API returned no numeric pull request number');
+  });
+
+  it('openChangeRequest throws when the response omits head.sha', async () => {
+    const fakeFetch = (): Promise<Response> =>
+      Promise.resolve(makeResponse({ html_url: 'https://github.com/owner/repo/pull/7', number: 7 }));
+
+    await expect(provider.openChangeRequest({
+      repo: 'owner/repo',
+      head: 'feat',
+      base: 'main',
+      title: 'T',
+      body: 'B',
+      token: 'tok',
+      fetchFn: fakeFetch as typeof fetch,
+    })).rejects.toThrow('GitHub API returned no head.sha for the pull request');
   });
 });
 
@@ -538,7 +574,11 @@ describe('DockerGitNodeExecutor — openChangeRequest', () => {
       fetchCalls.push({ url: String(url), init: init ?? {} });
       const urlStr = String(url);
       if (urlStr.endsWith('/pulls')) {
-        return Promise.resolve(makeResponse({ html_url: prUrl }, prStatus));
+        return Promise.resolve(makeResponse({
+          html_url: prUrl,
+          number: 9,
+          head: { sha: 'head-sha-9' },
+        }, prStatus));
       }
       // repo metadata
       return Promise.resolve(makeResponse({ default_branch: defaultBranch, name: 'repo' }));
@@ -562,6 +602,8 @@ describe('DockerGitNodeExecutor — openChangeRequest', () => {
     });
 
     expect(result.url).toBe('https://github.com/owner/repo/pull/9');
+    expect(result.number).toBe(9);
+    expect(result.headSha).toBe('head-sha-9');
     expect(fetchCalls).toHaveLength(2);
     // First call: GET repo metadata
     expect(fetchCalls[0]?.url).toBe('https://api.github.com/repos/owner/repo');
