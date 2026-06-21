@@ -809,22 +809,24 @@ export class SessionManager {
     }
   }
 
-  private hasExecOptIn(session: Session): boolean {
-    if (session.requestorUserId === undefined || session.teamId === undefined) {
+  private hasExecOptIn(teamId: string | undefined, userId: string | undefined): boolean {
+    if (teamId === undefined || userId === undefined) {
       return false;
     }
     try {
-      return this.store.hasExecOptIn(session.teamId, session.requestorUserId);
+      return this.store.hasExecOptIn(teamId, userId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[session] exec opt-in lookup failed for ${session.key} — failing closed: ${msg}`);
+      console.error(`[session] exec opt-in lookup failed for ${teamId} — failing closed: ${msg}`);
       return false;
     }
   }
 
   /**
    * Run the ungated repo-oneshot blueprint only when the gateway has a recorded opt-in for
-   * the original requestor. Refusals are data for the coordinator, not thrown exceptions.
+   * the user who authored the triggering turn — never the session's original requestor, so a
+   * bystander can't piggyback on someone else's standing opt-in (mirrors the approval-gate
+   * requestor check). Refusals are data for the coordinator, not thrown exceptions.
    */
   private async runExec(
     session: Session,
@@ -836,7 +838,8 @@ export class SessionManager {
       repo: event.repo,
       instruction: event.instruction,
     };
-    if (session.requestorUserId === undefined) {
+    const actor = item.userId;
+    if (actor === undefined) {
       this.audit({
         session_key: session.key,
         team_id: session.teamId ?? null,
@@ -845,18 +848,18 @@ export class SessionManager {
         tool: 'exec',
         result: 'refused_no_requestor',
       });
-      return { ok: false, reason: 'exec requires a recorded requestor opt-in' };
+      return { ok: false, reason: 'exec requires an opted-in requesting user' };
     }
-    if (!this.hasExecOptIn(session)) {
+    if (!this.hasExecOptIn(session.teamId, actor)) {
       this.audit({
         session_key: session.key,
         team_id: session.teamId ?? null,
-        user_id: session.requestorUserId,
+        user_id: actor,
         kind: 'correction',
         tool: 'exec',
         result: 'refused_no_opt_in',
       });
-      return { ok: false, reason: 'exec requires an explicit recorded opt-in for the requestor' };
+      return { ok: false, reason: 'exec requires an explicit recorded opt-in for the requesting user' };
     }
 
     const execFactory = this.buildRunnerFactory;
@@ -869,23 +872,49 @@ export class SessionManager {
     this.audit({
       session_key: session.key,
       team_id: session.teamId ?? null,
-      user_id: session.requestorUserId,
+      user_id: actor,
       kind: 'action',
       tool: 'exec',
       result: 'started',
     });
 
     const placeholder = await postPlaceholder(this.slack, item.channel, item.threadTs);
+    // Terminal audit so every 'started' exec reconciles to an end state. Metadata only:
+    // the PR URL is gateway-controlled (matches the 'open-pr' convention); failure reasons
+    // are deliberately NOT recorded here — they may carry runtime text, and this is an
+    // action trail, never a transcript.
+    const auditExecEnd = (result: string, summary: string | null = null): void => {
+      this.audit({
+        session_key: session.key,
+        team_id: session.teamId ?? null,
+        user_id: actor,
+        kind: 'action',
+        tool: 'exec',
+        result,
+        summary,
+      });
+    };
     let runner: SessionRunner | undefined;
     try {
       runner = await execFactory.createExecRunner(session.key, input);
       const outcome = await this.driveToThread(runner.send(''), placeholder, session, item);
-      if (outcome.type === 'pr_opened') return { ok: true, prUrl: outcome.url };
-      if (outcome.type === 'error') return { ok: false, reason: outcome.message };
-      if (outcome.type === 'abandoned') return { ok: false, reason: outcome.reason };
+      if (outcome.type === 'pr_opened') {
+        auditExecEnd('succeeded_pr', outcome.url);
+        return { ok: true, prUrl: outcome.url };
+      }
+      if (outcome.type === 'error') {
+        auditExecEnd('failed');
+        return { ok: false, reason: outcome.message };
+      }
+      if (outcome.type === 'abandoned') {
+        auditExecEnd('abandoned');
+        return { ok: false, reason: outcome.reason };
+      }
+      auditExecEnd('succeeded');
       return { ok: true };
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
+      auditExecEnd('failed');
       if (placeholder !== null) {
         try {
           await updatePlaceholder(this.slack, placeholder, `:x: Exec failed to start: ${reason}`);

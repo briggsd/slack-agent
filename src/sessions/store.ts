@@ -316,9 +316,6 @@ export class SqliteSessionStore implements SessionStore {
         granted_at INTEGER NOT NULL,
         PRIMARY KEY (team_id, user_id)
       );
-
-      CREATE INDEX IF NOT EXISTS exec_opt_ins_team_user
-        ON exec_opt_ins (team_id, user_id);
     `);
   }
 

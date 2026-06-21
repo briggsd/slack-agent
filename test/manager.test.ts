@@ -10,6 +10,7 @@ import type {
   RunnerFactory,
   GateResume,
   VolumeReaper,
+  BuildRunnerFactory,
 } from '../src/runner/types.js';
 import type { Profile } from '../src/profiles/registry.js';
 import type {
@@ -1162,6 +1163,105 @@ describe('SessionManager — audit emission', () => {
     // Slack placeholder must show "Opened PR: <url>" (the smoke-harness contract).
     expect(slack.updates.some((u) => u.text.includes('Opened PR:'))).toBe(true);
     expect(slack.updates.some((u) => u.text.includes('http://x/pr/1'))).toBe(true);
+  });
+
+  it('a started exec reconciles to a terminal audit (started → succeeded_pr), summary is the PR URL only', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    store.recordExecOptIn('TEAM', 'U-REQ', Date.now());
+    const routerFactory = new FakeRunnerFactory([
+      [
+        { type: 'run_exec', host: 'github', repo: 'a/b', instruction: 'ship it' },
+        { type: 'text', text: 'router resumed' },
+      ] as RunnerEvent[],
+    ]);
+    const buildRunnerFactory: BuildRunnerFactory = {
+      createBuildRunner: () => Promise.reject(new Error('build not used in this test')),
+      createExecRunner: (key) => Promise.resolve(new PrOpenedRunner(key)),
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory: routerFactory,
+      slack,
+      store,
+      buildRunnerFactory,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'go',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Every 'started' exec must reconcile to a terminal status — no dangling 'started'
+    // row for a capability that bypasses the human gate.
+    const execAudits = store.audits.filter((a) => a.kind === 'action' && a.tool === 'exec');
+    expect(execAudits.map((a) => a.result)).toEqual(['started', 'succeeded_pr']);
+    // The only metadata recorded is the gateway-controlled PR URL; no message content leaks.
+    const terminal = execAudits[1];
+    expect(terminal?.summary).toBe('http://x/pr/1');
+    expect(terminal?.user_id).toBe('U-REQ');
+    expect(terminal?.reasoning).toBeNull();
+  });
+
+  it('exec refuses a bystander turn author who lacks the opt-in, even when the requestor is opted in', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    store.recordExecOptIn('TEAM', 'U-REQ', Date.now()); // the requestor IS opted in
+    // turn 0: the requestor's opening message; turn 1: a bystander's reply drives run_exec.
+    const routerFactory = new FakeRunnerFactory([
+      [{ type: 'text', text: 'hi' }] as RunnerEvent[],
+      [
+        { type: 'run_exec', host: 'github', repo: 'a/b', instruction: 'ship it' },
+        { type: 'text', text: 'router resumed' },
+      ] as RunnerEvent[],
+    ]);
+    let execCreateCount = 0;
+    const buildRunnerFactory: BuildRunnerFactory = {
+      createBuildRunner: () => Promise.reject(new Error('build not used in this test')),
+      createExecRunner: (key) => {
+        execCreateCount += 1;
+        return Promise.resolve(new PrOpenedRunner(key));
+      },
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory: routerFactory,
+      slack,
+      store,
+      buildRunnerFactory,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'go',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // A bystander (not opted in) replies and the coordinator tries to exec.
+    await manager.enqueueExisting('TEAM:C:T', {
+      message: 'exec it',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U-OTHER',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Refused on the bystander's missing opt-in — the requestor's standing opt-in must NOT
+    // carry over to a different turn author.
+    expect(execCreateCount).toBe(0);
+    const refused = store.audits.filter(
+      (a) => a.tool === 'exec' && a.result === 'refused_no_opt_in',
+    );
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.user_id).toBe('U-OTHER'); // the replier, not the requestor
   });
 
   it('emits a lifecycle/reaped event when a session is reaped', async () => {
