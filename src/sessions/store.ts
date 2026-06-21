@@ -56,6 +56,7 @@ export interface AuditEvent {
   session_key: string;
   team_id: string | null;
   user_id: string | null;
+  profile_id: string | null;
   ts: number;
   kind: 'action' | 'approval' | 'correction' | 'cost' | 'lifecycle';
   tool: string | null;
@@ -193,6 +194,7 @@ export class SqliteSessionStore implements SessionStore {
     string,
     string | null,
     string | null,
+    string | null,
     number,
     string,
     string | null,
@@ -263,6 +265,7 @@ export class SqliteSessionStore implements SessionStore {
       string,
       string | null,
       string | null,
+      string | null,
       number,
       string,
       string | null,
@@ -273,12 +276,12 @@ export class SqliteSessionStore implements SessionStore {
       number | null,
     ]>(`
       INSERT INTO audit_events
-        (session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     this.stmtGetAudit = this.db.prepare<[string], AuditEvent>(
-      'SELECT session_key, team_id, user_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd FROM audit_events WHERE session_key = ? ORDER BY id',
+      'SELECT session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd FROM audit_events WHERE session_key = ? ORDER BY id',
     );
 
     this.stmtRecordPullRequest = this.db.prepare<
@@ -401,6 +404,7 @@ export class SqliteSessionStore implements SessionStore {
         session_key    TEXT    NOT NULL,
         team_id        TEXT,
         user_id        TEXT,
+        profile_id     TEXT,
         ts             INTEGER NOT NULL,
         kind           TEXT    NOT NULL,
         tool           TEXT,
@@ -415,6 +419,9 @@ export class SqliteSessionStore implements SessionStore {
     // Migrate a post-S05 / pre-Slice-A table that has session_key but not cost_micro_usd.
     if (auditCols.includes('session_key') && !auditCols.includes('cost_micro_usd')) {
       this.db.exec('ALTER TABLE audit_events ADD COLUMN cost_micro_usd INTEGER');
+    }
+    if (auditCols.includes('session_key') && !auditCols.includes('profile_id')) {
+      this.db.exec('ALTER TABLE audit_events ADD COLUMN profile_id TEXT');
     }
 
     this.db.exec(`
@@ -484,6 +491,7 @@ export class SqliteSessionStore implements SessionStore {
       event.session_key,
       event.team_id,
       event.user_id,
+      event.profile_id,
       event.ts,
       event.kind,
       event.tool,

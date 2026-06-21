@@ -24,6 +24,7 @@ import type {
   PullRequestRow,
   PullRequestTerminalState,
 } from '../src/sessions/store.js';
+import { SqliteSessionStore } from '../src/sessions/store.js';
 import { FakeSlackClient } from './responder.test.js';
 import type { SlackClientLike } from '../src/slack/responder.js';
 import type { PrState, PrStateReader } from '../src/sessions/pr-state-reader.js';
@@ -681,6 +682,7 @@ describe('SessionManager — build_spec approval_requested', () => {
       session_key: 'TEAM:C:T',
       team_id: 'TEAM',
       user_id: 'U-REQ',
+      profile_id: 'supervised-repo-oneshot',
       ts: Date.now(),
       kind: 'cost',
       tool: null,
@@ -1256,6 +1258,7 @@ describe('SessionManager — audit emission', () => {
     expect(created).toHaveLength(1);
     expect(created[0]?.team_id).toBe('TEAM');
     expect(created[0]?.user_id).toBe('U1');
+    expect(created[0]?.profile_id).toBe('conversational');
     expect(created[0]?.session_key).toBe('TEAM:C:T');
     // Content must never leak into audit fields
     expect(created[0]?.summary).toBeNull();
@@ -1319,6 +1322,36 @@ describe('SessionManager — audit emission', () => {
     // Content must not leak — reply text must not appear.
     const resolvedJson = JSON.stringify(resolved[0]);
     expect(resolvedJson).not.toContain('approve');
+  });
+
+  it('persists the session profile_id on lifecycle/created audit rows for non-default profiles', async () => {
+    const slack = new FakeSlackClient();
+    const store = new SqliteSessionStore(':memory:');
+    const factory = new FakeRunnerFactory();
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    try {
+      await manager.enqueueNew('TEAM:C:PROFILE', {
+        message: 'hello',
+        channel: 'C',
+        threadTs: 'PROFILE',
+        teamId: 'TEAM',
+        userId: 'U1',
+        profileId: 'repo-oneshot',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const created = store
+        .getAuditEvents('TEAM:C:PROFILE')
+        .filter((a) => a.kind === 'lifecycle' && a.tool === 'session' && a.result === 'created');
+
+      expect(created).toHaveLength(1);
+      expect(created[0]?.profile_id).toBe('repo-oneshot');
+      expect(created[0]?.team_id).toBe('TEAM');
+      expect(created[0]?.user_id).toBe('U1');
+    } finally {
+      store.close();
+    }
   });
 
   it('emits correction/cancelled when a cancel reply abandons the run', async () => {
@@ -1672,6 +1705,7 @@ describe('SessionManager — audit emission', () => {
     expect(lifecycle.map((a) => a.result)).toEqual(['rehydrated']);
     expect(lifecycle[0]?.user_id).toBe('U-ORIG'); // stored requestor, not the replier
     expect(lifecycle[0]?.team_id).toBe('TEAM');
+    expect(lifecycle[0]?.profile_id).toBe('supervised-repo-oneshot');
   });
 });
 
@@ -2138,6 +2172,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       session_key: 'OLD:C:T',
       team_id: 'TEAM',
       user_id: 'U1',
+      profile_id: null,
       ts: nowMs - 1000, // 1 second ago — within 24h
       kind: 'cost',
       tool: null,
@@ -2198,6 +2233,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       session_key: 'ANY:C:T',
       team_id: 'TEAM',
       user_id: 'OTHER',
+      profile_id: null,
       ts: nowMs - 100,
       kind: 'cost',
       tool: null,
@@ -2259,6 +2295,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       session_key: 'PRIOR:C:T',
       team_id: 'TEAM',
       user_id: 'U-ORIG',
+      profile_id: null,
       ts: nowMs - 1000, // within 24h
       kind: 'cost',
       tool: null,
@@ -2374,6 +2411,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       session_key: 'TEAM:C:T',
       team_id: 'TEAM',
       user_id: 'U1',
+      profile_id: null,
       ts: Date.now(),
       kind: 'cost',
       tool: null,
@@ -2527,6 +2565,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       session_key: 'ANY:C:T',
       team_id: null,
       user_id: null,
+      profile_id: null,
       ts: nowMs - 100,
       kind: 'cost',
       tool: null,
@@ -2574,6 +2613,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       session_key: 'OLD:C:T',
       team_id: null,
       user_id: 'U1',
+      profile_id: null,
       ts: 50 * 60 * 60 * 1000,
       kind: 'cost',
       tool: null,
