@@ -781,6 +781,17 @@ export class SessionManager {
         '[session] run_build fired but buildRunnerFactory is not configured — this is a programming error',
       );
     }
+    const breachedCap = this.checkCaps(session.key, session.requestorUserId);
+    if (breachedCap !== null) {
+      this.rejectForCap(breachedCap, 'abandoned', {
+        sessionKey: session.key,
+        channel: item.channel,
+        threadTs: item.threadTs,
+        userId: session.requestorUserId,
+        teamId: session.teamId,
+      });
+      return { ok: false, reason: 'spend budget reached before build' };
+    }
     const placeholder = await postPlaceholder(this.slack, item.channel, item.threadTs);
     // createBuildRunner is INSIDE the try: spawning the tail container is fallible, and a
     // failure must come back to the coordinator as a `{ ok: false }` BuildOutcome (the whole
