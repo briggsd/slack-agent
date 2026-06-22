@@ -13,6 +13,7 @@ import { spawn as nodeSpawn } from 'child_process';
 import type { ChildProcess, SpawnOptions } from 'child_process';
 import type {
   ApprovalControl,
+  ErrorReason,
   RunnerEvent,
   RunnerSendOptions,
   RunnerStream,
@@ -147,6 +148,8 @@ export class DockerRunner implements SessionRunner {
 
   /** Set to true when the child exits; nextLine() returns null thereafter. */
   private childExited = false;
+  private exitCode: number | null = null;
+  private exitSignal: NodeJS.Signals | null = null;
 
   constructor(
     child: ChildProcess,
@@ -189,7 +192,9 @@ export class DockerRunner implements SessionRunner {
       );
     });
 
-    const onExit = (): void => {
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      this.exitCode = code;
+      this.exitSignal = signal;
       this.childExited = true;
       if (this.lineWaiter !== null) {
         const w = this.lineWaiter;
@@ -199,6 +204,14 @@ export class DockerRunner implements SessionRunner {
     };
     child.once('exit', onExit);
     child.once('close', onExit);
+  }
+
+  private errorEvent(message: string, reason: ErrorReason): RunnerEvent {
+    return { type: 'error', message, reason };
+  }
+
+  private unexpectedExitMessage(): string {
+    return `runner process exited unexpectedly (code=${String(this.exitCode)}, signal=${String(this.exitSignal)})`;
   }
 
   private deliverLine(line: string): void {
@@ -324,7 +337,7 @@ export class DockerRunner implements SessionRunner {
 
     async function* gen(): RunnerStream {
         if (self.disposed) {
-          yield { type: 'error', message: 'runner is disposed' } as RunnerEvent;
+          yield self.errorEvent('runner is disposed', 'runner_error');
           return;
         }
 
@@ -333,7 +346,7 @@ export class DockerRunner implements SessionRunner {
 
         // Write any trusted approval control first so the next user turn can consume it.
         if (!self.child.stdin?.writable) {
-          yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+          yield self.errorEvent('runner stdin is not writable', 'runner_error');
           return;
         }
         if (opts?.approval !== undefined) {
@@ -353,28 +366,23 @@ export class DockerRunner implements SessionRunner {
         while (true) {
           const remaining = deadline - Date.now();
           if (remaining <= 0) {
-            yield {
-              type: 'error',
-              message: `turn timed out after ${turnTimeoutMs}ms`,
-            } as RunnerEvent;
+            yield self.errorEvent(`turn timed out after ${turnTimeoutMs}ms`, 'timeout');
             break;
           }
 
           const rawLine = await self.nextLineWithTimeout(remaining);
 
           if (rawLine === 'timeout') {
-            yield {
-              type: 'error',
-              message: `turn timed out after ${turnTimeoutMs}ms`,
-            } as RunnerEvent;
+            yield self.errorEvent(`turn timed out after ${turnTimeoutMs}ms`, 'timeout');
             break;
           }
 
           if (rawLine === null) {
-            yield {
-              type: 'error',
-              message: 'runner process exited unexpectedly',
-            } as RunnerEvent;
+            const runnerId = self.escalation?.containerName ?? 'unknown';
+            console.error(
+              `[runner] container exited unexpectedly for ${runnerId}: code=${String(self.exitCode)} signal=${String(self.exitSignal)}`,
+            );
+            yield self.errorEvent(self.unexpectedExitMessage(), 'container_exit');
             break;
           }
 
@@ -466,7 +474,7 @@ export class DockerRunner implements SessionRunner {
 
             // Write the result back to the container
             if (!self.child.stdin?.writable) {
-              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              yield self.errorEvent('runner stdin is not writable', 'runner_error');
               return;
             }
             const cloneResult: GatewayToRunnerMessage = cloneOutcome.ok
@@ -496,7 +504,7 @@ export class DockerRunner implements SessionRunner {
             // Yield up to the manager (runBuild), which runs the tail and feeds back a BuildOutcome via next().
             const resume = yield { type: 'run_build', repo: buildRepo } as RunnerEvent;
             if (!self.child.stdin?.writable) {
-              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              yield self.errorEvent('runner stdin is not writable', 'runner_error');
               return;
             }
             const outcome = resume as BuildOutcome | undefined;   // the run_build yield only ever resumes with a BuildOutcome
@@ -538,7 +546,7 @@ export class DockerRunner implements SessionRunner {
               instruction: parsed.instruction,
             } as RunnerEvent;
             if (!self.child.stdin?.writable) {
-              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              yield self.errorEvent('runner stdin is not writable', 'runner_error');
               return;
             }
             const outcome = resume as ExecOutcome | undefined;
@@ -600,7 +608,7 @@ export class DockerRunner implements SessionRunner {
             }
 
             if (!self.child.stdin?.writable) {
-              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              yield self.errorEvent('runner stdin is not writable', 'runner_error');
               return;
             }
             const publishResult: PublishResultMessage = publishOutcome.ok
@@ -660,7 +668,7 @@ export class DockerRunner implements SessionRunner {
             }
 
             if (!self.child.stdin?.writable) {
-              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              yield self.errorEvent('runner stdin is not writable', 'runner_error');
               return;
             }
             const editResult: PrEditResultMessage = editOutcome.ok
@@ -709,7 +717,7 @@ export class DockerRunner implements SessionRunner {
             }
 
             if (!self.child.stdin?.writable) {
-              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              yield self.errorEvent('runner stdin is not writable', 'runner_error');
               return;
             }
             const commentResult: PrCommentResultMessage = commentOutcome.ok
@@ -762,7 +770,7 @@ export class DockerRunner implements SessionRunner {
             }
 
             if (!self.child.stdin?.writable) {
-              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              yield self.errorEvent('runner stdin is not writable', 'runner_error');
               return;
             }
             const checksResult: RunChecksResultMessage = checksOutcome.ok
@@ -807,7 +815,7 @@ export class DockerRunner implements SessionRunner {
             }
 
             if (!self.child.stdin?.writable) {
-              yield { type: 'error', message: 'runner stdin is not writable' } as RunnerEvent;
+              yield self.errorEvent('runner stdin is not writable', 'runner_error');
               return;
             }
             const provisionResult: ProvisionResultMessage = provisionOutcome.ok
@@ -818,7 +826,7 @@ export class DockerRunner implements SessionRunner {
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
-            yield { type: 'error', message: parsed.message } as RunnerEvent;
+            yield self.errorEvent(parsed.message, 'runner_error');
             break;
           }
           // Messages with different IDs ignored (shouldn't happen since turns are serial)

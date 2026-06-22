@@ -345,7 +345,7 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
     ];
 
     const tailScript: RunnerEvent[] = [
-      { type: 'error', message: 'impl failed' },
+      { type: 'error', message: 'impl failed', reason: 'runner_error' },
     ];
 
     const routerFactory = new FakeRunnerFactory([[...routerScript]]);

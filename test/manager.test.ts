@@ -377,7 +377,7 @@ describe('SessionManager — responder integration', () => {
   it('routes error events to the placeholder', async () => {
     const slack = new FakeSlackClient();
     const factory = new FakeRunnerFactory([
-      [{ type: 'error', message: 'something went wrong' }],
+      [{ type: 'error', message: 'something went wrong', reason: 'runner_error' }],
     ]);
     const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
 
@@ -1754,6 +1754,116 @@ describe('SessionManager — audit emission', () => {
     // Cost value must not appear in any Slack message
     expect(slack.updates.every((u) => !u.text.includes('12300'))).toBe(true);
     expect(slack.posts.every((p) => !p.text.includes('12300'))).toBe(true);
+  });
+
+  it('audits and logs a container_exit terminal error while still posting the Slack error', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const factory = new FakeRunnerFactory([
+      [{ type: 'error', message: 'runner process exited unexpectedly (code=137, signal=null)', reason: 'container_exit' }],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    try {
+      await manager.enqueueNew('TEAM:C:T', {
+        message: 'hello',
+        channel: 'C',
+        threadTs: 'T',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const errorAudits = store.audits.filter((a) => a.kind === 'error');
+      expect(errorAudits).toHaveLength(1);
+      expect(errorAudits[0]).toMatchObject({
+        session_key: 'TEAM:C:T',
+        tool: null,
+        result: 'container_exit',
+        summary: 'runner process exited unexpectedly (code=137, signal=null)',
+      });
+
+      const lastUpdate = slack.updates[slack.updates.length - 1];
+      expect(lastUpdate?.text).toBe(':x: Error: runner process exited unexpectedly (code=137, signal=null)');
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[session] turn error (container_exit) TEAM:C:T: runner process exited unexpectedly (code=137, signal=null)',
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('audits timeout terminal errors with result=timeout', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory([
+      [{ type: 'error', message: 'turn timed out after 500ms', reason: 'timeout' }],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const errorAudits = store.audits.filter((a) => a.kind === 'error');
+    expect(errorAudits).toHaveLength(1);
+    expect(errorAudits[0]).toMatchObject({
+      session_key: 'TEAM:C:T',
+      tool: null,
+      result: 'timeout',
+      summary: 'turn timed out after 500ms',
+    });
+  });
+
+  it('redacts a runner_error message from logs + audit (untrusted, container-relayed) but keeps it on the Slack post', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Simulate the one container-relayed path: docker.ts forwards `parsed.message`
+    // verbatim as a runner_error. That string is untrusted and could echo prompt
+    // content, so it must NOT reach gateway logs or the audit ledger.
+    const relayed = 'model said: <secret prompt text>';
+    const factory = new FakeRunnerFactory([
+      [{ type: 'error', message: relayed, reason: 'runner_error' }],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    try {
+      await manager.enqueueNew('TEAM:C:T', {
+        message: 'hello',
+        channel: 'C',
+        threadTs: 'T',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Audit row exists, carries the typed reason, but NO message content.
+      const errorAudits = store.audits.filter((a) => a.kind === 'error');
+      expect(errorAudits).toHaveLength(1);
+      expect(errorAudits[0]).toMatchObject({
+        session_key: 'TEAM:C:T',
+        tool: null,
+        result: 'runner_error',
+        summary: null,
+      });
+
+      // The log line records reason + session key only — never the relayed text.
+      expect(errorSpy).toHaveBeenCalledWith('[session] turn error (runner_error) TEAM:C:T');
+      expect(errorSpy.mock.calls.every((c) => !String(c[0]).includes('secret prompt'))).toBe(true);
+
+      // The user still sees the full detail in their own thread.
+      const lastUpdate = slack.updates[slack.updates.length - 1];
+      expect(lastUpdate?.text).toBe(`:x: Error: ${relayed}`);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('rehydrate emits lifecycle/rehydrated (not a second created) with the stored identity', async () => {
