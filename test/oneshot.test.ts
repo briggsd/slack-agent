@@ -481,7 +481,7 @@ describe('OneShotOrchestrator — inner agent error', () => {
     const gitNodes = new FakeGitNodeExecutor();
     const inner = new FakeRunner('test-session', [
       // Script the research turn to emit an error
-      [{ type: 'error', message: 'agent crashed' }],
+      [{ type: 'error', message: 'agent crashed', reason: 'runner_error' }],
     ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-005');
 
@@ -510,7 +510,7 @@ describe('OneShotOrchestrator — research failure', () => {
     const gitNodes = new FakeGitNodeExecutor();
     const inner = new FakeRunner('test-session', [
       // Script the research turn to emit an error event
-      [{ type: 'error', message: 'research failed: sandbox timeout' }],
+      [{ type: 'error', message: 'research failed: sandbox timeout', reason: 'runner_error' }],
     ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-research-fail');
 
@@ -544,7 +544,7 @@ describe('OneShotOrchestrator — plan failure', () => {
     const inner = new FakeRunner('test-session', [
       [{ type: 'text', text: 'research done' }],
       // plan turn errors
-      [{ type: 'error', message: 'plan failed: model overloaded' }],
+      [{ type: 'error', message: 'plan failed: model overloaded', reason: 'runner_error' }],
     ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-plan-fail');
 
@@ -575,7 +575,7 @@ describe('OneShotOrchestrator — implement failure', () => {
       [{ type: 'text', text: 'research done' }],
       [{ type: 'text', text: 'plan done' }],
       // implement turn errors
-      [{ type: 'error', message: 'implement failed: agent crashed' }],
+      [{ type: 'error', message: 'implement failed: agent crashed', reason: 'runner_error' }],
     ]);
     const orch = new OneShotOrchestrator(inner, broker, gitNodes, TEST_SESSION_KEY, 'task-impl-fail');
 

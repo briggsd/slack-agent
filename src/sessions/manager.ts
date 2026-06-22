@@ -1,5 +1,6 @@
 import type {
   ApprovalControl,
+  ErrorReason,
   RunnerFactory,
   SessionRunner,
   RunnerStream,
@@ -25,7 +26,7 @@ import type { PrStateReader } from './pr-state-reader.js';
 type DriveOutcome =
   | { type: 'pr_opened'; url: string; repo: string; number: number; headSha: string }
   | { type: 'abandoned'; reason: string }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; reason: ErrorReason }
   | { type: 'completed' };
 
 /** Cap on an audit `summary` — metadata only, never a transcript (see {@link SessionManager.audit}). */
@@ -873,8 +874,19 @@ export class SessionManager {
             cost_micro_usd: event.costMicroUsd,
           });
         } else if (event.type === 'error') {
+          console.error(`[session] turn error (${event.reason}) ${session.key}: ${event.message}`);
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
+            kind: 'error',
+            tool: null,
+            result: event.reason,
+            summary: event.message,
+          });
           await tryUpdate(`:x: Error: ${event.message}`);
-          captured = { type: 'error', message: event.message };
+          captured = { type: 'error', message: event.message, reason: event.reason };
         }
       }
     } finally {

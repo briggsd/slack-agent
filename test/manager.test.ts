@@ -377,7 +377,7 @@ describe('SessionManager — responder integration', () => {
   it('routes error events to the placeholder', async () => {
     const slack = new FakeSlackClient();
     const factory = new FakeRunnerFactory([
-      [{ type: 'error', message: 'something went wrong' }],
+      [{ type: 'error', message: 'something went wrong', reason: 'runner_error' }],
     ]);
     const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
 
@@ -1754,6 +1754,71 @@ describe('SessionManager — audit emission', () => {
     // Cost value must not appear in any Slack message
     expect(slack.updates.every((u) => !u.text.includes('12300'))).toBe(true);
     expect(slack.posts.every((p) => !p.text.includes('12300'))).toBe(true);
+  });
+
+  it('audits and logs a container_exit terminal error while still posting the Slack error', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const factory = new FakeRunnerFactory([
+      [{ type: 'error', message: 'runner process exited unexpectedly (code=137, signal=null)', reason: 'container_exit' }],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    try {
+      await manager.enqueueNew('TEAM:C:T', {
+        message: 'hello',
+        channel: 'C',
+        threadTs: 'T',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const errorAudits = store.audits.filter((a) => a.kind === 'error');
+      expect(errorAudits).toHaveLength(1);
+      expect(errorAudits[0]).toMatchObject({
+        session_key: 'TEAM:C:T',
+        tool: null,
+        result: 'container_exit',
+        summary: 'runner process exited unexpectedly (code=137, signal=null)',
+      });
+
+      const lastUpdate = slack.updates[slack.updates.length - 1];
+      expect(lastUpdate?.text).toBe(':x: Error: runner process exited unexpectedly (code=137, signal=null)');
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[session] turn error (container_exit) TEAM:C:T: runner process exited unexpectedly (code=137, signal=null)',
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('audits timeout terminal errors with result=timeout', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory([
+      [{ type: 'error', message: 'turn timed out after 500ms', reason: 'timeout' }],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'T',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const errorAudits = store.audits.filter((a) => a.kind === 'error');
+    expect(errorAudits).toHaveLength(1);
+    expect(errorAudits[0]).toMatchObject({
+      session_key: 'TEAM:C:T',
+      tool: null,
+      result: 'timeout',
+      summary: 'turn timed out after 500ms',
+    });
   });
 
   it('rehydrate emits lifecycle/rehydrated (not a second created) with the stored identity', async () => {

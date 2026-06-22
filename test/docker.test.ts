@@ -239,7 +239,7 @@ describe('DockerRunner — send/receive', () => {
     fake.writeOut(JSON.stringify({ type: 'error', id: sent.id, message: 'oops' }));
 
     const e1 = await e1Promise;
-    expect(e1.value).toEqual({ type: 'error', message: 'oops' });
+    expect(e1.value).toEqual({ type: 'error', message: 'oops', reason: 'runner_error' });
     expect((await iter.next()).done).toBe(true);
   });
 
@@ -252,10 +252,14 @@ describe('DockerRunner — send/receive', () => {
     const e1Promise = iter.next();
     await new Promise((r) => setTimeout(r, 10));
 
-    fake.simulateExit(1);
+    fake.simulateExit(137);
 
     const e1 = await e1Promise;
-    expect(e1.value).toEqual({ type: 'error', message: 'runner process exited unexpectedly' });
+    expect(e1.value).toEqual({
+      type: 'error',
+      message: 'runner process exited unexpectedly (code=137, signal=null)',
+      reason: 'container_exit',
+    });
   });
 
   it('maps protocol file message to RunnerEvent with decoded Buffer', async () => {
@@ -467,6 +471,7 @@ describe('DockerRunner — per-turn timeout', () => {
     expect(e1.value).toEqual({
       type: 'error',
       message: expect.stringContaining('timed out'),
+      reason: 'timeout',
     });
     expect((await iter.next()).done).toBe(true);
 
@@ -865,7 +870,7 @@ describe('DockerRunner — commit gate translation', () => {
       .send('build a thing', { approval: { id: 'appr-6', specRef: 'SPEC: do X', approved: true } })
       [Symbol.asyncIterator]();
     const e2 = await iter.next();
-    expect(e2.value).toEqual({ type: 'error', message: 'runner stdin is not writable' });
+    expect(e2.value).toEqual({ type: 'error', message: 'runner stdin is not writable', reason: 'runner_error' });
     expect((await iter.next()).done).toBe(true);
   });
 

@@ -14,7 +14,7 @@ export async function* runBlueprint<Ctx, Deps>(
       yield* node.run(ctx, deps);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      yield { type: 'error', message } satisfies RunnerEvent;
+      yield { type: 'error', message, reason: 'runner_error' } satisfies RunnerEvent;
       return;
     }
   }

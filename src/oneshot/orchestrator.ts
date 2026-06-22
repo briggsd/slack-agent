@@ -88,6 +88,7 @@ export class OneShotOrchestrator implements SessionRunner {
         yield {
           type: 'error',
           message: 'Invalid repo slug — expected owner/name with no path traversal.',
+          reason: 'runner_error',
         } satisfies RunnerEvent;
         return;
       }
@@ -97,6 +98,7 @@ export class OneShotOrchestrator implements SessionRunner {
         yield {
           type: 'error',
           message: 'Invalid task format. Expected: <host>:<owner>/<repo> <instruction>',
+          reason: 'runner_error',
         } satisfies RunnerEvent;
         return;
       }
@@ -117,6 +119,7 @@ export class OneShotOrchestrator implements SessionRunner {
       yield {
         type: 'error',
         message: err instanceof Error ? err.message : String(err),
+        reason: 'runner_error',
       } satisfies RunnerEvent;
       return;
     }
@@ -132,6 +135,7 @@ export class OneShotOrchestrator implements SessionRunner {
         yield {
           type: 'error',
           message: err instanceof Error ? err.message : String(err),
+          reason: 'runner_error',
         } satisfies RunnerEvent;
         return;
       }
@@ -184,7 +188,7 @@ export class OneShotOrchestrator implements SessionRunner {
     } catch (err: unknown) {
       await revokeOnce();
       const msg = err instanceof Error ? err.message : String(err);
-      yield { type: 'error', message: msg } satisfies RunnerEvent;
+      yield { type: 'error', message: msg, reason: 'runner_error' } satisfies RunnerEvent;
     } finally {
       // Guarantees the lease is revoked even on an unexpected early exit; the
       // guard makes this a no-op if it was already revoked above.

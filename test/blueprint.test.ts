@@ -154,7 +154,7 @@ describe('runBlueprint — error handling', () => {
     // Exactly one error event
     const errorEvents = events.filter((e) => e.type === 'error');
     expect(errorEvents).toHaveLength(1);
-    expect(errorEvents[0]).toMatchObject({ type: 'error', message: 'node exploded' });
+    expect(errorEvents[0]).toMatchObject({ type: 'error', message: 'node exploded', reason: 'runner_error' });
 
     // The status event before the throw was forwarded
     const statusEvents = events.filter((e) => e.type === 'status');
