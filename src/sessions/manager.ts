@@ -874,7 +874,18 @@ export class SessionManager {
             cost_micro_usd: event.costMicroUsd,
           });
         } else if (event.type === 'error') {
-          console.error(`[session] turn error (${event.reason}) ${session.key}: ${event.message}`);
+          // The message is safe for gateway logs + the audit ledger only when the
+          // gateway itself generated it (timeout duration; container exit code/signal).
+          // A `runner_error` may be relayed verbatim from inside the container
+          // (docker.ts forwards `parsed.message`), which is untrusted data and could
+          // echo prompt/tool content — keep it on the Slack post (the user's own
+          // thread) but never in logs or audit, per the never-log-message-content and
+          // treat-container-output-as-data invariants. The typed `reason` + session
+          // key remain the durable signal.
+          const safeDetail = event.reason === 'runner_error' ? null : event.message;
+          console.error(
+            `[session] turn error (${event.reason}) ${session.key}${safeDetail === null ? '' : `: ${safeDetail}`}`,
+          );
           this.audit({
             session_key: session.key,
             team_id: session.teamId ?? null,
@@ -883,7 +894,7 @@ export class SessionManager {
             kind: 'error',
             tool: null,
             result: event.reason,
-            summary: event.message,
+            summary: safeDetail,
           });
           await tryUpdate(`:x: Error: ${event.message}`);
           captured = { type: 'error', message: event.message, reason: event.reason };

@@ -1821,6 +1821,51 @@ describe('SessionManager — audit emission', () => {
     });
   });
 
+  it('redacts a runner_error message from logs + audit (untrusted, container-relayed) but keeps it on the Slack post', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Simulate the one container-relayed path: docker.ts forwards `parsed.message`
+    // verbatim as a runner_error. That string is untrusted and could echo prompt
+    // content, so it must NOT reach gateway logs or the audit ledger.
+    const relayed = 'model said: <secret prompt text>';
+    const factory = new FakeRunnerFactory([
+      [{ type: 'error', message: relayed, reason: 'runner_error' }],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    try {
+      await manager.enqueueNew('TEAM:C:T', {
+        message: 'hello',
+        channel: 'C',
+        threadTs: 'T',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Audit row exists, carries the typed reason, but NO message content.
+      const errorAudits = store.audits.filter((a) => a.kind === 'error');
+      expect(errorAudits).toHaveLength(1);
+      expect(errorAudits[0]).toMatchObject({
+        session_key: 'TEAM:C:T',
+        tool: null,
+        result: 'runner_error',
+        summary: null,
+      });
+
+      // The log line records reason + session key only — never the relayed text.
+      expect(errorSpy).toHaveBeenCalledWith('[session] turn error (runner_error) TEAM:C:T');
+      expect(errorSpy.mock.calls.every((c) => !String(c[0]).includes('secret prompt'))).toBe(true);
+
+      // The user still sees the full detail in their own thread.
+      const lastUpdate = slack.updates[slack.updates.length - 1];
+      expect(lastUpdate?.text).toBe(`:x: Error: ${relayed}`);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('rehydrate emits lifecycle/rehydrated (not a second created) with the stored identity', async () => {
     const slack = new FakeSlackClient();
     const store = new CapturingStore();
