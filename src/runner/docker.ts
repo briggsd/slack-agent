@@ -224,8 +224,9 @@ export class DockerRunner implements SessionRunner {
       /** Build the malformed-request fallback *_result line. */
       malformedResult: (id: string) => GatewayToRunnerMessage;
       /** Optional success event (pr_opened/pr_edited/pr_commented). elapsedMs is the
-       *  measured service wall-clock. Return null for no event. */
-      toEvent?: (outcome: TOutcome, elapsedMs: number) => RunnerEvent | null;
+       *  measured service wall-clock; req is the validated request (so event fields that
+       *  live on the request, e.g. repo, need no out-of-band capture). Return null for none. */
+      toEvent?: (outcome: TOutcome, elapsedMs: number, req: TReq) => RunnerEvent | null;
     },
   ): AsyncGenerator<RunnerEvent, 'serviced' | 'skipped' | 'fatal', GateResume | BuildOutcome | ExecOutcome | undefined> {
     // Verdict contract: 'serviced' = the service ran and a result was written, so the caller
@@ -254,7 +255,7 @@ export class DockerRunner implements SessionRunner {
       return 'fatal';
     }
     this.child.stdin.write(JSON.stringify(spec.toResult(id, outcome)) + '\n');
-    const event = spec.toEvent?.(outcome, elapsedMs);
+    const event = spec.toEvent?.(outcome, elapsedMs, req);
     if (event !== null && event !== undefined) {
       yield event;
     }
@@ -617,8 +618,6 @@ export class DockerRunner implements SessionRunner {
             // line as data; service it inline via the credentialed gateway seam. The PR body and
             // title are passed as data to the service and must never be logged here.
             const publishCorrelationId = (parsed as { correlationId?: unknown }).correlationId;
-            // Capture repo for use in toEvent (repo lives on the request, not the outcome).
-            let publishRepo = '';
             const publishVerdict = yield* self.serviceDispatch<PublishServiceRequest, PublishOutcome>(parsed, {
               requestType: 'request_publish',
               validate: (p) => {
@@ -632,7 +631,6 @@ export class DockerRunner implements SessionRunner {
                   (b !== undefined && typeof b !== 'string') ||
                   (c !== undefined && typeof c !== 'string')
                 ) return null;
-                publishRepo = u.repo;
                 return {
                   repo: u.repo,
                   volume: self.volume ?? '',
@@ -649,11 +647,11 @@ export class DockerRunner implements SessionRunner {
                 ? { type: 'publish_result', id, ok: true, prUrl: outcome.prUrl }
                 : { type: 'publish_result', id, ok: false, reason: outcome.reason },
               malformedResult: (id) => ({ type: 'publish_result', id, ok: false, reason: 'malformed request' }),
-              toEvent: (outcome, elapsedMs) => outcome.ok
+              toEvent: (outcome, elapsedMs, req) => outcome.ok
                 ? ({
                     type: 'pr_opened',
                     url: outcome.prUrl,
-                    repo: publishRepo,
+                    repo: req.repo,
                     number: outcome.prNumber,
                     headSha: outcome.headSha,
                     elapsedMs,
