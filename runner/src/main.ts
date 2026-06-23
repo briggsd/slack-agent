@@ -41,6 +41,11 @@ import { ProvisionCoordinator } from './provision.js';
 import type { ProvisionInput, ProvisionOutcome } from './provision.js';
 import type { RunChecksKind } from './protocol.js';
 
+type VerificationInput = {
+  verdict: 'pass' | 'fail';
+  rationale: string;
+};
+
 // ── Injectable seams for testing ──────────────────────────────────────────────
 
 export type ReadFileFn = (path: string) => Promise<string | null>;
@@ -106,6 +111,11 @@ export type SdkQueryFn = (params: {
    * the test fake calls it directly. Omitted only by callers that don't wire check support.
    */
   runChecks?: (input: ChecksInput) => Promise<ChecksOutcome>;
+  /**
+   * Bound at the runner so the SDK's `report_verification` tool can emit a one-way structured
+   * verification verdict for the current turn after diff review and checks.
+   */
+  reportVerification?: (input: VerificationInput) => Promise<void>;
   /**
    * Bound at the runner so the SDK's `provision_runtime` tool can ask the gateway to install a
    * pinned runtime from the gateway catalog onto the shared session volume.
@@ -193,11 +203,14 @@ const PUBLISH_SYSTEM_PROMPT_ADDITION =
   `diff ${DIFF_BASE_REF}...HEAD, then read enough changed files to judge the diff against ` +
   '/workspace/SPEC.md. Call run_checks (mcp__commit__run_checks) with the same "owner/name" repo ' +
   'and interpret every result: exitCode 0 with skipped false means that check ran green; skipped true ' +
-  'is inconclusive, not green; any non-zero exit code is red even when the tool call succeeded. Use ' +
-  'publish (mcp__commit__publish) or open_pr (mcp__commit__open_pr) only after you have actually ' +
-  'inspected the diff and reviewed check output and both are satisfactory. If checks are red, skipped, ' +
-  'inconclusive, or the diff does not match SPEC.md, do not claim success or publish automatically; ' +
-  'tell the user honestly what you observed and ask for the next step. Recap verification results like ' +
+  'is inconclusive, not green; any non-zero exit code is red even when the tool call succeeded. After ' +
+  'reviewing the diff and checks, call report_verification (mcp__commit__report_verification) with your ' +
+  'honest pass/fail verdict and a rationale that covers what you checked, what the checks and diff showed, ' +
+  "what's missing or risky, and why you pass or hold. Use publish (mcp__commit__publish) or open_pr " +
+  '(mcp__commit__open_pr) only after you have actually inspected the diff, reviewed check output, and ' +
+  'recorded a pass verdict, or when the human explicitly says to open anyway after you reported the risk. ' +
+  'If checks are red, skipped, inconclusive, or the diff does not match SPEC.md, do not claim success or ' +
+  'publish automatically; tell the user honestly what you observed and ask for the next step. Recap verification results like ' +
   'a teammate, not a status panel: only claim what was verified, hedge honestly, and avoid raw stack ' +
   'traces or internal logs in failure prose. The gateway handles credentials; do not push or open a PR yourself.';
 
@@ -287,7 +300,7 @@ export async function runBuildSpec(
   }
   const outcome = await requestBuild(repo);
   return outcome.ok
-    ? 'BUILD COMPLETE. Local candidate ready in the session worktree. Before publish or open_pr, inspect the candidate diff, read changed files as needed against /workspace/SPEC.md, and call run_checks. Publish only after the diff review and checks are satisfactory; if verification is red, skipped, inconclusive, or does not match the SPEC, report honestly and ask the user what to do.'
+    ? 'BUILD COMPLETE. Local candidate ready in the session worktree. Before publish or open_pr, inspect the candidate diff, read changed files as needed against /workspace/SPEC.md, and call run_checks. After that, call report_verification with your honest verdict and rationale covering what you checked, what the checks and diff showed, what is missing or risky, and why you pass or hold. Publish only after a pass verdict, or after the human explicitly tells you to open anyway once you have reported the risk.'
     : `BUILD DID NOT COMPLETE: ${outcome.reason}. Revise the spec and call build_spec again, or discuss with the user.`;
 }
 
@@ -437,6 +450,13 @@ function checksInputFromArgs(args: {
   };
 }
 
+function verificationInputFromArgs(args: VerificationInput): VerificationInput {
+  return {
+    verdict: args.verdict,
+    rationale: args.rationale,
+  };
+}
+
 function execInputFromArgs(args: {
   repo: string;
   instruction: string;
@@ -475,6 +495,7 @@ export async function runLoop(opts: {
   input: NodeJS.ReadableStream;
 }): Promise<void> {
   const { readFile, writeFile, mkdir, sdkQuery, listFiles, readBinaryFile, input } = opts;
+  let activeBuildCorrelationId: string | undefined;
 
   // Load persisted session ID (for resume-after-reap)
   let sessionId: string | null = await readFile(SESSION_ID_PATH);
@@ -500,9 +521,10 @@ export async function runLoop(opts: {
 
   // The build coordinator. `build_spec` (phase ②) calls buildCoordinator.requestBuild mid-turn;
   // inbound build_result lines are routed to buildCoordinator.handleResult by the dispatcher below.
-  const buildCoordinator = new BuildCoordinator((repo, buildId) =>
-    emit({ type: 'request_build', id: buildId, repo }),
-  );
+  const buildCoordinator = new BuildCoordinator((repo, buildId) => {
+    activeBuildCorrelationId = buildId;
+    emit({ type: 'request_build', id: buildId, repo });
+  });
 
   // The exec coordinator. `exec` calls execCoordinator.requestExec mid-turn; inbound
   // exec_result lines are routed to execCoordinator.handleResult by the dispatcher below.
@@ -525,6 +547,7 @@ export async function runLoop(opts: {
       repo: input.repo,
       ...(input.title !== undefined ? { title: input.title } : {}),
       ...(input.body !== undefined ? { body: input.body } : {}),
+      ...(input.correlationId !== undefined ? { correlationId: input.correlationId } : {}),
     };
     emit(msg);
   });
@@ -690,7 +713,12 @@ export async function runLoop(opts: {
   const cloneRepo = (repo: string): Promise<CloneOutcome> => cloneCoordinator.requestClone(repo);
   const requestBuild = (repo: string): Promise<BuildOutcome> => buildCoordinator.requestBuild(repo);
   const requestExec = (input: ExecInput): Promise<ExecOutcome> => execCoordinator.requestExec(input);
-  const publish = (input: PublishInput): Promise<PublishOutcome> => publishCoordinator.requestPublish(input);
+  const publish = (input: PublishInput): Promise<PublishOutcome> =>
+    publishCoordinator.requestPublish(
+      activeBuildCorrelationId !== undefined
+        ? { ...input, correlationId: activeBuildCorrelationId }
+        : input,
+    );
   const editPr = (input: PrEditInput): Promise<PrEditOutcome> => editPrCoordinator.requestEditPr(input);
   const commentPr = (input: PrCommentInput): Promise<PrCommentOutcome> => commentPrCoordinator.requestCommentPr(input);
   const runChecks = (input: ChecksInput): Promise<ChecksOutcome> => checksCoordinator.requestChecks(input);
@@ -712,6 +740,7 @@ export async function runLoop(opts: {
     }
     const msg = turnQueue.shift();
     if (msg === undefined) continue;
+    activeBuildCorrelationId = undefined;
     sessionId = await processTurn(msg, sessionId, {
       sdkQuery,
       writeFile,
@@ -727,6 +756,17 @@ export async function runLoop(opts: {
       editPr,
       commentPr,
       runChecks,
+      reportVerification: async (turnId, input) => {
+        const decision: RunnerToGatewayMessage = {
+          type: 'decision',
+          id: turnId,
+          point: 'verify',
+          verdict: input.verdict,
+          rationale: input.rationale,
+          ...(activeBuildCorrelationId !== undefined ? { correlationId: activeBuildCorrelationId } : {}),
+        };
+        emit(decision);
+      },
       provisionRuntime,
     });
   }
@@ -754,6 +794,7 @@ async function processTurn(
     editPr: (input: PrEditInput) => Promise<PrEditOutcome>;
     commentPr: (input: PrCommentInput) => Promise<PrCommentOutcome>;
     runChecks: (input: ChecksInput) => Promise<ChecksOutcome>;
+    reportVerification: (turnId: string, input: VerificationInput) => Promise<void>;
     provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>;
   },
 ): Promise<string | null> {
@@ -774,6 +815,7 @@ async function processTurn(
       editPr: deps.editPr,
       commentPr: deps.commentPr,
       runChecks: deps.runChecks,
+      reportVerification: (input) => deps.reportVerification(id, input),
       provisionRuntime: deps.provisionRuntime,
       options: {
         ...(currentSessionId !== null ? { resume: currentSessionId } : {}),
@@ -1100,6 +1142,7 @@ function buildCommitMcpServer(
   editPr: (input: PrEditInput) => Promise<PrEditOutcome>,
   commentPr: (input: PrCommentInput) => Promise<PrCommentOutcome>,
   runChecksFn: (input: ChecksInput) => Promise<ChecksOutcome>,
+  reportVerification: (input: VerificationInput) => Promise<void>,
   provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>,
 ) {
   const buildSpecTool = tool(
@@ -1108,8 +1151,10 @@ function buildCommitMcpServer(
       'buildable implementation spec there first. Pass the "owner/name" repo you cloned. On the first ' +
       'call it requests human approval and you must end your turn; on a later call after the user replies, ' +
       'it consumes the authenticated decision and either builds in a fresh sandbox or returns the human ' +
-      'feedback as data. After this tool returns candidate-ready, inspect the diff and call run_checks ' +
-      'before publish/open_pr. Do not write code, push, or open a PR yourself — this tool does not publish.',
+      'feedback as data. After this tool returns candidate-ready, inspect the diff, call run_checks, then ' +
+      'call report_verification with your honest verdict and rationale before publish/open_pr. Publish only ' +
+      'after a pass verdict, or after the human explicitly tells you to open anyway. Do not write code, push, ' +
+      'or open a PR yourself — this tool does not publish.',
     { repo: z.string().describe('Repository slug in "owner/name" format — the repo you cloned.') },
     async (args) => {
       const text = await runBuildSpec(args.repo, readFile, submitSpec, requestBuild);
@@ -1150,6 +1195,11 @@ function buildCommitMcpServer(
     kind: z.enum(['lint', 'test', 'all']).optional().describe('Which checks to run. Omit for all.'),
   };
 
+  const reportVerificationSchema = {
+    verdict: z.enum(['pass', 'fail']).describe('Your honest verification verdict after reviewing the diff and checks.'),
+    rationale: z.string().describe('Explain what you checked, what the checks and diff showed, what is missing or risky, and why you pass or hold.'),
+  };
+
   const editPrSchema = {
     repo: z.string().describe('Repository slug in "owner/name" format.'),
     title: z.string().optional().describe('Optional replacement PR title. Omit to leave unchanged.'),
@@ -1180,6 +1230,24 @@ function buildCommitMcpServer(
     async (args) => {
       const text = await runChecks(checksInputFromArgs(args), runChecksFn);
       return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
+  const reportVerificationTool = tool(
+    'report_verification',
+    'Record your verification judgment after run_checks and diff review. Call this with an honest ' +
+      'pass/fail verdict and rationale covering what you checked, what the checks and diff showed, ' +
+      "what's missing or risky, and why you pass or hold. This is advisory monitoring only: it does " +
+      'not block publish by itself, but you should publish only on pass or after an explicit human "open anyway".',
+    reportVerificationSchema,
+    async (args) => {
+      await reportVerification(verificationInputFromArgs(args));
+      return {
+        content: [{
+          type: 'text' as const,
+          text: 'VERIFICATION RECORDED. Continue with an honest pass/fail recommendation.',
+        }],
+      };
     },
   );
 
@@ -1256,7 +1324,7 @@ function buildCommitMcpServer(
   return createSdkMcpServer({
     name: 'commit',
     version: '0.0.0',
-    tools: [buildSpecTool, cloneRepoTool, runChecksTool, provisionRuntimeTool, publishTool, openPrTool, editPrTool, commentPrTool, execTool],
+    tools: [buildSpecTool, cloneRepoTool, runChecksTool, reportVerificationTool, provisionRuntimeTool, publishTool, openPrTool, editPrTool, commentPrTool, execTool],
     alwaysLoad: true,
   });
 }
@@ -1271,6 +1339,7 @@ function realSdkQuery(params: {
   editPr?: (input: PrEditInput) => Promise<PrEditOutcome>;
   commentPr?: (input: PrCommentInput) => Promise<PrCommentOutcome>;
   runChecks?: (input: ChecksInput) => Promise<ChecksOutcome>;
+  reportVerification?: (input: VerificationInput) => Promise<void>;
   provisionRuntime?: (input: ProvisionInput) => Promise<ProvisionOutcome>;
   options?: {
     resume?: string;
@@ -1298,6 +1367,7 @@ function realSdkQuery(params: {
     params.editPr !== undefined &&
     params.commentPr !== undefined
     && params.runChecks !== undefined
+    && params.reportVerification !== undefined
     && params.provisionRuntime !== undefined
       ? {
           commit: buildCommitMcpServer(
@@ -1310,6 +1380,7 @@ function realSdkQuery(params: {
             params.editPr,
             params.commentPr,
             params.runChecks,
+            params.reportVerification,
             params.provisionRuntime,
           ),
         }

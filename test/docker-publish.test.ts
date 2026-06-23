@@ -115,6 +115,7 @@ describe('DockerRunner — request_publish round-trip', () => {
       repo: 'owner/repo',
       title: 'Ship verified work',
       body: 'Verified body',
+      correlationId: 'build-77',
     }));
 
     const e1 = await e1Promise;
@@ -144,6 +145,7 @@ describe('DockerRunner — request_publish round-trip', () => {
       repo: 'owner/repo',
       number: 17,
       headSha: 'publish-head-sha',
+      correlationId: 'build-77',
     });
 
     const e3Promise = iter.next();

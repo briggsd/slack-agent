@@ -6,7 +6,8 @@
  * unset in this slice — they're wired up in later milestones.
  *
  * The audit_events table records the gateway-observable action/lifecycle trail
- * (M6 audit layer, S05). Metadata only — never raw message content.
+ * (M6 audit layer, S05). Metadata by default; a narrow decision-reasoning path
+ * may be opt-in captured when operators enable it.
  */
 import Database from 'better-sqlite3';
 
@@ -49,8 +50,9 @@ export type NewSessionRow = Pick<
  * A single row in the audit_events table.
  *
  * All fields are required-with-null (never optional) so the positional bind is
- * total and exactOptionalPropertyTypes stays happy. Audit is metadata only —
- * never raw message content (no reply text, plan text, feedback, prompts).
+ * total and exactOptionalPropertyTypes stays happy. Audit remains metadata-first:
+ * `reasoning` is null by default and is populated only for verification rationale
+ * when operators explicitly enable that capture path.
  */
 export interface AuditEvent {
   session_key: string;
@@ -58,7 +60,7 @@ export interface AuditEvent {
   user_id: string | null;
   profile_id: string | null;
   ts: number;
-  kind: 'action' | 'approval' | 'correction' | 'cost' | 'error' | 'lifecycle';
+  kind: 'action' | 'approval' | 'correction' | 'cost' | 'decision' | 'error' | 'lifecycle';
   tool: string | null;
   summary: string | null;
   reasoning: string | null;
@@ -74,6 +76,7 @@ export interface PullRequestRow {
   repo: string;
   pr_number: number;
   head_sha: string;
+  correlation_id: string | null;
   profile_id: string;
   opened_at: number;
   state: string;
@@ -97,7 +100,7 @@ export interface AcceptanceStats {
 /** Minimal shape required to record a newly opened pull request. */
 export type NewPullRequestRow = Pick<
   PullRequestRow,
-  'session_key' | 'team_id' | 'repo' | 'pr_number' | 'head_sha' | 'profile_id' | 'opened_at'
+  'session_key' | 'team_id' | 'repo' | 'pr_number' | 'head_sha' | 'correlation_id' | 'profile_id' | 'opened_at'
 >;
 
 interface PullRequestStateCountRow {
@@ -205,7 +208,7 @@ export class SqliteSessionStore implements SessionStore {
     number | null,
   ]>;
   private readonly stmtRecordPullRequest: Database.Statement<
-    [string, string | null, string, number, string, string, number]
+    [string, string | null, string, number, string, string | null, string, number]
   >;
   private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
   private readonly stmtListOpenPullRequests: Database.Statement<[], PullRequestRow>;
@@ -285,11 +288,11 @@ export class SqliteSessionStore implements SessionStore {
     );
 
     this.stmtRecordPullRequest = this.db.prepare<
-      [string, string | null, string, number, string, string, number]
+      [string, string | null, string, number, string, string | null, string, number]
     >(`
       INSERT INTO pull_requests
-        (session_key, team_id, repo, pr_number, head_sha, profile_id, opened_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        (session_key, team_id, repo, pr_number, head_sha, correlation_id, profile_id, opened_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     this.stmtListOpenPullRequests = this.db.prepare<[], PullRequestRow>(
@@ -362,6 +365,11 @@ export class SqliteSessionStore implements SessionStore {
     return rows.map((r) => r.name);
   }
 
+  private pullRequestColumns(): string[] {
+    const rows = this.db.pragma('table_info(pull_requests)') as Array<{ name: string }>;
+    return rows.map((r) => r.name);
+  }
+
   private createSchema(): void {
     // sessions table + its indexes — unchanged from before this slice.
     this.db.exec(`
@@ -431,6 +439,8 @@ export class SqliteSessionStore implements SessionStore {
       CREATE INDEX IF NOT EXISTS audit_by_ts      ON audit_events (ts);
     `);
 
+    const pullRequestCols = this.pullRequestColumns();
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pull_requests (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -439,6 +449,7 @@ export class SqliteSessionStore implements SessionStore {
         repo           TEXT    NOT NULL,
         pr_number      INTEGER NOT NULL,
         head_sha       TEXT    NOT NULL,
+        correlation_id TEXT,
         profile_id     TEXT    NOT NULL,
         opened_at      INTEGER NOT NULL,
         state          TEXT    NOT NULL DEFAULT 'open',
@@ -448,6 +459,10 @@ export class SqliteSessionStore implements SessionStore {
 
       CREATE INDEX IF NOT EXISTS pr_by_state ON pull_requests (state);
     `);
+
+    if (pullRequestCols.includes('session_key') && !pullRequestCols.includes('correlation_id')) {
+      this.db.exec('ALTER TABLE pull_requests ADD COLUMN correlation_id TEXT');
+    }
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS exec_opt_ins (
@@ -514,6 +529,7 @@ export class SqliteSessionStore implements SessionStore {
       row.repo,
       row.pr_number,
       row.head_sha,
+      row.correlation_id,
       row.profile_id,
       row.opened_at,
     );

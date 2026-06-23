@@ -162,6 +162,7 @@ async function main(): Promise<void> {
     ...(prStateReader !== undefined && { prStateReader }),
     spendCaps: config.spendCaps,
     buildRunnerFactory: factory,
+    decisionCapture: config.decisionCapture,
   });
 
   await app.start();

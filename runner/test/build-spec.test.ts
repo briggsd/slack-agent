@@ -134,8 +134,9 @@ describe('runBuildSpec', () => {
     expect(result).toContain('read changed files');
     expect(result).toContain('run_checks');
     expect(result).toContain('publish or open_pr');
+    expect(result).toContain('report_verification');
     expect(result).toContain('Publish only after');
-    expect(result).toContain('report honestly');
+    expect(result).toContain('what is missing or risky');
     expect(result).not.toContain('Opened PR');
     expect(result).not.toContain('offer next steps');
     expect(submit.calls).toHaveLength(1);
