@@ -60,7 +60,7 @@ export interface AuditEvent {
   user_id: string | null;
   profile_id: string | null;
   ts: number;
-  kind: 'action' | 'approval' | 'correction' | 'cost' | 'decision' | 'error' | 'lifecycle' | 'timing';
+  kind: 'action' | 'approval' | 'comprehension' | 'correction' | 'cost' | 'decision' | 'error' | 'lifecycle' | 'timing';
   tool: string | null;
   summary: string | null;
   reasoning: string | null;
@@ -68,6 +68,22 @@ export interface AuditEvent {
   cost_tokens: number | null;
   cost_micro_usd: number | null;
   durations_ms: string | null;
+  graded_audit_id: number | null;
+}
+
+export interface DecisionToGrade {
+  id: number;
+  session_key: string;
+  team_id: string | null;
+  profile_id: string | null;
+  tool: string | null;
+  result: string | null;
+  reasoning: string;
+}
+
+export interface ListDecisionsToGradeOptions {
+  sinceMs?: number;
+  limit?: number;
 }
 
 export interface PullRequestRow {
@@ -122,6 +138,8 @@ export interface SessionStore {
   recordAudit(event: AuditEvent): void;
   /** Record a newly opened PR for later reconciliation. */
   recordPullRequest(row: NewPullRequestRow): void;
+  /** Ungraded decision rows with captured reasoning, oldest first. */
+  listDecisionsToGrade(opts: ListDecisionsToGradeOptions): DecisionToGrade[];
   /**
    * Read back audit rows for a session key. Test/diagnostic helper only — it is NOT
    * tenancy-scoped (no team_id filter). Add a mandatory team scope (WHERE session_key =
@@ -208,11 +226,13 @@ export class SqliteSessionStore implements SessionStore {
     number | null,
     number | null,
     string | null,
+    number | null,
   ]>;
   private readonly stmtRecordPullRequest: Database.Statement<
     [string, string | null, string, number, string, string | null, string, number]
   >;
   private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
+  private readonly stmtListDecisionsToGrade: Database.Statement<[number, number], DecisionToGrade>;
   private readonly stmtListOpenPullRequests: Database.Statement<[], PullRequestRow>;
   private readonly stmtResolvePullRequest: Database.Statement<[string, number, number, number]>;
   private readonly stmtTouchPullRequestPolled: Database.Statement<[number, number]>;
@@ -280,15 +300,33 @@ export class SqliteSessionStore implements SessionStore {
       number | null,
       number | null,
       string | null,
+      number | null,
     ]>(`
       INSERT INTO audit_events
-        (session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd, durations_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd, durations_ms, graded_audit_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     this.stmtGetAudit = this.db.prepare<[string], AuditEvent>(
-      'SELECT session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd, durations_ms FROM audit_events WHERE session_key = ? ORDER BY id',
+      'SELECT session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd, durations_ms, graded_audit_id FROM audit_events WHERE session_key = ? ORDER BY id',
     );
+
+    // One statement defines the idempotency predicate in exactly one place. The two
+    // bind params are sentinels for the optional bounds: a `0` lower bound matches
+    // every real row (ts is always > 0), and a `-1` limit is SQLite's "unbounded".
+    this.stmtListDecisionsToGrade = this.db.prepare<[number, number], DecisionToGrade>(`
+      SELECT d.id, d.session_key, d.team_id, d.profile_id, d.tool, d.result, d.reasoning
+      FROM audit_events d
+      WHERE d.kind = 'decision'
+        AND d.reasoning IS NOT NULL
+        AND d.ts >= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM audit_events c
+          WHERE c.kind = 'comprehension' AND c.graded_audit_id = d.id
+        )
+      ORDER BY d.id
+      LIMIT ?
+    `);
 
     this.stmtRecordPullRequest = this.db.prepare<
       [string, string | null, string, number, string, string | null, string, number]
@@ -424,7 +462,8 @@ export class SqliteSessionStore implements SessionStore {
         result         TEXT,
         cost_tokens    INTEGER,
         cost_micro_usd INTEGER,
-        durations_ms   TEXT
+        durations_ms   TEXT,
+        graded_audit_id INTEGER
       );
     `);
 
@@ -438,12 +477,16 @@ export class SqliteSessionStore implements SessionStore {
     if (auditCols.includes('session_key') && !auditCols.includes('durations_ms')) {
       this.db.exec('ALTER TABLE audit_events ADD COLUMN durations_ms TEXT');
     }
+    if (auditCols.includes('session_key') && !auditCols.includes('graded_audit_id')) {
+      this.db.exec('ALTER TABLE audit_events ADD COLUMN graded_audit_id INTEGER');
+    }
 
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS audit_by_session ON audit_events (session_key);
       CREATE INDEX IF NOT EXISTS audit_by_team    ON audit_events (team_id);
       CREATE INDEX IF NOT EXISTS audit_by_user_ts ON audit_events (user_id, ts);
       CREATE INDEX IF NOT EXISTS audit_by_ts      ON audit_events (ts);
+      CREATE INDEX IF NOT EXISTS audit_by_graded_audit_id ON audit_events (graded_audit_id);
     `);
 
     const pullRequestCols = this.pullRequestColumns();
@@ -523,7 +566,13 @@ export class SqliteSessionStore implements SessionStore {
       event.cost_tokens,
       event.cost_micro_usd,
       event.durations_ms,
+      event.graded_audit_id,
     );
+  }
+
+  listDecisionsToGrade(opts: ListDecisionsToGradeOptions): DecisionToGrade[] {
+    // 0 = no lower bound (every real ts > 0); -1 = no LIMIT (SQLite unbounded).
+    return this.stmtListDecisionsToGrade.all(opts.sinceMs ?? 0, opts.limit ?? -1);
   }
 
   getAuditEvents(sessionKey: string): AuditEvent[] {
@@ -654,6 +703,7 @@ export class NoopSessionStore implements SessionStore {
   get(_key: string): SessionRow | undefined { return undefined; }
   recordAudit(_event: AuditEvent): void { /* no-op */ }
   recordPullRequest(_row: NewPullRequestRow): void { /* no-op */ }
+  listDecisionsToGrade(_opts: ListDecisionsToGradeOptions): DecisionToGrade[] { return []; }
   getAuditEvents(_sessionKey: string): AuditEvent[] { return []; }
   listOpenPullRequests(): PullRequestRow[] { return []; }
   resolvePullRequest(_id: number, _state: PullRequestTerminalState, _resolvedAtMs: number): void { /* no-op */ }

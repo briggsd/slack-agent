@@ -495,7 +495,8 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
         cost_tokens: null,
         cost_micro_usd: 5_000_000,
         durations_ms: null,
-      });
+      graded_audit_id: null,
+});
 
       releaseRouter();
       await enqueue;
