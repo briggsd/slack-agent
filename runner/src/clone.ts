@@ -11,6 +11,7 @@
  */
 
 import type { CloneResultMessage } from './protocol.js';
+import { RequestCoordinator } from './request-coordinator.js';
 
 /** The outcome of a clone, as the tool sees it. */
 export type CloneOutcome =
@@ -21,25 +22,25 @@ export type CloneOutcome =
 export type EmitRequestCloneFn = (repo: string, id: string) => void;
 
 export class CloneCoordinator {
-  private readonly pending = new Map<string, (outcome: CloneOutcome) => void>();
-  private seq = 0;
-  private drained = false;
+  private readonly base: RequestCoordinator<string, CloneResultMessage, CloneOutcome>;
 
-  constructor(private readonly emitRequest: EmitRequestCloneFn) {}
+  constructor(emitRequest: EmitRequestCloneFn) {
+    this.base = new RequestCoordinator(
+      'clone',
+      emitRequest,
+      (msg) => msg.ok
+        ? { ok: true, workdir: msg.workdir ?? '/workspace' }
+        : { ok: false, error: msg.error ?? 'clone failed' },
+      { ok: false, error: 'shutting down' },
+    );
+  }
 
   /**
    * Request a clone: emit `request_clone` and resolve when the matching result arrives.
    * Once drained (stdin closed), resolves immediately as a failure.
    */
   requestClone(repo: string): Promise<CloneOutcome> {
-    if (this.drained) {
-      return Promise.resolve({ ok: false, error: 'shutting down' });
-    }
-    const id = `clone-${++this.seq}`;
-    return new Promise<CloneOutcome>((resolve) => {
-      this.pending.set(id, resolve);
-      this.emitRequest(repo, id);
-    });
+    return this.base.request(repo);
   }
 
   /**
@@ -47,24 +48,13 @@ export class CloneCoordinator {
    * matched a pending request, false for an unknown or already-settled id.
    */
   handleResult(msg: CloneResultMessage): boolean {
-    const resolve = this.pending.get(msg.id);
-    if (resolve === undefined) return false;
-    this.pending.delete(msg.id);
-    const outcome: CloneOutcome = msg.ok
-      ? { ok: true, workdir: msg.workdir ?? '/workspace' }
-      : { ok: false, error: msg.error ?? 'clone failed' };
-    resolve(outcome);
-    return true;
+    return this.base.handleResult(msg);
   }
 
   /**
    * Resolve every still-pending clone as failed. Called when stdin closes.
    */
   failAllPending(): void {
-    this.drained = true;
-    for (const [id, resolve] of this.pending) {
-      this.pending.delete(id);
-      resolve({ ok: false, error: 'shutting down' });
-    }
+    this.base.failAllPending();
   }
 }

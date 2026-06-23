@@ -7,6 +7,7 @@
  */
 
 import type { ProvisionResultMessage } from './protocol.js';
+import { RequestCoordinator } from './request-coordinator.js';
 
 export type ProvisionOutcome =
   | { ok: true }
@@ -20,39 +21,28 @@ export interface ProvisionInput {
 export type EmitRequestProvisionFn = (input: ProvisionInput, id: string) => void;
 
 export class ProvisionCoordinator {
-  private readonly pending = new Map<string, (outcome: ProvisionOutcome) => void>();
-  private seq = 0;
-  private drained = false;
+  private readonly base: RequestCoordinator<ProvisionInput, ProvisionResultMessage, ProvisionOutcome>;
 
-  constructor(private readonly emitRequest: EmitRequestProvisionFn) {}
+  constructor(emitRequest: EmitRequestProvisionFn) {
+    this.base = new RequestCoordinator(
+      'provision',
+      emitRequest,
+      (msg) => msg.ok
+        ? { ok: true }
+        : { ok: false, error: msg.error ?? 'runtime provision failed' },
+      { ok: false, error: 'shutting down' },
+    );
+  }
 
   requestProvision(input: ProvisionInput): Promise<ProvisionOutcome> {
-    if (this.drained) {
-      return Promise.resolve({ ok: false, error: 'shutting down' });
-    }
-    const id = `provision-${++this.seq}`;
-    return new Promise<ProvisionOutcome>((resolve) => {
-      this.pending.set(id, resolve);
-      this.emitRequest(input, id);
-    });
+    return this.base.request(input);
   }
 
   handleResult(msg: ProvisionResultMessage): boolean {
-    const resolve = this.pending.get(msg.id);
-    if (resolve === undefined) return false;
-    this.pending.delete(msg.id);
-    const outcome: ProvisionOutcome = msg.ok
-      ? { ok: true }
-      : { ok: false, error: msg.error ?? 'runtime provision failed' };
-    resolve(outcome);
-    return true;
+    return this.base.handleResult(msg);
   }
 
   failAllPending(): void {
-    this.drained = true;
-    for (const [id, resolve] of this.pending) {
-      this.pending.delete(id);
-      resolve({ ok: false, error: 'shutting down' });
-    }
+    this.base.failAllPending();
   }
 }
