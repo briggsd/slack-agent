@@ -1506,6 +1506,43 @@ describe('SessionManager — audit emission', () => {
     });
   });
 
+  it('caps an oversized container-originated rationale at the ledger write (defense-in-depth)', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const huge = 'x'.repeat(20_000);
+    const factory: RunnerFactory = {
+      create: async (key) =>
+        new DecisionRunner(key, [{
+          type: 'decision',
+          point: 'verify',
+          verdict: 'pass',
+          rationale: huge,
+          correlationId: 'build-huge',
+        }]),
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      decisionCapture: true,
+    });
+
+    await manager.enqueueNew('TEAM:C:DECISION:BIG', {
+      message: 'verify this',
+      channel: 'C',
+      threadTs: 'DECISION:BIG',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const decisions = store.audits.filter((a) => a.kind === 'decision');
+    expect(decisions).toHaveLength(1);
+    // Bounded (not the full 20k), but generous enough to preserve a real rationale.
+    expect(decisions[0]?.reasoning).toHaveLength(8192);
+  });
+
   it('records a joinable verification decision and PR row via correlation id', async () => {
     const slack = new FakeSlackClient();
     const store = new CapturingStore();

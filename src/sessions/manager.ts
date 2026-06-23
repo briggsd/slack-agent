@@ -32,6 +32,14 @@ type DriveOutcome =
 /** Cap on an audit `summary` — metadata only, never a transcript (see {@link SessionManager.audit}). */
 const AUDIT_SUMMARY_MAX_CHARS = 512;
 
+/**
+ * Cap on an audit `reasoning` — the opt-in decision-rationale path. Far larger than
+ * `summary` (rationale is a deliberate prose trajectory, not metadata) but still bounded:
+ * the value is container-originated free text, so a misbehaving/injected agent must not be
+ * able to amplify unbounded writes into the ledger. Defense-in-depth at the write seam.
+ */
+const AUDIT_REASONING_MAX_CHARS = 8192;
+
 export interface QueueItem {
   message: string;
   channel: string;
@@ -1278,11 +1286,15 @@ export class SessionManager {
       typeof partial.summary === 'string'
         ? partial.summary.slice(0, AUDIT_SUMMARY_MAX_CHARS)
         : partial.summary ?? null;
+    const reasoning =
+      typeof partial.reasoning === 'string'
+        ? partial.reasoning.slice(0, AUDIT_REASONING_MAX_CHARS)
+        : partial.reasoning ?? null;
     const event: AuditEvent = {
       ...partial,
       ts: Date.now(),
       summary,
-      reasoning: partial.reasoning ?? null,
+      reasoning,
       cost_tokens: partial.cost_tokens ?? null,
       cost_micro_usd: partial.cost_micro_usd ?? null,
     };
