@@ -21,7 +21,8 @@ needs a credential or host reach is gateway-serviced. A tool that only touches f
 `/workspace` belongs to the SDK and needs no wiring from us.
 
 The current gateway-serviced tools: `clone_repo`, `build_spec`, `exec`, `run_checks`,
-`provision_runtime`, `publish` (aliased as `open_pr`), `edit_pr`, and `comment_pr`. There
+`provision_runtime`, `publish` (aliased as `open_pr`), `edit_pr`, `comment_pr`, and
+`read_issue`. There
 is also `report_verification`, which is one-way (it records a decision and expects no
 answer; see `kind:'decision'` in the audit ledger).
 
