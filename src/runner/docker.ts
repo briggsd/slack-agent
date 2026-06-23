@@ -22,21 +22,14 @@ import type {
   VolumeReaper,
   BuildOutcome,
   ExecOutcome,
+  GateResume,
 } from './types.js';
 import type { Profile } from '../profiles/registry.js';
 import type {
   RunnerToGatewayMessage,
   GatewayToRunnerMessage,
   ApprovalVerdictMessage,
-  CloneResultMessage,
-  RequestCloneMessage,
-  RequestBuildMessage,
   ExecResultMessage,
-  PublishResultMessage,
-  PrEditResultMessage,
-  PrCommentResultMessage,
-  RunChecksResultMessage,
-  ProvisionResultMessage,
 } from './protocol.js';
 import type { CloneService } from './clone-service.js';
 import type { CloneOutcome } from './clone-service.js';
@@ -212,6 +205,55 @@ export class DockerRunner implements SessionRunner {
 
   private errorEvent(message: string, reason: ErrorReason): RunnerEvent {
     return { type: 'error', message, reason };
+  }
+
+  private async *serviceDispatch<TReq, TOutcome>(
+    parsed: RunnerToGatewayMessage,
+    spec: {
+      /** e.g. 'request_pr_edit' — used only for the id-missing log line. */
+      requestType: string;
+      /** Validate the line and build the service DTO, or return null if malformed. */
+      validate: (p: RunnerToGatewayMessage) => TReq | null;
+      /** User-facing progress line, yielded before the service call. */
+      statusText: (req: TReq) => string;
+      /** Perform the privileged work. MUST itself return the unavailable outcome when the
+       *  service (or volume) is not wired — availability is handled here, not by the helper. */
+      invoke: (req: TReq) => Promise<TOutcome>;
+      /** Build the *_result line for a completed outcome. */
+      toResult: (id: string, outcome: TOutcome) => GatewayToRunnerMessage;
+      /** Build the malformed-request fallback *_result line. */
+      malformedResult: (id: string) => GatewayToRunnerMessage;
+      /** Optional success event (pr_opened/pr_edited/pr_commented). elapsedMs is the
+       *  measured service wall-clock. Return null for no event. */
+      toEvent?: (outcome: TOutcome, elapsedMs: number) => RunnerEvent | null;
+    },
+  ): AsyncGenerator<RunnerEvent, 'ok' | 'fatal', GateResume | BuildOutcome | ExecOutcome | undefined> {
+    const id = (parsed as { id?: unknown }).id;
+    if (typeof id !== 'string') {
+      console.error(`[gateway] malformed ${spec.requestType}: missing id — skipping`);
+      return 'ok';
+    }
+    const req = spec.validate(parsed);
+    if (req === null) {
+      if (this.child.stdin?.writable) {
+        this.child.stdin.write(JSON.stringify(spec.malformedResult(id)) + '\n');
+      }
+      return 'ok';
+    }
+    yield { type: 'status', text: spec.statusText(req) } as RunnerEvent;
+    const start = this.now();
+    const outcome = await spec.invoke(req);
+    const elapsedMs = this.now() - start;
+    if (!this.child.stdin?.writable) {
+      yield this.errorEvent('runner stdin is not writable', 'runner_error');
+      return 'fatal';
+    }
+    this.child.stdin.write(JSON.stringify(spec.toResult(id, outcome)) + '\n');
+    const event = spec.toEvent?.(outcome, elapsedMs);
+    if (event !== null && event !== undefined) {
+      yield event;
+    }
+    return 'ok';
   }
 
   private unexpectedExitMessage(): string {
@@ -462,46 +504,24 @@ export class DockerRunner implements SessionRunner {
             // Validate the line as data; service it inline — no human hop. The clone is bounded by
             // the git node's own clone timeout (docker-git-node.ts), so this await cannot hang the
             // turn even though it sits outside the nextLineWithTimeout race.
-            if (typeof parsed.id !== 'string') {
-              // No usable id — can't correlate
-              console.error('[gateway] malformed request_clone: missing id — skipping');
-              continue;
-            }
-            const cloneId = parsed.id;
-            if (typeof parsed.repo !== 'string') {
-              // Have an id but malformed — unblock the parked tool
-              const fallback: GatewayToRunnerMessage = {
-                type: 'clone_result',
-                id: cloneId,
-                ok: false,
-                error: 'malformed request',
-              };
-              if (self.child.stdin?.writable) {
-                self.child.stdin.write(JSON.stringify(fallback) + '\n');
-              }
-              continue;
-            }
-            const cloneRepo = parsed.repo;
-            // User-visible progress
-            yield { type: 'status', text: `cloning ${cloneRepo}…` } as RunnerEvent;
-
-            // Service the clone (or return unavailable if no service is wired)
-            let cloneOutcome: CloneOutcome;
-            if (self.cloneService !== undefined && self.volume !== undefined) {
-              cloneOutcome = await self.cloneService.clone({ repo: cloneRepo, volume: self.volume });
-            } else {
-              cloneOutcome = { ok: false, error: 'clone unavailable' };
-            }
-
-            // Write the result back to the container
-            if (!self.child.stdin?.writable) {
-              yield self.errorEvent('runner stdin is not writable', 'runner_error');
-              return;
-            }
-            const cloneResult: GatewayToRunnerMessage = cloneOutcome.ok
-              ? { type: 'clone_result', id: cloneId, ok: true, workdir: cloneOutcome.workdir }
-              : { type: 'clone_result', id: cloneId, ok: false, error: cloneOutcome.error };
-            self.child.stdin.write(JSON.stringify(cloneResult) + '\n');
+            const cloneVerdict = yield* self.serviceDispatch<{ repo: string }, CloneOutcome>(parsed, {
+              requestType: 'request_clone',
+              validate: (p) => {
+                const u = p as { repo?: unknown };
+                if (typeof u.repo !== 'string') return null;
+                return { repo: u.repo };
+              },
+              statusText: (req) => `cloning ${req.repo}…`,
+              invoke: (req) =>
+                self.cloneService !== undefined && self.volume !== undefined
+                  ? self.cloneService.clone({ repo: req.repo, volume: self.volume })
+                  : Promise.resolve({ ok: false, error: 'clone unavailable' } as CloneOutcome),
+              toResult: (id, outcome) => outcome.ok
+                ? { type: 'clone_result', id, ok: true, workdir: outcome.workdir }
+                : { type: 'clone_result', id, ok: false, error: outcome.error },
+              malformedResult: (id) => ({ type: 'clone_result', id, ok: false, error: 'malformed request' }),
+            });
+            if (cloneVerdict === 'fatal') return;
             // The clone is gateway-side work (lease + ephemeral git container), not the agent's —
             // give the post-clone continuation a fresh turn budget rather than charging it the
             // clone's wall-clock, the same reasoning the approval branch resets `deadline`.
@@ -590,227 +610,147 @@ export class DockerRunner implements SessionRunner {
             // The container requested publication of a verified local candidate. Validate the
             // line as data; service it inline via the credentialed gateway seam. The PR body and
             // title are passed as data to the service and must never be logged here.
-            if (typeof parsed.id !== 'string') {
-              console.error('[gateway] malformed request_publish: missing id — skipping');
-              continue;
-            }
-            const publishId = parsed.id;
-            const title = (parsed as { title?: unknown }).title;
-            const body = (parsed as { body?: unknown }).body;
-            const correlationId = (parsed as { correlationId?: unknown }).correlationId;
-            if (
-              typeof parsed.repo !== 'string' ||
-              (title !== undefined && typeof title !== 'string') ||
-              (body !== undefined && typeof body !== 'string') ||
-              (correlationId !== undefined && typeof correlationId !== 'string')
-            ) {
-              const fallback: GatewayToRunnerMessage = {
-                type: 'publish_result',
-                id: publishId,
-                ok: false,
-                reason: 'malformed request',
-              };
-              if (self.child.stdin?.writable) {
-                self.child.stdin.write(JSON.stringify(fallback) + '\n');
-              }
-              continue;
-            }
-            const publishReq: PublishServiceRequest = {
-              repo: parsed.repo,
-              volume: self.volume ?? '',
-              ...(title !== undefined ? { title } : {}),
-              ...(body !== undefined ? { body } : {}),
-            };
-            yield { type: 'status', text: `publishing ${publishReq.repo}…` } as RunnerEvent;
-
-            let publishOutcome: PublishOutcome;
-            let publishElapsedMs = 0;
-            if (self.publishService !== undefined && self.volume !== undefined) {
-              const publishStart = self.now();
-              publishOutcome = await self.publishService.publish(publishReq);
-              publishElapsedMs = self.now() - publishStart;
-            } else {
-              publishOutcome = { ok: false, reason: 'publish unavailable' };
-            }
-
-            if (!self.child.stdin?.writable) {
-              yield self.errorEvent('runner stdin is not writable', 'runner_error');
-              return;
-            }
-            const publishResult: PublishResultMessage = publishOutcome.ok
-              ? { type: 'publish_result', id: publishId, ok: true, prUrl: publishOutcome.prUrl }
-              : { type: 'publish_result', id: publishId, ok: false, reason: publishOutcome.reason };
-            self.child.stdin.write(JSON.stringify(publishResult satisfies GatewayToRunnerMessage) + '\n');
-            if (publishOutcome.ok) {
-              yield {
-                type: 'pr_opened',
-                url: publishOutcome.prUrl,
-                repo: publishReq.repo,
-                number: publishOutcome.prNumber,
-                headSha: publishOutcome.headSha,
-                elapsedMs: publishElapsedMs,
-                ...(correlationId !== undefined ? { correlationId } : {}),
-              } as RunnerEvent;
-            }
+            const publishCorrelationId = (parsed as { correlationId?: unknown }).correlationId;
+            // Capture repo for use in toEvent (repo lives on the request, not the outcome).
+            let publishRepo = '';
+            const publishVerdict = yield* self.serviceDispatch<PublishServiceRequest, PublishOutcome>(parsed, {
+              requestType: 'request_publish',
+              validate: (p) => {
+                const u = p as { repo?: unknown; title?: unknown; body?: unknown; correlationId?: unknown };
+                const t = u.title;
+                const b = u.body;
+                const c = u.correlationId;
+                if (
+                  typeof u.repo !== 'string' ||
+                  (t !== undefined && typeof t !== 'string') ||
+                  (b !== undefined && typeof b !== 'string') ||
+                  (c !== undefined && typeof c !== 'string')
+                ) return null;
+                publishRepo = u.repo;
+                return {
+                  repo: u.repo,
+                  volume: self.volume ?? '',
+                  ...(typeof t === 'string' ? { title: t } : {}),
+                  ...(typeof b === 'string' ? { body: b } : {}),
+                };
+              },
+              statusText: (req) => `publishing ${req.repo}…`,
+              invoke: (req) =>
+                self.publishService !== undefined && self.volume !== undefined
+                  ? self.publishService.publish(req)
+                  : Promise.resolve({ ok: false, reason: 'publish unavailable' } as PublishOutcome),
+              toResult: (id, outcome) => outcome.ok
+                ? { type: 'publish_result', id, ok: true, prUrl: outcome.prUrl }
+                : { type: 'publish_result', id, ok: false, reason: outcome.reason },
+              malformedResult: (id) => ({ type: 'publish_result', id, ok: false, reason: 'malformed request' }),
+              toEvent: (outcome, elapsedMs) => outcome.ok
+                ? ({
+                    type: 'pr_opened',
+                    url: outcome.prUrl,
+                    repo: publishRepo,
+                    number: outcome.prNumber,
+                    headSha: outcome.headSha,
+                    elapsedMs,
+                    ...(typeof publishCorrelationId === 'string' ? { correlationId: publishCorrelationId } : {}),
+                  } as RunnerEvent)
+                : null,
+            });
+            if (publishVerdict === 'fatal') return;
             // Publishing is gateway-side work (lease + push + PR), not the agent's — give the
             // post-publish continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_pr_edit') {
-            if (typeof parsed.id !== 'string') {
-              console.error('[gateway] malformed request_pr_edit: missing id — skipping');
-              continue;
-            }
-            const editId = parsed.id;
-            const title = (parsed as { title?: unknown }).title;
-            const body = (parsed as { body?: unknown }).body;
-            if (
-              typeof parsed.repo !== 'string' ||
-              (title !== undefined && typeof title !== 'string') ||
-              (body !== undefined && typeof body !== 'string')
-            ) {
-              const fallback: GatewayToRunnerMessage = {
-                type: 'pr_edit_result',
-                id: editId,
-                ok: false,
-                reason: 'malformed request',
-              };
-              if (self.child.stdin?.writable) {
-                self.child.stdin.write(JSON.stringify(fallback) + '\n');
-              }
-              continue;
-            }
-            const editReq: PrEditServiceRequest = {
-              repo: parsed.repo,
-              volume: self.volume ?? '',
-              ...(title !== undefined ? { title } : {}),
-              ...(body !== undefined ? { body } : {}),
-            };
-            yield { type: 'status', text: `editing PR for ${editReq.repo}…` } as RunnerEvent;
-
-            let editOutcome: PrEditOutcome;
-            let editElapsedMs = 0;
-            if (self.publishService !== undefined && self.volume !== undefined) {
-              const editStart = self.now();
-              editOutcome = await self.publishService.editPr(editReq);
-              editElapsedMs = self.now() - editStart;
-            } else {
-              editOutcome = { ok: false, reason: 'edit unavailable' };
-            }
-
-            if (!self.child.stdin?.writable) {
-              yield self.errorEvent('runner stdin is not writable', 'runner_error');
-              return;
-            }
-            const editResult: PrEditResultMessage = editOutcome.ok
-              ? { type: 'pr_edit_result', id: editId, ok: true }
-              : { type: 'pr_edit_result', id: editId, ok: false, reason: editOutcome.reason };
-            self.child.stdin.write(JSON.stringify(editResult satisfies GatewayToRunnerMessage) + '\n');
-            if (editOutcome.ok) {
-              yield { type: 'pr_edited', url: editOutcome.prUrl, elapsedMs: editElapsedMs } as RunnerEvent;
-            }
+            const editVerdict = yield* self.serviceDispatch<PrEditServiceRequest, PrEditOutcome>(parsed, {
+              requestType: 'request_pr_edit',
+              validate: (p) => {
+                const u = p as { repo?: unknown; title?: unknown; body?: unknown };
+                const t = u.title;
+                const b = u.body;
+                if (
+                  typeof u.repo !== 'string' ||
+                  (t !== undefined && typeof t !== 'string') ||
+                  (b !== undefined && typeof b !== 'string')
+                ) return null;
+                return {
+                  repo: u.repo,
+                  volume: self.volume ?? '',
+                  ...(typeof t === 'string' ? { title: t } : {}),
+                  ...(typeof b === 'string' ? { body: b } : {}),
+                };
+              },
+              statusText: (req) => `editing PR for ${req.repo}…`,
+              invoke: (req) =>
+                self.publishService !== undefined && self.volume !== undefined
+                  ? self.publishService.editPr(req)
+                  : Promise.resolve({ ok: false, reason: 'edit unavailable' } as PrEditOutcome),
+              toResult: (id, outcome) => outcome.ok
+                ? { type: 'pr_edit_result', id, ok: true }
+                : { type: 'pr_edit_result', id, ok: false, reason: outcome.reason },
+              malformedResult: (id) => ({ type: 'pr_edit_result', id, ok: false, reason: 'malformed request' }),
+              toEvent: (outcome, elapsedMs) => outcome.ok
+                ? ({ type: 'pr_edited', url: outcome.prUrl, elapsedMs } as RunnerEvent)
+                : null,
+            });
+            if (editVerdict === 'fatal') return;
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_pr_comment') {
-            if (typeof parsed.id !== 'string') {
-              console.error('[gateway] malformed request_pr_comment: missing id — skipping');
-              continue;
-            }
-            const commentId = parsed.id;
-            if (
-              typeof parsed.repo !== 'string' ||
-              typeof (parsed as { comment?: unknown }).comment !== 'string' ||
-              (parsed as { comment: string }).comment.trim() === ''
-            ) {
-              const fallback: GatewayToRunnerMessage = {
-                type: 'pr_comment_result',
-                id: commentId,
-                ok: false,
-                reason: 'malformed request',
-              };
-              if (self.child.stdin?.writable) {
-                self.child.stdin.write(JSON.stringify(fallback) + '\n');
-              }
-              continue;
-            }
-            const commentReq: PrCommentServiceRequest = {
-              repo: parsed.repo,
-              volume: self.volume ?? '',
-              comment: (parsed as { comment: string }).comment,
-            };
-            yield { type: 'status', text: `commenting on PR for ${commentReq.repo}…` } as RunnerEvent;
-
-            let commentOutcome: PrCommentOutcome;
-            let commentElapsedMs = 0;
-            if (self.publishService !== undefined && self.volume !== undefined) {
-              const commentStart = self.now();
-              commentOutcome = await self.publishService.commentPr(commentReq);
-              commentElapsedMs = self.now() - commentStart;
-            } else {
-              commentOutcome = { ok: false, reason: 'comment unavailable' };
-            }
-
-            if (!self.child.stdin?.writable) {
-              yield self.errorEvent('runner stdin is not writable', 'runner_error');
-              return;
-            }
-            const commentResult: PrCommentResultMessage = commentOutcome.ok
-              ? { type: 'pr_comment_result', id: commentId, ok: true }
-              : { type: 'pr_comment_result', id: commentId, ok: false, reason: commentOutcome.reason };
-            self.child.stdin.write(JSON.stringify(commentResult satisfies GatewayToRunnerMessage) + '\n');
-            if (commentOutcome.ok) {
-              yield { type: 'pr_commented', url: commentOutcome.prUrl, elapsedMs: commentElapsedMs } as RunnerEvent;
-            }
+            const commentVerdict = yield* self.serviceDispatch<PrCommentServiceRequest, PrCommentOutcome>(parsed, {
+              requestType: 'request_pr_comment',
+              validate: (p) => {
+                const u = p as { repo?: unknown; comment?: unknown };
+                const c = u.comment;
+                if (
+                  typeof u.repo !== 'string' ||
+                  typeof c !== 'string' ||
+                  c.trim() === ''
+                ) return null;
+                return { repo: u.repo, volume: self.volume ?? '', comment: c };
+              },
+              statusText: (req) => `commenting on PR for ${req.repo}…`,
+              invoke: (req) =>
+                self.publishService !== undefined && self.volume !== undefined
+                  ? self.publishService.commentPr(req)
+                  : Promise.resolve({ ok: false, reason: 'comment unavailable' } as PrCommentOutcome),
+              toResult: (id, outcome) => outcome.ok
+                ? { type: 'pr_comment_result', id, ok: true }
+                : { type: 'pr_comment_result', id, ok: false, reason: outcome.reason },
+              malformedResult: (id) => ({ type: 'pr_comment_result', id, ok: false, reason: 'malformed request' }),
+              toEvent: (outcome, elapsedMs) => outcome.ok
+                ? ({ type: 'pr_commented', url: outcome.prUrl, elapsedMs } as RunnerEvent)
+                : null,
+            });
+            if (commentVerdict === 'fatal') return;
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_run_checks') {
             // The container requested deterministic checks for a verified local candidate.
             // Validate the line as data; service it inline via the no-credential gateway seam.
-            if (typeof parsed.id !== 'string') {
-              console.error('[gateway] malformed request_run_checks: missing id — skipping');
-              continue;
-            }
-            const checksId = parsed.id;
-            const kind = (parsed as { kind?: unknown }).kind;
-            if (
-              typeof parsed.repo !== 'string' ||
-              !SAFE_OWNER_REPO_SLUG.test(parsed.repo) ||
-              (kind !== undefined && kind !== 'lint' && kind !== 'test' && kind !== 'all')
-            ) {
-              const fallback: GatewayToRunnerMessage = {
-                type: 'run_checks_result',
-                id: checksId,
-                ok: false,
-                reason: 'malformed request',
-              };
-              if (self.child.stdin?.writable) {
-                self.child.stdin.write(JSON.stringify(fallback) + '\n');
-              }
-              continue;
-            }
-            const checksKind: RunChecksKind = kind === undefined ? 'all' : kind;
-            const checksReq: CheckServiceRequest = {
-              repo: parsed.repo,
-              volume: self.volume ?? '',
-              kind: checksKind,
-            };
-            yield { type: 'status', text: `running checks for ${checksReq.repo}...` } as RunnerEvent;
-
-            let checksOutcome: CheckOutcome;
-            if (self.checkService !== undefined && self.volume !== undefined) {
-              checksOutcome = await self.checkService.runChecks(checksReq);
-            } else {
-              checksOutcome = { ok: false, reason: 'run_checks unavailable' };
-            }
-
-            if (!self.child.stdin?.writable) {
-              yield self.errorEvent('runner stdin is not writable', 'runner_error');
-              return;
-            }
-            const checksResult: RunChecksResultMessage = checksOutcome.ok
-              ? { type: 'run_checks_result', id: checksId, ok: true, results: checksOutcome.results }
-              : { type: 'run_checks_result', id: checksId, ok: false, reason: checksOutcome.reason };
-            self.child.stdin.write(JSON.stringify(checksResult satisfies GatewayToRunnerMessage) + '\n');
+            const checksVerdict = yield* self.serviceDispatch<CheckServiceRequest, CheckOutcome>(parsed, {
+              requestType: 'request_run_checks',
+              validate: (p) => {
+                const u = p as { repo?: unknown; kind?: unknown };
+                const kind = u.kind;
+                if (
+                  typeof u.repo !== 'string' ||
+                  !SAFE_OWNER_REPO_SLUG.test(u.repo) ||
+                  (kind !== undefined && kind !== 'lint' && kind !== 'test' && kind !== 'all')
+                ) return null;
+                const checksKind: RunChecksKind = kind === undefined ? 'all' : kind;
+                return { repo: u.repo, volume: self.volume ?? '', kind: checksKind };
+              },
+              statusText: (req) => `running checks for ${req.repo}...`,
+              invoke: (req) =>
+                self.checkService !== undefined && self.volume !== undefined
+                  ? self.checkService.runChecks(req)
+                  : Promise.resolve({ ok: false, reason: 'run_checks unavailable' } as CheckOutcome),
+              toResult: (id, outcome) => outcome.ok
+                ? { type: 'run_checks_result', id, ok: true, results: outcome.results }
+                : { type: 'run_checks_result', id, ok: false, reason: outcome.reason },
+              malformedResult: (id) => ({ type: 'run_checks_result', id, ok: false, reason: 'malformed request' }),
+            });
+            if (checksVerdict === 'fatal') return;
             // Checks are gateway-side work (ephemeral check container), not the agent's — give
             // the post-check continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
@@ -818,44 +758,24 @@ export class DockerRunner implements SessionRunner {
           } else if (parsed.type === 'request_provision') {
             // The container requested a pinned runtime be provisioned onto the session volume.
             // Validate as data; the catalog inside RuntimeProvisionService is the authorization gate.
-            if (typeof parsed.id !== 'string') {
-              console.error('[gateway] malformed request_provision: missing id — skipping');
-              continue;
-            }
-            const provisionId = parsed.id;
-            if (typeof parsed.name !== 'string') {
-              const fallback: GatewayToRunnerMessage = {
-                type: 'provision_result',
-                id: provisionId,
-                ok: false,
-                error: 'malformed request',
-              };
-              if (self.child.stdin?.writable) {
-                self.child.stdin.write(JSON.stringify(fallback) + '\n');
-              }
-              continue;
-            }
-            const provisionReq: RuntimeProvisionRequest = {
-              name: parsed.name,
-              volume: self.volume ?? '',
-            };
-            yield { type: 'status', text: `provisioning runtime ${provisionReq.name}...` } as RunnerEvent;
-
-            let provisionOutcome: ProvisionOutcome;
-            if (self.runtimeProvisionService !== undefined && self.volume !== undefined) {
-              provisionOutcome = await self.runtimeProvisionService.provision(provisionReq);
-            } else {
-              provisionOutcome = { ok: false, error: 'runtime provision unavailable' };
-            }
-
-            if (!self.child.stdin?.writable) {
-              yield self.errorEvent('runner stdin is not writable', 'runner_error');
-              return;
-            }
-            const provisionResult: ProvisionResultMessage = provisionOutcome.ok
-              ? { type: 'provision_result', id: provisionId, ok: true }
-              : { type: 'provision_result', id: provisionId, ok: false, error: provisionOutcome.error };
-            self.child.stdin.write(JSON.stringify(provisionResult satisfies GatewayToRunnerMessage) + '\n');
+            const provisionVerdict = yield* self.serviceDispatch<RuntimeProvisionRequest, ProvisionOutcome>(parsed, {
+              requestType: 'request_provision',
+              validate: (p) => {
+                const u = p as { name?: unknown };
+                if (typeof u.name !== 'string') return null;
+                return { name: u.name, volume: self.volume ?? '' };
+              },
+              statusText: (req) => `provisioning runtime ${req.name}...`,
+              invoke: (req) =>
+                self.runtimeProvisionService !== undefined && self.volume !== undefined
+                  ? self.runtimeProvisionService.provision(req)
+                  : Promise.resolve({ ok: false, error: 'runtime provision unavailable' } as ProvisionOutcome),
+              toResult: (id, outcome) => outcome.ok
+                ? { type: 'provision_result', id, ok: true }
+                : { type: 'provision_result', id, ok: false, error: outcome.error },
+              malformedResult: (id) => ({ type: 'provision_result', id, ok: false, error: 'malformed request' }),
+            });
+            if (provisionVerdict === 'fatal') return;
             // Provisioning is gateway-side work; give the post-provision continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
             continue;
