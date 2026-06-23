@@ -60,13 +60,14 @@ export interface AuditEvent {
   user_id: string | null;
   profile_id: string | null;
   ts: number;
-  kind: 'action' | 'approval' | 'correction' | 'cost' | 'decision' | 'error' | 'lifecycle';
+  kind: 'action' | 'approval' | 'correction' | 'cost' | 'decision' | 'error' | 'lifecycle' | 'timing';
   tool: string | null;
   summary: string | null;
   reasoning: string | null;
   result: string | null;
   cost_tokens: number | null;
   cost_micro_usd: number | null;
+  durations_ms: string | null;
 }
 
 export interface PullRequestRow {
@@ -206,6 +207,7 @@ export class SqliteSessionStore implements SessionStore {
     string | null,
     number | null,
     number | null,
+    string | null,
   ]>;
   private readonly stmtRecordPullRequest: Database.Statement<
     [string, string | null, string, number, string, string | null, string, number]
@@ -277,14 +279,15 @@ export class SqliteSessionStore implements SessionStore {
       string | null,
       number | null,
       number | null,
+      string | null,
     ]>(`
       INSERT INTO audit_events
-        (session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd, durations_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     this.stmtGetAudit = this.db.prepare<[string], AuditEvent>(
-      'SELECT session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd FROM audit_events WHERE session_key = ? ORDER BY id',
+      'SELECT session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd, durations_ms FROM audit_events WHERE session_key = ? ORDER BY id',
     );
 
     this.stmtRecordPullRequest = this.db.prepare<
@@ -420,7 +423,8 @@ export class SqliteSessionStore implements SessionStore {
         reasoning      TEXT,
         result         TEXT,
         cost_tokens    INTEGER,
-        cost_micro_usd INTEGER
+        cost_micro_usd INTEGER,
+        durations_ms   TEXT
       );
     `);
 
@@ -430,6 +434,9 @@ export class SqliteSessionStore implements SessionStore {
     }
     if (auditCols.includes('session_key') && !auditCols.includes('profile_id')) {
       this.db.exec('ALTER TABLE audit_events ADD COLUMN profile_id TEXT');
+    }
+    if (auditCols.includes('session_key') && !auditCols.includes('durations_ms')) {
+      this.db.exec('ALTER TABLE audit_events ADD COLUMN durations_ms TEXT');
     }
 
     this.db.exec(`
@@ -515,6 +522,7 @@ export class SqliteSessionStore implements SessionStore {
       event.result,
       event.cost_tokens,
       event.cost_micro_usd,
+      event.durations_ms,
     );
   }
 

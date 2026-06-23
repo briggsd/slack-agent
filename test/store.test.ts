@@ -253,6 +253,7 @@ describe('SqliteSessionStore — audit_events', () => {
       result: 'created',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     };
     store.recordAudit(event);
 
@@ -291,6 +292,7 @@ describe('SqliteSessionStore — audit_events', () => {
       result: 'created',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
     store.recordAudit({
       session_key: 'K2',
@@ -305,6 +307,7 @@ describe('SqliteSessionStore — audit_events', () => {
       result: 'created',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
 
     expect(store.getAuditEvents('K1')).toHaveLength(1);
@@ -322,6 +325,7 @@ describe('SqliteSessionStore — audit_events', () => {
       reasoning: null,
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     };
     store.recordAudit({ ...base, ts: 100, kind: 'lifecycle', tool: 'session', result: 'created' });
     store.recordAudit({ ...base, ts: 200, kind: 'approval', tool: 'plan-gate', result: 'requested' });
@@ -349,6 +353,7 @@ describe('SqliteSessionStore — audit_events', () => {
       result: 'opened',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
 
     const rows = store.getAuditEvents('S:C:T');
@@ -374,6 +379,7 @@ describe('SqliteSessionStore — audit_events', () => {
       result: null,
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
 
     const rows = store.getAuditEvents('NULL:TEST');
@@ -402,6 +408,7 @@ describe('SqliteSessionStore — audit_events', () => {
       result: null,
       cost_tokens: 165,
       cost_micro_usd: 12300,
+      durations_ms: null,
     });
 
     const rows = store.getAuditEvents('COST:TEST');
@@ -429,6 +436,7 @@ describe('SqliteSessionStore — audit_events', () => {
       result: null,
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
 
     const rows = store.getAuditEvents('COST:NULL');
@@ -451,6 +459,7 @@ describe('SqliteSessionStore — audit_events', () => {
       result: 'pass',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
 
     expect(store.getAuditEvents('DECISION:TEST')).toEqual([{
@@ -466,6 +475,41 @@ describe('SqliteSessionStore — audit_events', () => {
       result: 'pass',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
+    }]);
+  });
+
+  it('round-trips a kind:timing AuditEvent with durations_ms JSON', () => {
+    store.recordAudit({
+      session_key: 'TIMING:TEST',
+      team_id: 'TEAM1',
+      user_id: 'U1',
+      profile_id: 'conversational',
+      ts: 4_000,
+      kind: 'timing',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: null,
+      durations_ms: '{"agentMs":1234,"spawnMs":800,"publishMs":300}',
+    });
+
+    expect(store.getAuditEvents('TIMING:TEST')).toEqual([{
+      session_key: 'TIMING:TEST',
+      team_id: 'TEAM1',
+      user_id: 'U1',
+      profile_id: 'conversational',
+      ts: 4_000,
+      kind: 'timing',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: null,
+      durations_ms: '{"agentMs":1234,"spawnMs":800,"publishMs":300}',
     }]);
   });
 });
@@ -788,6 +832,7 @@ describe('SqliteSessionStore — durability', () => {
       result: 'created',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
     store1.close();
 
@@ -847,6 +892,7 @@ describe('SqliteSessionStore — durability', () => {
       result: null,
       cost_tokens: 100,
       cost_micro_usd: 5_000,
+      durations_ms: null,
     });
 
     const allRows = store.getAuditEvents('OLD:K');
@@ -902,6 +948,7 @@ describe('SqliteSessionStore — durability', () => {
       result: 'opened',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
 
     const allRows = store.getAuditEvents('OLD:PROFILE');
@@ -910,6 +957,60 @@ describe('SqliteSessionStore — durability', () => {
     expect(allRows).toHaveLength(2);
     const newRow = allRows.find((row) => row.result === 'opened');
     expect(newRow?.profile_id).toBe('conversational');
+  });
+
+  it('migrates a 12-column audit_events table without durations_ms and preserves existing rows', () => {
+    const rawDb = new Database(dbPath);
+    rawDb.exec(`
+      CREATE TABLE audit_events (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key    TEXT    NOT NULL,
+        team_id        TEXT,
+        user_id        TEXT,
+        profile_id     TEXT,
+        ts             INTEGER NOT NULL,
+        kind           TEXT    NOT NULL,
+        tool           TEXT,
+        summary        TEXT,
+        reasoning      TEXT,
+        result         TEXT,
+        cost_tokens    INTEGER,
+        cost_micro_usd INTEGER
+      );
+      INSERT INTO audit_events (
+        session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd
+      )
+      VALUES ('OLD:TIMING', 'T1', 'U1', 'conversational', 900, 'lifecycle', 'session', null, null, 'created', null, null);
+    `);
+    rawDb.close();
+
+    const store = new SqliteSessionStore(dbPath);
+
+    const migrated = store.getAuditEvents('OLD:TIMING');
+    expect(migrated).toHaveLength(1);
+    expect(migrated[0]?.durations_ms).toBeNull();
+
+    store.recordAudit({
+      session_key: 'OLD:TIMING',
+      team_id: 'T1',
+      user_id: 'U1',
+      profile_id: 'conversational',
+      ts: 1_000,
+      kind: 'timing',
+      tool: null,
+      summary: null,
+      reasoning: null,
+      result: null,
+      cost_tokens: null,
+      cost_micro_usd: null,
+      durations_ms: '{"agentMs":55,"spawnMs":20}',
+    });
+
+    const rows = store.getAuditEvents('OLD:TIMING');
+    store.close();
+
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.durations_ms)).toEqual([null, '{"agentMs":55,"spawnMs":20}']);
   });
 
   it('migrates a pull_requests table without correlation_id and preserves existing rows', () => {
@@ -987,6 +1088,7 @@ describe('SqliteSessionStore — durability', () => {
       result: 'created',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
 
     const rows = store.getAuditEvents('POST:PLACEHOLDER');
@@ -1036,6 +1138,7 @@ describe('SqliteSessionStore — sumCostByTask / sumCostByUserSince / sumCostGlo
     reasoning: null as null,
     result: null as null,
     cost_tokens: null as null,
+    durations_ms: null as null,
   };
 
   it('sumCostByTask returns 0 when no rows exist for the session', () => {
@@ -1121,6 +1224,7 @@ describe('SqliteSessionStore — sumCostByTask / sumCostByUserSince / sumCostGlo
       result: 'created',
       cost_tokens: null,
       cost_micro_usd: null,
+      durations_ms: null,
     });
     store.recordAudit({ ...baseEvent, session_key: 'K1', user_id: 'U1', ts: 2000, cost_micro_usd: 500 });
 

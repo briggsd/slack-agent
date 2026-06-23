@@ -79,6 +79,10 @@ interface Session {
   /** Gateway-side approval state. Legacy `await_approval` gates still store a resolver;
    *  build_spec stores an approval id/prompt so a later authenticated reply becomes a new turn. */
   pendingApproval: PendingApproval | null;
+  /** Spawn latency to attribute to the next top-level timing row (cold start / rehydrate only). */
+  pendingSpawnMs: number | null;
+  /** Accumulates publish service time across a top-level turn, including nested build/exec runs. */
+  turnPublishMs: number;
 }
 
 /** One rolling-window day in ms — the per-user/global cap window. */
@@ -240,7 +244,9 @@ export class SessionManager {
     }
     const profileId = item.profileId;
     const profile = getProfile(profileId ?? DEFAULT_PROFILE_ID);
+    const spawnStart = this.now();
     const runner = await this.factory.create(key, profile);
+    const spawnMs = this.now() - spawnStart;
     const now = Date.now();
     const session: Session = {
       key,
@@ -254,6 +260,8 @@ export class SessionManager {
       requestorUserId: item.userId,
       teamId: item.teamId,
       pendingApproval: null,
+      pendingSpawnMs: spawnMs,
+      turnPublishMs: 0,
     };
     this.sessions.set(key, session);
     this.resetIdleTimer(session);
@@ -289,7 +297,9 @@ export class SessionManager {
   private async ensureRunner(session: Session): Promise<SessionRunner> {
     if (session.runner !== null) return session.runner;
     const profile = getProfile(session.profileId);
+    const spawnStart = this.now();
     const runner = await this.factory.create(session.key, profile);
+    session.pendingSpawnMs = this.now() - spawnStart;
     session.runner = runner;
     try {
       this.store.setStatus(session.key, 'active');
@@ -804,6 +814,7 @@ export class SessionManager {
           captured = { type: 'abandoned', reason: event.reason };
           break;
         } else if (event.type === 'pr_opened') {
+          session.turnPublishMs += event.elapsedMs ?? 0;
           // Post the PR URL to Slack (same user-facing text as before the refactor).
           await tryUpdate(`Opened PR: ${event.url}`);
 
@@ -848,6 +859,7 @@ export class SessionManager {
           };
           // Don't break — let the loop drain to done
         } else if (event.type === 'pr_edited') {
+          session.turnPublishMs += event.elapsedMs ?? 0;
           this.audit({
             session_key: session.key,
             team_id: session.teamId ?? null,
@@ -859,6 +871,7 @@ export class SessionManager {
             result: 'edited',
           });
         } else if (event.type === 'pr_commented') {
+          session.turnPublishMs += event.elapsedMs ?? 0;
           this.audit({
             session_key: session.key,
             team_id: session.teamId ?? null,
@@ -1168,6 +1181,12 @@ export class SessionManager {
           item.threadTs,
         );
         const runner = await this.ensureRunner(session);
+        session.turnPublishMs = 0;
+        // Capture + clear the pending spawn cost up front so it attaches to exactly
+        // this turn and can never leak onto a later turn if this one errors before the
+        // timing row is written.
+        const spawnMsForTurn = session.pendingSpawnMs;
+        session.pendingSpawnMs = null;
 
         // Drive the run manually via driveToThread. The router turn ignores the
         // return value — it's only used when runBuild calls driveToThread for the tail.
@@ -1175,7 +1194,29 @@ export class SessionManager {
           item.message,
           item.approval !== undefined ? { approval: item.approval } : undefined,
         );
-        await this.driveToThread(iterator, placeholder, session, item);
+        const turnStart = this.now();
+        try {
+          await this.driveToThread(iterator, placeholder, session, item);
+        } finally {
+          // Record per-turn latency for every driven turn — including errored/timed-out
+          // ones, where latency is most worth seeing. Best-effort like every audit row.
+          const agentMs = this.now() - turnStart;
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
+            kind: 'timing',
+            tool: null,
+            result: null,
+            durations_ms: JSON.stringify({
+              agentMs,
+              ...(spawnMsForTurn !== null ? { spawnMs: spawnMsForTurn } : {}),
+              ...(session.turnPublishMs > 0 ? { publishMs: session.turnPublishMs } : {}),
+            }),
+          });
+          session.turnPublishMs = 0;
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[session] error processing message in ${session.key}: ${msg}`);
@@ -1276,11 +1317,12 @@ export class SessionManager {
    * it does not license putting message content here. `reasoning` remains null by default
    * and is used only for opt-in decision rationale capture.
    */
-  private audit(partial: Omit<AuditEvent, 'ts' | 'summary' | 'reasoning' | 'cost_tokens' | 'cost_micro_usd'> & {
+  private audit(partial: Omit<AuditEvent, 'ts' | 'summary' | 'reasoning' | 'cost_tokens' | 'cost_micro_usd' | 'durations_ms'> & {
     summary?: string | null;
     reasoning?: string | null;
     cost_tokens?: number | null;
     cost_micro_usd?: number | null;
+    durations_ms?: string | null;
   }): void {
     const summary =
       typeof partial.summary === 'string'
@@ -1297,6 +1339,7 @@ export class SessionManager {
       reasoning,
       cost_tokens: partial.cost_tokens ?? null,
       cost_micro_usd: partial.cost_micro_usd ?? null,
+      durations_ms: partial.durations_ms ?? null,
     };
     try {
       this.store.recordAudit(event);

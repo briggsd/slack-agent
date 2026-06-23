@@ -55,19 +55,21 @@ const DEFAULT_CONFIG: DockerRunnerConfig = {
 };
 
 async function makeReadyRunner(opts?: {
+  config?: Partial<DockerRunnerConfig>;
   publishService?: FakePublishService;
   volume?: string;
 }): Promise<{ runner: DockerRunner; fake: FakeChildProcess }> {
   const fake = new FakeChildProcess();
+  const config = { ...DEFAULT_CONFIG, ...opts?.config };
   const runner = new DockerRunner(
     fake.asChildProcess(),
-    DEFAULT_CONFIG,
+    config,
     undefined,
     undefined,
     opts?.volume,
     opts?.publishService,
   );
-  const readyPromise = DockerRunner.waitReady(runner, DEFAULT_CONFIG.readyTimeoutMs);
+  const readyPromise = DockerRunner.waitReady(runner, config.readyTimeoutMs);
   fake.writeOut(JSON.stringify({ type: 'ready' }));
   await readyPromise;
   return { runner, fake };
@@ -93,11 +95,20 @@ function turnId(fake: FakeChildProcess): string {
   return (JSON.parse(fake.stdinLines[0] ?? '{}') as { id: string }).id;
 }
 
+function scriptedNow(...values: number[]): () => number {
+  let index = 0;
+  return () => values[index++] ?? values[values.length - 1]!;
+}
+
 describe('DockerRunner — request_pr_edit/request_pr_comment round-trip', () => {
   it('request_pr_edit writes pr_edit_result{ok:true}, calls the service, and yields pr_edited', async () => {
     const publishService = new FakePublishService();
     publishService.setEditOutcome({ ok: true, prUrl: 'https://github.com/owner/repo/pull/5' });
-    const { runner, fake } = await makeReadyRunner({ publishService, volume: 'slackbot-ws-edit' });
+    const { runner, fake } = await makeReadyRunner({
+      publishService,
+      volume: 'slackbot-ws-edit',
+      config: { now: scriptedNow(200, 245) },
+    });
 
     const iter = runner.send('edit it')[Symbol.asyncIterator]();
     const e1Promise = iter.next();
@@ -129,7 +140,11 @@ describe('DockerRunner — request_pr_edit/request_pr_comment round-trip', () =>
     }]);
 
     const e2 = await e2Promise;
-    expect(e2.value).toEqual({ type: 'pr_edited', url: 'https://github.com/owner/repo/pull/5' });
+    expect(e2.value).toEqual({
+      type: 'pr_edited',
+      url: 'https://github.com/owner/repo/pull/5',
+      elapsedMs: 45,
+    });
 
     const e3Promise = iter.next();
     fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'done' }));
@@ -164,7 +179,11 @@ describe('DockerRunner — request_pr_edit/request_pr_comment round-trip', () =>
   it('request_pr_comment writes pr_comment_result{ok:true}, calls the service, and yields pr_commented', async () => {
     const publishService = new FakePublishService();
     publishService.setCommentOutcome({ ok: true, prUrl: 'https://github.com/owner/repo/pull/6' });
-    const { runner, fake } = await makeReadyRunner({ publishService, volume: 'slackbot-ws-comment' });
+    const { runner, fake } = await makeReadyRunner({
+      publishService,
+      volume: 'slackbot-ws-comment',
+      config: { now: scriptedNow(300, 360) },
+    });
 
     const iter = runner.send('comment it')[Symbol.asyncIterator]();
     const e1Promise = iter.next();
@@ -194,7 +213,11 @@ describe('DockerRunner — request_pr_edit/request_pr_comment round-trip', () =>
     }]);
 
     const e2 = await e2Promise;
-    expect(e2.value).toEqual({ type: 'pr_commented', url: 'https://github.com/owner/repo/pull/6' });
+    expect(e2.value).toEqual({
+      type: 'pr_commented',
+      url: 'https://github.com/owner/repo/pull/6',
+      elapsedMs: 60,
+    });
 
     const e3Promise = iter.next();
     fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'done' }));
