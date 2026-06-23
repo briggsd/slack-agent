@@ -109,6 +109,7 @@ class SeededStore implements SessionStore {
     return this.rows.get(key);
   }
   recordAudit(event: AuditEvent): void { this.audits.push(event); }
+  listDecisionsToGrade(_opts: { sinceMs?: number; limit?: number }): [] { return []; }
   recordPullRequest(row: NewPullRequestRow): void {
     this.pullRequests.push({
       id: this.pullRequests.length + 1,
@@ -692,7 +693,8 @@ describe('SessionManager — build_spec approval_requested', () => {
       cost_tokens: null,
       cost_micro_usd: 5_000_000,
       durations_ms: null,
-    });
+    graded_audit_id: null,
+});
 
     const accepted = await manager.enqueueExisting('TEAM:C:T', {
       message: 'approve',
@@ -984,6 +986,9 @@ class CapturingStore implements SessionStore {
   }
   recordAudit(event: AuditEvent): void {
     this.audits.push(event);
+  }
+  listDecisionsToGrade(_opts: { sinceMs?: number; limit?: number }): [] {
+    return [];
   }
   recordPullRequest(row: NewPullRequestRow): void {
     this.pullRequests.push({
@@ -2731,7 +2736,8 @@ describe('SessionManager — spend-caps enforcement', () => {
       cost_tokens: null,
       cost_micro_usd: 5_000_000, // $5 already spent
       durations_ms: null,
-    });
+    graded_audit_id: null,
+});
 
     const manager = new SessionManager({
       idleTimeoutMs: 60_000,
@@ -2793,7 +2799,8 @@ describe('SessionManager — spend-caps enforcement', () => {
       cost_tokens: null,
       cost_micro_usd: 10_000_000, // $10 global spend
       durations_ms: null,
-    });
+    graded_audit_id: null,
+});
 
     const manager = new SessionManager({
       idleTimeoutMs: 60_000,
@@ -2856,7 +2863,8 @@ describe('SessionManager — spend-caps enforcement', () => {
       cost_tokens: null,
       cost_micro_usd: 8_000_000, // $8 already spent
       durations_ms: null,
-    });
+    graded_audit_id: null,
+});
 
     const manager = new SessionManager({
       idleTimeoutMs: 60_000,
@@ -2973,7 +2981,8 @@ describe('SessionManager — spend-caps enforcement', () => {
       cost_tokens: null,
       cost_micro_usd: 5_000_000, // $5 — exceeds $3 cap
       durations_ms: null,
-    });
+    graded_audit_id: null,
+});
 
     const prevPosts = slack.posts.length;
     const accepted = await manager.enqueueExisting('TEAM:C:T', {
@@ -3128,7 +3137,8 @@ describe('SessionManager — spend-caps enforcement', () => {
       cost_tokens: null,
       cost_micro_usd: 10_000_000,
       durations_ms: null,
-    });
+    graded_audit_id: null,
+});
 
     const manager = new SessionManager({
       idleTimeoutMs: 60_000,
@@ -3177,7 +3187,8 @@ describe('SessionManager — spend-caps enforcement', () => {
       cost_tokens: null,
       cost_micro_usd: 10_000_000, // $10, but outside window
       durations_ms: null,
-    });
+    graded_audit_id: null,
+});
 
     const manager = new SessionManager({
       idleTimeoutMs: 60_000,

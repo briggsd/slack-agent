@@ -1317,12 +1317,13 @@ export class SessionManager {
    * it does not license putting message content here. `reasoning` remains null by default
    * and is used only for opt-in decision rationale capture.
    */
-  private audit(partial: Omit<AuditEvent, 'ts' | 'summary' | 'reasoning' | 'cost_tokens' | 'cost_micro_usd' | 'durations_ms'> & {
+  private audit(partial: Omit<AuditEvent, 'ts' | 'summary' | 'reasoning' | 'cost_tokens' | 'cost_micro_usd' | 'durations_ms' | 'graded_audit_id'> & {
     summary?: string | null;
     reasoning?: string | null;
     cost_tokens?: number | null;
     cost_micro_usd?: number | null;
     durations_ms?: string | null;
+    graded_audit_id?: number | null;
   }): void {
     const summary =
       typeof partial.summary === 'string'
@@ -1340,6 +1341,7 @@ export class SessionManager {
       cost_tokens: partial.cost_tokens ?? null,
       cost_micro_usd: partial.cost_micro_usd ?? null,
       durations_ms: partial.durations_ms ?? null,
+      graded_audit_id: partial.graded_audit_id ?? null,
     };
     try {
       this.store.recordAudit(event);
