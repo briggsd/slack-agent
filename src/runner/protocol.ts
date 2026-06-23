@@ -191,6 +191,7 @@ export type RunnerToGatewayMessage =
   | FileMessage
   | TextMessage
   | UsageMessage
+  | DecisionMessage
   | RequestApprovalMessage
   | RequestCloneMessage
   | RequestBuildMessage
@@ -249,6 +250,21 @@ export type UsageMessage = {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+};
+
+/**
+ * The coordinator's verification verdict for the current turn. Emitted zero or
+ * more times per user_message after the agent reviews the diff and checks. The
+ * gateway records this to the audit ledger as data; it is never acted on as
+ * control, never blocks the turn, and never expects a response.
+ */
+export type DecisionMessage = {
+  type: 'decision';
+  id: string;
+  point: 'verify';
+  verdict: 'pass' | 'fail';
+  rationale: string;
+  correlationId?: string;
 };
 
 /**
@@ -324,7 +340,10 @@ export type RequestExecMessage = {
  * publish inline — it mints a WRITE lease, pushes the session volume's repo worktree, opens a PR,
  * revokes the lease, and returns the PR URL (or a failure reason). The credential never enters
  * the agent env. `id` is the runner's own publish-correlation id (distinct from the turn id).
- * `repo` is the strict "owner/name" slug whose workdir is derived by the gateway.
+ * `repo` is the strict "owner/name" slug whose workdir is derived by the gateway. `correlationId`
+ * forwards the active build correlation id when the coordinator verified a candidate produced by
+ * this turn's build, so the gateway can append-only join the later PR row to the earlier
+ * verification decision.
  */
 export type RequestPublishMessage = {
   type: 'request_publish';
@@ -332,6 +351,7 @@ export type RequestPublishMessage = {
   repo: string;   // "owner/name" — the verified repo candidate to publish
   title?: string; // optional PR title override
   body?: string;  // optional PR body override
+  correlationId?: string;
 };
 
 /**

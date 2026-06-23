@@ -24,13 +24,21 @@ import type { PrStateReader } from './pr-state-reader.js';
  * (ignored) and `runBuild` (to translate into a `BuildOutcome`).
  */
 type DriveOutcome =
-  | { type: 'pr_opened'; url: string; repo: string; number: number; headSha: string }
+  | { type: 'pr_opened'; url: string; repo: string; number: number; headSha: string; correlationId?: string }
   | { type: 'abandoned'; reason: string }
   | { type: 'error'; message: string; reason: ErrorReason }
   | { type: 'completed' };
 
 /** Cap on an audit `summary` — metadata only, never a transcript (see {@link SessionManager.audit}). */
 const AUDIT_SUMMARY_MAX_CHARS = 512;
+
+/**
+ * Cap on an audit `reasoning` — the opt-in decision-rationale path. Far larger than
+ * `summary` (rationale is a deliberate prose trajectory, not metadata) but still bounded:
+ * the value is container-originated free text, so a misbehaving/injected agent must not be
+ * able to amplify unbounded writes into the ledger. Defense-in-depth at the write seam.
+ */
+const AUDIT_REASONING_MAX_CHARS = 8192;
 
 export interface QueueItem {
   message: string;
@@ -121,6 +129,7 @@ export class SessionManager {
   private readonly prStateReader: PrStateReader | undefined;
   private readonly prStaleAfterMs: number;
   private readonly spendCaps: SpendCapsConfig;
+  private readonly decisionCapture: boolean;
   private readonly now: () => number;
   private readonly buildRunnerFactory: BuildRunnerFactory | undefined;
   private readonly pendingApprovalRetentionMs: number;
@@ -151,6 +160,8 @@ export class SessionManager {
     prStaleAfterMs?: number;
     /** Rolling dollar caps enforced at admission and pre-dispatch. All-zero = disabled (default). */
     spendCaps?: SpendCapsConfig;
+    /** Persist structured verification rationale in audit_events when true. Default false. */
+    decisionCapture?: boolean;
     /** Clock injectable for testable 24h windows. Default: () => Date.now(). */
     now?: () => number;
     /** Factory for build tail runners (DispatchingRunnerFactory). Required when the
@@ -172,6 +183,7 @@ export class SessionManager {
     this.prStateReader = opts.prStateReader;
     this.prStaleAfterMs = opts.prStaleAfterMs ?? 30 * 24 * 60 * 60 * 1000;
     this.spendCaps = opts.spendCaps ?? DISABLED_CAPS;
+    this.decisionCapture = opts.decisionCapture ?? false;
     this.now = opts.now ?? (() => Date.now());
     this.buildRunnerFactory = opts.buildRunnerFactory;
     this.pendingApprovalRetentionMs =
@@ -817,6 +829,7 @@ export class SessionManager {
               repo: event.repo,
               pr_number: event.number,
               head_sha: event.headSha,
+              correlation_id: event.correlationId ?? null,
               profile_id: session.profileId,
               opened_at: this.now(),
             });
@@ -831,6 +844,7 @@ export class SessionManager {
             repo: event.repo,
             number: event.number,
             headSha: event.headSha,
+            ...(event.correlationId !== undefined ? { correlationId: event.correlationId } : {}),
           };
           // Don't break — let the loop drain to done
         } else if (event.type === 'pr_edited') {
@@ -872,6 +886,21 @@ export class SessionManager {
               event.cacheReadTokens +
               event.cacheCreationTokens,
             cost_micro_usd: event.costMicroUsd,
+          });
+        } else if (event.type === 'decision') {
+          console.log(
+            `[session] decision ${event.point} ${event.verdict} ${session.key}${event.correlationId !== undefined ? ` correlationId=${event.correlationId}` : ''}`,
+          );
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
+            kind: 'decision',
+            tool: event.point,
+            result: event.verdict,
+            summary: event.correlationId ?? null,
+            reasoning: this.decisionCapture ? event.rationale : null,
           });
         } else if (event.type === 'error') {
           // The message is safe for gateway logs + the audit ledger only when the
@@ -1242,9 +1271,10 @@ export class SessionManager {
    * default to null (summary, reasoning, cost_tokens are a later slice).
    *
    * `summary` is length-capped as defense-in-depth: this is an action/cost trail, never
-   * a transcript, and the only value ever passed today is a PR URL (gateway-controlled).
-   * The cap bounds blast radius if a future caller is careless — it does not license
-   * putting message content here.
+   * a transcript, and the values passed today are short gateway metadata such as PR URLs
+   * and build correlation ids. The cap bounds blast radius if a future caller is careless —
+   * it does not license putting message content here. `reasoning` remains null by default
+   * and is used only for opt-in decision rationale capture.
    */
   private audit(partial: Omit<AuditEvent, 'ts' | 'summary' | 'reasoning' | 'cost_tokens' | 'cost_micro_usd'> & {
     summary?: string | null;
@@ -1256,11 +1286,15 @@ export class SessionManager {
       typeof partial.summary === 'string'
         ? partial.summary.slice(0, AUDIT_SUMMARY_MAX_CHARS)
         : partial.summary ?? null;
+    const reasoning =
+      typeof partial.reasoning === 'string'
+        ? partial.reasoning.slice(0, AUDIT_REASONING_MAX_CHARS)
+        : partial.reasoning ?? null;
     const event: AuditEvent = {
       ...partial,
       ts: Date.now(),
       summary,
-      reasoning: partial.reasoning ?? null,
+      reasoning,
       cost_tokens: partial.cost_tokens ?? null,
       cost_micro_usd: partial.cost_micro_usd ?? null,
     };

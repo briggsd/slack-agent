@@ -19,7 +19,7 @@ export type RunnerEvent =
   // gateway-internal: a pull request was successfully opened. The gateway posts the URL to Slack
   // AND records an audit event. NOT a protocol/wire change — this event never crosses the
   // container boundary; it is synthesised by the open-pr node and handled in the drain loop.
-  | { type: 'pr_opened'; url: string; repo: string; number: number; headSha: string }
+  | { type: 'pr_opened'; url: string; repo: string; number: number; headSha: string; correlationId?: string }
   // gateway-internal: this thread's PR was successfully edited. Audit-only; no Slack post.
   | { type: 'pr_edited'; url: string }
   // gateway-internal: a comment was successfully added to this thread's PR. Audit-only.
@@ -28,6 +28,9 @@ export type RunnerEvent =
   // error/abandoned turns too — they still cost). Recorded to the audit ledger;
   // never acted on as control. Does NOT terminate the stream.
   | { type: 'usage'; costMicroUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number }
+  // gateway-internal: the coordinator emitted a structured verification decision. Recorded as data
+  // in the audit ledger and never acted on as control.
+  | { type: 'decision'; point: 'verify'; verdict: 'pass' | 'fail'; rationale: string; correlationId?: string }
   | { type: 'error'; message: string; reason: ErrorReason }
   // gateway-internal: the coordinator's build_spec tool asked the gateway to run the build
   // tail (a fresh implementer container on the shared volume). The manager services it and

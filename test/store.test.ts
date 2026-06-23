@@ -436,6 +436,38 @@ describe('SqliteSessionStore — audit_events', () => {
     expect(rows[0]?.kind).toBe('cost');
     expect(rows[0]?.cost_micro_usd).toBeNull();
   });
+
+  it('round-trips a kind:decision AuditEvent with correlation summary and rationale', () => {
+    store.recordAudit({
+      session_key: 'DECISION:TEST',
+      team_id: 'TEAM1',
+      user_id: 'U1',
+      profile_id: 'conversational',
+      ts: 3_000,
+      kind: 'decision',
+      tool: 'verify',
+      summary: 'build-join-3',
+      reasoning: 'The diff matched the spec and the checks ran green.',
+      result: 'pass',
+      cost_tokens: null,
+      cost_micro_usd: null,
+    });
+
+    expect(store.getAuditEvents('DECISION:TEST')).toEqual([{
+      session_key: 'DECISION:TEST',
+      team_id: 'TEAM1',
+      user_id: 'U1',
+      profile_id: 'conversational',
+      ts: 3_000,
+      kind: 'decision',
+      tool: 'verify',
+      summary: 'build-join-3',
+      reasoning: 'The diff matched the spec and the checks ran green.',
+      result: 'pass',
+      cost_tokens: null,
+      cost_micro_usd: null,
+    }]);
+  });
 });
 
 describe('SqliteSessionStore — pull_requests', () => {
@@ -456,6 +488,7 @@ describe('SqliteSessionStore — pull_requests', () => {
       repo: 'owner/repo',
       pr_number: 42,
       head_sha: 'abc123def456',
+      correlation_id: 'build-42',
       profile_id: 'repo-oneshot',
       opened_at: 1_700_000_000_000,
     });
@@ -469,12 +502,28 @@ describe('SqliteSessionStore — pull_requests', () => {
       repo: 'owner/repo',
       pr_number: 42,
       head_sha: 'abc123def456',
+      correlation_id: 'build-42',
       profile_id: 'repo-oneshot',
       opened_at: 1_700_000_000_000,
       state: 'open',
       last_polled_at: null,
       resolved_at: null,
     });
+  });
+
+  it('stores a null correlation_id when the publish path had no build correlation id', () => {
+    store.recordPullRequest({
+      session_key: 'TEAM:C:NULL',
+      team_id: 'TEAM1',
+      repo: 'owner/repo',
+      pr_number: 43,
+      head_sha: 'def456abc123',
+      correlation_id: null,
+      profile_id: 'repo-oneshot',
+      opened_at: 1_700_000_000_100,
+    });
+
+    expect(store.getPullRequest(1)?.correlation_id).toBeNull();
   });
 
   it('resolvePullRequest moves the row out of the open worklist and stamps terminal fields', () => {
@@ -484,6 +533,7 @@ describe('SqliteSessionStore — pull_requests', () => {
       repo: 'owner/repo',
       pr_number: 42,
       head_sha: 'abc123def456',
+      correlation_id: null,
       profile_id: 'repo-oneshot',
       opened_at: 1_700_000_000_000,
     });
@@ -498,6 +548,7 @@ describe('SqliteSessionStore — pull_requests', () => {
       repo: 'owner/repo',
       pr_number: 42,
       head_sha: 'abc123def456',
+      correlation_id: null,
       profile_id: 'repo-oneshot',
       opened_at: 1_700_000_000_000,
       state: 'merged_clean',
@@ -513,6 +564,7 @@ describe('SqliteSessionStore — pull_requests', () => {
       repo: 'owner/repo',
       pr_number: 42,
       head_sha: 'abc123def456',
+      correlation_id: null,
       profile_id: 'repo-oneshot',
       opened_at: 1_700_000_000_000,
     });
@@ -530,6 +582,7 @@ describe('SqliteSessionStore — pull_requests', () => {
       team_id: 'TEAM1',
       repo: 'owner/repo',
       head_sha: 'sha',
+      correlation_id: null,
       profile_id: 'repo-oneshot',
       opened_at: 1_700_000_000_000,
     };
@@ -571,6 +624,7 @@ describe('SqliteSessionStore — acceptance stats', () => {
       repo: 'owner/repo',
       pr_number: params.prNumber,
       head_sha: `sha-${params.prNumber}`,
+      correlation_id: null,
       profile_id: 'repo-oneshot',
       opened_at: params.openedAt,
     });
@@ -659,6 +713,7 @@ describe('SqliteSessionStore — acceptance stats', () => {
         repo: 'owner/repo',
         pr_number: 1,
         head_sha: 'sha-1',
+        correlation_id: null,
         profile_id: 'repo-oneshot',
         opened_at: 20_000,
       });
@@ -668,6 +723,7 @@ describe('SqliteSessionStore — acceptance stats', () => {
         repo: 'owner/repo',
         pr_number: 2,
         head_sha: 'sha-2',
+        correlation_id: null,
         profile_id: 'repo-oneshot',
         opened_at: 20_001,
       });
@@ -854,6 +910,52 @@ describe('SqliteSessionStore — durability', () => {
     expect(allRows).toHaveLength(2);
     const newRow = allRows.find((row) => row.result === 'opened');
     expect(newRow?.profile_id).toBe('conversational');
+  });
+
+  it('migrates a pull_requests table without correlation_id and preserves existing rows', () => {
+    const rawDb = new Database(dbPath);
+    rawDb.exec(`
+      CREATE TABLE pull_requests (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key    TEXT    NOT NULL,
+        team_id        TEXT,
+        repo           TEXT    NOT NULL,
+        pr_number      INTEGER NOT NULL,
+        head_sha       TEXT    NOT NULL,
+        profile_id     TEXT    NOT NULL,
+        opened_at      INTEGER NOT NULL,
+        state          TEXT    NOT NULL DEFAULT 'open',
+        last_polled_at INTEGER,
+        resolved_at    INTEGER
+      );
+      INSERT INTO pull_requests (
+        session_key, team_id, repo, pr_number, head_sha, profile_id, opened_at, state, last_polled_at, resolved_at
+      )
+      VALUES ('TEAM:C:OLDPR', 'TEAM', 'owner/repo', 1, 'old-sha', 'repo-oneshot', 700, 'open', null, null);
+    `);
+    rawDb.close();
+
+    const store = new SqliteSessionStore(dbPath);
+
+    const migrated = store.listOpenPullRequests();
+    expect(migrated).toHaveLength(1);
+    expect(migrated[0]?.correlation_id).toBeNull();
+
+    store.recordPullRequest({
+      session_key: 'TEAM:C:NEWPR',
+      team_id: 'TEAM',
+      repo: 'owner/repo',
+      pr_number: 2,
+      head_sha: 'new-sha',
+      correlation_id: 'build-new-2',
+      profile_id: 'repo-oneshot',
+      opened_at: 800,
+    });
+
+    const rows = store.listOpenPullRequests();
+    store.close();
+
+    expect(rows.map((row) => row.correlation_id)).toEqual([null, 'build-new-2']);
   });
 
   it('replaces pre-S05 placeholder shape (event_type/payload, no session_key) and works normally after', () => {

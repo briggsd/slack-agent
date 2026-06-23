@@ -17,6 +17,7 @@ export interface PublishInput {
   repo: string;
   title?: string;
   body?: string;
+  correlationId?: string;
 }
 
 export type PrEditOutcome =

@@ -418,6 +418,22 @@ export class DockerRunner implements SessionRunner {
               cacheReadTokens: toCount(parsed.cacheReadTokens),
               cacheCreationTokens: toCount(parsed.cacheCreationTokens),
             } as RunnerEvent;
+          } else if (parsed.type === 'decision' && parsed.id === id) {
+            if (
+              parsed.point !== 'verify' ||
+              (parsed.verdict !== 'pass' && parsed.verdict !== 'fail') ||
+              typeof parsed.rationale !== 'string' ||
+              (parsed.correlationId !== undefined && typeof parsed.correlationId !== 'string')
+            ) {
+              continue;
+            }
+            yield {
+              type: 'decision',
+              point: parsed.point,
+              verdict: parsed.verdict,
+              rationale: parsed.rationale,
+              ...(parsed.correlationId !== undefined ? { correlationId: parsed.correlationId } : {}),
+            } as RunnerEvent;
           } else if (parsed.type === 'text' && parsed.id === id) {
             yield { type: 'text', text: parsed.text } as RunnerEvent;
             break;
@@ -576,10 +592,12 @@ export class DockerRunner implements SessionRunner {
             const publishId = parsed.id;
             const title = (parsed as { title?: unknown }).title;
             const body = (parsed as { body?: unknown }).body;
+            const correlationId = (parsed as { correlationId?: unknown }).correlationId;
             if (
               typeof parsed.repo !== 'string' ||
               (title !== undefined && typeof title !== 'string') ||
-              (body !== undefined && typeof body !== 'string')
+              (body !== undefined && typeof body !== 'string') ||
+              (correlationId !== undefined && typeof correlationId !== 'string')
             ) {
               const fallback: GatewayToRunnerMessage = {
                 type: 'publish_result',
@@ -622,6 +640,7 @@ export class DockerRunner implements SessionRunner {
                 repo: publishReq.repo,
                 number: publishOutcome.prNumber,
                 headSha: publishOutcome.headSha,
+                ...(correlationId !== undefined ? { correlationId } : {}),
               } as RunnerEvent;
             }
             // Publishing is gateway-side work (lease + push + PR), not the agent's — give the

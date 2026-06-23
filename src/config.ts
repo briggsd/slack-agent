@@ -28,6 +28,19 @@ function optionalEnvMaybe(name: string): string | undefined {
   return raw !== undefined && raw !== '' ? raw : undefined;
 }
 
+function optionalEnvBool(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return defaultValue;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes') {
+    return true;
+  }
+  if (normalized === '0' || normalized === 'false' || normalized === 'no') {
+    return false;
+  }
+  throw new Error(`Environment variable ${name} must be a boolean, got: ${raw}`);
+}
+
 export type RunnerBackend = 'fake' | 'docker';
 
 export interface DockerConfig {
@@ -288,6 +301,7 @@ export interface Config {
   docker: DockerConfig;
   oneshot: OneShotConfig;
   spendCaps: SpendCapsConfig;
+  decisionCapture: boolean;
 }
 
 /** Convert a dollar amount to integer micro-USD, clamping negatives to 0. */
@@ -341,5 +355,6 @@ export function loadConfig(): Config {
       perUser24hMicroUsd:   usdToMicro(optionalEnvNumber('SPEND_CAP_PER_USER_24H_USD', 100)),
       perGlobal24hMicroUsd: usdToMicro(optionalEnvNumber('SPEND_CAP_GLOBAL_24H_USD', 400)),
     },
+    decisionCapture: optionalEnvBool('DECISION_CAPTURE', false),
   };
 }

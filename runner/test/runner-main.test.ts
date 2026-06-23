@@ -7,7 +7,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { PassThrough } from 'stream';
-import { runLoop } from '../src/main.js';
+import { runLoop, runBuildSpec } from '../src/main.js';
 import type { ReadFileFn, WriteFileFn, MkdirFn, SdkQueryFn, ListFilesFn, ReadBinaryFileFn, ScannedFile } from '../src/main.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
@@ -187,6 +187,10 @@ type CollectedOutput = Array<{
   name?: string;
   data_base64?: string;
   size?: number;
+  point?: string;
+  verdict?: string;
+  rationale?: string;
+  correlationId?: string;
 }>;
 
 async function runWithInput(
@@ -301,8 +305,21 @@ describe('runner main — basic flow', () => {
     expect(append).toContain('refs/slack-agent/base...HEAD');
     expect(append).not.toContain('diff main...HEAD');
     expect(append).toContain('run_checks');
+    expect(append).toContain('report_verification');
     expect(append).toContain('publish');
     expect(append).toContain('only after');
+  });
+
+  it('runBuildSpec tells the coordinator to report_verification before publish', async () => {
+    const text = await runBuildSpec(
+      'owner/repo',
+      async () => 'Implement the slice',
+      async () => ({ status: 'approved' }),
+      async () => ({ ok: true }),
+    );
+
+    expect(text).toContain('report_verification');
+    expect(text).toContain('Publish only after a pass verdict');
   });
 
   it('persists session-id from init message', async () => {
@@ -834,5 +851,75 @@ describe('runner main — commit gate stdin demux', () => {
     ]);
     expect(outputs.filter((o) => o.type === 'request_approval')).toHaveLength(1);
     expect(outputs.some((o) => o.type === 'text' && o.text === 'second-turn:rejected:make it faster')).toBe(true);
+  });
+
+  it('emits a one-way decision with the active build correlation id when verification is reported', async () => {
+    const input = new PassThrough();
+    const outputs: CollectedOutput = [];
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown): boolean => {
+      const str = typeof chunk === 'string' ? chunk : String(chunk);
+      for (const piece of str.split('\n')) {
+        const trimmed = piece.trim();
+        if (trimmed !== '') {
+          try {
+            outputs.push(JSON.parse(trimmed) as CollectedOutput[0]);
+          } catch {
+            // ignore non-JSON
+          }
+        }
+      }
+      return true;
+    });
+
+    const sdkQuery: SdkQueryFn = (params) => ({
+      [Symbol.asyncIterator]: async function* () {
+        yield makeSdkInit('sess-verify');
+        if (params.requestBuild === undefined || params.reportVerification === undefined) {
+          throw new Error('build and verification callbacks must be wired');
+        }
+        const buildOutcome = await params.requestBuild('owner/repo');
+        expect(buildOutcome).toEqual({ ok: true });
+        await params.reportVerification({
+          verdict: 'pass',
+          rationale: 'Checked the diff, ran checks, and the remaining risk is acceptable.',
+        });
+        yield makeSdkResult('verified', 'sess-verify');
+      },
+    });
+
+    const fs = new InMemoryFs();
+    try {
+      const loopPromise = runLoop({
+        readFile: fs.readFile,
+        writeFile: fs.writeFile,
+        mkdir: fs.mkdir,
+        sdkQuery,
+        listFiles: fs.listFiles,
+        readBinaryFile: fs.readBinaryFile,
+        input,
+      });
+
+      input.push(JSON.stringify({ type: 'user_message', id: 'u-verify', text: 'verify it' }) + '\n');
+      const buildRequest = await waitFor(() => {
+        const found = outputs.find((o) => o.type === 'request_build') as { id?: string } | undefined;
+        return found?.id !== undefined ? found : null;
+      });
+      input.push(JSON.stringify({ type: 'build_result', id: buildRequest.id, ok: true }) + '\n');
+      input.push(null);
+
+      await loopPromise;
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    expect(outputs.find((o) => o.type === 'decision')).toEqual({
+      type: 'decision',
+      id: 'u-verify',
+      point: 'verify',
+      verdict: 'pass',
+      rationale: 'Checked the diff, ran checks, and the remaining risk is acceptable.',
+      correlationId: 'build-1',
+    });
+    expect(outputs.filter((o) => o.type === 'decision')).toHaveLength(1);
   });
 });

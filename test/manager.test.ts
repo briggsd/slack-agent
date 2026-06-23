@@ -1231,6 +1231,7 @@ class PrOpenedRunner implements SessionRunner {
       repo: 'acme/widgets',
       number: 7,
       headSha: 'deadbeef1234',
+      correlationId: 'build-join-1',
     };
   }
   async dispose(): Promise<void> {}
@@ -1245,6 +1246,22 @@ class PrMutationRunner implements SessionRunner {
   async *send(_m: string): RunnerStream {
     yield { type: 'status', text: 'mutating PR…' };
     yield this.event;
+  }
+
+  async dispose(): Promise<void> {}
+}
+
+class DecisionRunner implements SessionRunner {
+  constructor(
+    readonly sessionKey: string,
+    private readonly events: RunnerEvent[],
+  ) {}
+
+  async *send(_m: string): RunnerStream {
+    yield { type: 'status', text: 'verifying…' };
+    for (const event of this.events) {
+      yield event;
+    }
   }
 
   async dispose(): Promise<void> {}
@@ -1413,6 +1430,178 @@ describe('SessionManager — audit emission', () => {
     expect(runner).not.toBeNull();
   });
 
+  it('audits a decision row with reasoning null when decisionCapture is off', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory: RunnerFactory = {
+      create: async (key) =>
+        new DecisionRunner(key, [{
+          type: 'decision',
+          point: 'verify',
+          verdict: 'fail',
+          rationale: 'Checks were skipped, so this should hold.',
+          correlationId: 'build-off-1',
+        }]),
+    };
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    await manager.enqueueNew('TEAM:C:DECISION:OFF', {
+      message: 'verify this',
+      channel: 'C',
+      threadTs: 'DECISION:OFF',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const decisions = store.audits.filter((a) => a.kind === 'decision');
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({
+      tool: 'verify',
+      result: 'fail',
+      summary: 'build-off-1',
+      reasoning: null,
+      profile_id: 'conversational',
+    });
+    expect(store.pullRequests).toHaveLength(0);
+  });
+
+  it('audits a decision row with reasoning when decisionCapture is on', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory: RunnerFactory = {
+      create: async (key) =>
+        new DecisionRunner(key, [{
+          type: 'decision',
+          point: 'verify',
+          verdict: 'pass',
+          rationale: 'Diff matched the spec and all checks ran green.',
+          correlationId: 'build-on-1',
+        }]),
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      decisionCapture: true,
+    });
+
+    await manager.enqueueNew('TEAM:C:DECISION:ON', {
+      message: 'verify this',
+      channel: 'C',
+      threadTs: 'DECISION:ON',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const decisions = store.audits.filter((a) => a.kind === 'decision');
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({
+      tool: 'verify',
+      result: 'pass',
+      summary: 'build-on-1',
+      reasoning: 'Diff matched the spec and all checks ran green.',
+    });
+  });
+
+  it('caps an oversized container-originated rationale at the ledger write (defense-in-depth)', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const huge = 'x'.repeat(20_000);
+    const factory: RunnerFactory = {
+      create: async (key) =>
+        new DecisionRunner(key, [{
+          type: 'decision',
+          point: 'verify',
+          verdict: 'pass',
+          rationale: huge,
+          correlationId: 'build-huge',
+        }]),
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      decisionCapture: true,
+    });
+
+    await manager.enqueueNew('TEAM:C:DECISION:BIG', {
+      message: 'verify this',
+      channel: 'C',
+      threadTs: 'DECISION:BIG',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const decisions = store.audits.filter((a) => a.kind === 'decision');
+    expect(decisions).toHaveLength(1);
+    // Bounded (not the full 20k), but generous enough to preserve a real rationale.
+    expect(decisions[0]?.reasoning).toHaveLength(8192);
+  });
+
+  it('records a joinable verification decision and PR row via correlation id', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const openedAt = 1_700_000_000_123;
+    const factory: RunnerFactory = {
+      create: async (key) =>
+        new DecisionRunner(key, [
+          {
+            type: 'decision',
+            point: 'verify',
+            verdict: 'pass',
+            rationale: 'Verified candidate is ready to publish.',
+            correlationId: 'build-join-2',
+          },
+          {
+            type: 'pr_opened',
+            url: 'http://x/pr/2',
+            repo: 'acme/widgets',
+            number: 8,
+            headSha: 'feedbead5678',
+            correlationId: 'build-join-2',
+          },
+        ]),
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      now: () => openedAt,
+    });
+
+    await manager.enqueueNew('TEAM:C:DECISION:JOIN', {
+      message: 'publish this',
+      channel: 'C',
+      threadTs: 'DECISION:JOIN',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const decision = store.audits.find((a) => a.kind === 'decision');
+    expect(decision?.summary).toBe('build-join-2');
+    expect(store.pullRequests).toEqual([{
+      id: 1,
+      session_key: 'TEAM:C:DECISION:JOIN',
+      team_id: 'TEAM',
+      repo: 'acme/widgets',
+      pr_number: 8,
+      head_sha: 'feedbead5678',
+      correlation_id: 'build-join-2',
+      profile_id: 'conversational',
+      opened_at: openedAt,
+      state: 'open',
+      last_polled_at: null,
+      resolved_at: null,
+    }]);
+  });
+
   it('emits action/open-pr when pr_opened flows, and placeholder shows "Opened PR:"', async () => {
     const slack = new FakeSlackClient();
     const store = new CapturingStore();
@@ -1452,6 +1641,7 @@ describe('SessionManager — audit emission', () => {
       repo: 'acme/widgets',
       pr_number: 7,
       head_sha: 'deadbeef1234',
+      correlation_id: 'build-join-1',
       profile_id: 'conversational',
       opened_at: openedAt,
       state: 'open',
@@ -2162,6 +2352,7 @@ describe('SessionManager — PR reconciliation', () => {
         repo: 'owner/repo',
         pr_number: 1,
         head_sha: 'same-sha',
+        correlation_id: null,
         profile_id: 'repo-oneshot',
         opened_at: 9_000,
         state: 'open',
@@ -2175,6 +2366,7 @@ describe('SessionManager — PR reconciliation', () => {
         repo: 'owner/repo',
         pr_number: 2,
         head_sha: 'original-sha',
+        correlation_id: null,
         profile_id: 'repo-oneshot',
         opened_at: 9_000,
         state: 'open',
@@ -2188,6 +2380,7 @@ describe('SessionManager — PR reconciliation', () => {
         repo: 'owner/repo',
         pr_number: 3,
         head_sha: 'closed-sha',
+        correlation_id: null,
         profile_id: 'repo-oneshot',
         opened_at: 9_000,
         state: 'open',
@@ -2201,6 +2394,7 @@ describe('SessionManager — PR reconciliation', () => {
         repo: 'owner/repo',
         pr_number: 4,
         head_sha: 'open-sha',
+        correlation_id: null,
         profile_id: 'repo-oneshot',
         opened_at: 9_000,
         state: 'open',
@@ -2214,6 +2408,7 @@ describe('SessionManager — PR reconciliation', () => {
         repo: 'owner/repo',
         pr_number: 5,
         head_sha: 'stale-sha',
+        correlation_id: null,
         profile_id: 'repo-oneshot',
         opened_at: 0,
         state: 'open',
@@ -2278,6 +2473,7 @@ describe('SessionManager — PR reconciliation', () => {
         repo: 'owner/repo',
         pr_number: 8,
         head_sha: 'head-eight',
+        correlation_id: null,
         profile_id: 'repo-oneshot',
         opened_at: 9_000,
         state: 'open',
@@ -2291,6 +2487,7 @@ describe('SessionManager — PR reconciliation', () => {
         repo: 'owner/repo',
         pr_number: 9,
         head_sha: 'head-nine',
+        correlation_id: null,
         profile_id: 'repo-oneshot',
         opened_at: 9_000,
         state: 'open',

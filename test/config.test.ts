@@ -333,6 +333,57 @@ describe('GATE_TIMEOUT_MS config', () => {
   });
 });
 
+describe('DECISION_CAPTURE config', () => {
+  const TOUCHED = [
+    'SLACK_BOT_TOKEN',
+    'SLACK_APP_TOKEN',
+    'DECISION_CAPTURE',
+  ] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of TOUCHED) saved[key] = process.env[key];
+    process.env['SLACK_BOT_TOKEN'] = 'xoxb-test';
+    process.env['SLACK_APP_TOKEN'] = 'xapp-test';
+    delete process.env['DECISION_CAPTURE'];
+  });
+
+  afterEach(() => {
+    for (const key of TOUCHED) {
+      const val = saved[key];
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  });
+
+  it('defaults DECISION_CAPTURE to false when the env var is absent', async () => {
+    const { loadConfig } = await import('../src/config.js');
+    expect(loadConfig().decisionCapture).toBe(false);
+  });
+
+  it('accepts true-ish values case-insensitively', async () => {
+    const { loadConfig } = await import('../src/config.js');
+    for (const value of ['1', 'true', 'TRUE', 'yes', 'YeS']) {
+      process.env['DECISION_CAPTURE'] = value;
+      expect(loadConfig().decisionCapture).toBe(true);
+    }
+  });
+
+  it('accepts false-ish values case-insensitively', async () => {
+    const { loadConfig } = await import('../src/config.js');
+    for (const value of ['0', 'false', 'FALSE', 'no', 'No']) {
+      process.env['DECISION_CAPTURE'] = value;
+      expect(loadConfig().decisionCapture).toBe(false);
+    }
+  });
+
+  it('rejects invalid boolean values', async () => {
+    process.env['DECISION_CAPTURE'] = 'maybe';
+    const { loadConfig } = await import('../src/config.js');
+    expect(() => loadConfig()).toThrow(/DECISION_CAPTURE/);
+  });
+});
+
 describe('spendCaps config (Slice B1)', () => {
   // Each test in this suite mutates a set of env vars and restores them in afterEach.
   const CAP_VARS = [

@@ -31,6 +31,7 @@ export interface GatewayDeps {
   prStateReader?: PrStateReader;
   spendCaps?: SpendCapsConfig;
   buildRunnerFactory?: BuildRunnerFactory;
+  decisionCapture?: boolean;
 }
 
 export function buildGateway(deps: GatewayDeps): { sessions: SessionManager } {
@@ -47,6 +48,7 @@ export function buildGateway(deps: GatewayDeps): { sessions: SessionManager } {
     ...(deps.prStateReader !== undefined && { prStateReader: deps.prStateReader }),
     ...(deps.spendCaps !== undefined && { spendCaps: deps.spendCaps }),
     ...(deps.buildRunnerFactory !== undefined && { buildRunnerFactory: deps.buildRunnerFactory }),
+    ...(deps.decisionCapture !== undefined ? { decisionCapture: deps.decisionCapture } : {}),
   });
   registerSlackHandlers(deps.app, {
     sessions,
