@@ -60,7 +60,7 @@ export interface AuditEvent {
   user_id: string | null;
   profile_id: string | null;
   ts: number;
-  kind: 'action' | 'approval' | 'comprehension' | 'correction' | 'cost' | 'decision' | 'error' | 'lifecycle' | 'timing';
+  kind: 'action' | 'approval' | 'comprehension' | 'correction' | 'cost' | 'decision' | 'error' | 'lifecycle' | 'protocol_skip' | 'timing';
   tool: string | null;
   summary: string | null;
   reasoning: string | null;

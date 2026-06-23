@@ -275,6 +275,32 @@ describe('SqliteSessionStore — audit_events', () => {
     expect(row?.cost_micro_usd).toBeNull();
   });
 
+  it('recordAudit + getAuditEvents round-trip stores protocol_skip kind correctly', () => {
+    const event: AuditEvent = {
+      session_key: 'T:C:PSKIP',
+      team_id: 'TEAM1',
+      user_id: 'U1',
+      profile_id: 'conversational',
+      ts: 1_700_000_001_000,
+      kind: 'protocol_skip',
+      tool: null,
+      summary: '42b',
+      reasoning: null,
+      result: 'json_parse',
+      cost_tokens: null,
+      cost_micro_usd: null,
+      durations_ms: null,
+      graded_audit_id: null,
+    };
+    store.recordAudit(event);
+
+    const rows = store.getAuditEvents('T:C:PSKIP');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe('protocol_skip');
+    expect(rows[0]?.result).toBe('json_parse');
+    expect(rows[0]?.summary).toBe('42b');
+  });
+
   it('getAuditEvents returns empty array for unknown session key', () => {
     expect(store.getAuditEvents('NO:SUCH:KEY')).toHaveLength(0);
   });

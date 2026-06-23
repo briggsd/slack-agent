@@ -394,7 +394,7 @@ export class DockerRunner implements SessionRunner {
           try {
             parsed = JSON.parse(rawLine) as RunnerToGatewayMessage;
           } catch {
-            // Skip unparseable lines
+            yield { type: 'protocol_skip', reason: 'json_parse', bytes: Buffer.byteLength(rawLine, 'utf8') } as RunnerEvent;
             continue;
           }
 
@@ -429,6 +429,7 @@ export class DockerRunner implements SessionRunner {
               typeof parsed.rationale !== 'string' ||
               (parsed.correlationId !== undefined && typeof parsed.correlationId !== 'string')
             ) {
+              yield { type: 'protocol_skip', reason: 'decision_invalid', bytes: Buffer.byteLength(rawLine, 'utf8') } as RunnerEvent;
               continue;
             }
             yield {

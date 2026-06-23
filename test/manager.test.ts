@@ -2254,6 +2254,37 @@ describe('SessionManager — audit emission', () => {
     expect(lifecycle[0]?.team_id).toBe('TEAM');
     expect(lifecycle[0]?.profile_id).toBe('supervised-repo-oneshot');
   });
+
+  it('audits a protocol_skip row and does not terminate the turn', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory: RunnerFactory = {
+      create: async (key) =>
+        new DecisionRunner(key, [{ type: 'protocol_skip', reason: 'json_parse', bytes: 9 }]),
+    };
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    await manager.enqueueNew('TEAM:C:PSKIP:1', {
+      message: 'hello',
+      channel: 'C',
+      threadTs: 'PSKIP:1',
+      teamId: 'TEAM',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const skips = store.audits.filter((a) => a.kind === 'protocol_skip');
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toMatchObject({
+      result: 'json_parse',
+      summary: '9b',
+      tool: null,
+      profile_id: 'conversational',
+    });
+    // The skip must not cause an error outcome — no error audit row, no PR.
+    expect(store.audits.filter((a) => a.kind === 'error')).toHaveLength(0);
+    expect(store.pullRequests).toHaveLength(0);
+  });
 });
 
 /** Runner used by the cancel-audit test above (same shape as AbandonRunner). */

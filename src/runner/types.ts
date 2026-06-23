@@ -2,6 +2,8 @@ import type { Profile } from '../profiles/registry.js';
 
 export type ErrorReason = 'timeout' | 'container_exit' | 'runner_error';
 
+export type ProtocolSkipReason = 'json_parse' | 'decision_invalid';
+
 export type RunnerEvent =
   | { type: 'status'; text: string }   // progress note (tool use etc.)
   | { type: 'file'; name: string; data: Buffer }  // file produced during the turn
@@ -31,6 +33,10 @@ export type RunnerEvent =
   // gateway-internal: the coordinator emitted a structured verification decision. Recorded as data
   // in the audit ledger and never acted on as control.
   | { type: 'decision'; point: 'verify'; verdict: 'pass' | 'fail'; rationale: string; correlationId?: string }
+  // gateway-internal: the protocol read loop discarded a malformed line (bad JSON or invalid
+  // decision fields). Content-free — session key + reason + byte count only. Does NOT terminate
+  // the stream; the turn drains normally after the skip. Never crosses the container boundary.
+  | { type: 'protocol_skip'; reason: ProtocolSkipReason; bytes: number }
   | { type: 'error'; message: string; reason: ErrorReason }
   // gateway-internal: the coordinator's build_spec tool asked the gateway to run the build
   // tail (a fresh implementer container on the shared volume). The manager services it and
