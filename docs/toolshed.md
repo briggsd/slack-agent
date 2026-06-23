@@ -61,7 +61,7 @@ and sends data back. The agent's model code stays inside the container the whole
 | # | Layer | File(s) | What lives here |
 |---|---|---|---|
 | 1 | Tool surface | `runner/src/main.ts` (`buildCommitMcpServer`) | The zod input schema, the `tool()` definition, and the handler that turns the coordinator's outcome into text for the agent. Tools register on an in-process MCP server with `alwaysLoad: true`. |
-| 2 | Coordinator | `runner/src/<tool>.ts` | A small class that emits the request line and returns a promise it resolves when the matching result arrives. New ones extend `RequestCoordinator` (`runner/src/publish.ts`). |
+| 2 | Coordinator | `runner/src/<tool>.ts` | A small class that emits the request line and returns a promise it resolves when the matching result arrives. New ones compose the exported `RequestCoordinator` (`runner/src/request-coordinator.ts`) — hold it as a `private readonly base` and delegate, as `read-issue.ts`/`publish.ts` do; you don't subclass it. |
 | 3 | Protocol | `src/runner/protocol.ts` **≡** `runner/src/protocol.ts` | The `request_*` / `*_result` message pair. The two copies must stay byte-identical. The runner parses inbound results in `runner/src/approval.ts` (`parseInbound`). |
 | 4 | Gateway dispatch | `src/runner/docker.ts` | A branch in the read loop: validate the line, do the work, write the result back to the container's stdin. |
 | 5 | Gateway service | `src/runner/<tool>-service.ts` (interface), `src/oneshot/<tool>-service.ts` (`Real*` impl), wired in `src/index.ts` | The code that performs the privileged work (the GitHub call, the credential lease). Injected into `DockerRunner` so tests can swap a fake. |

@@ -16,8 +16,9 @@ access, confined by the container. See the root `CLAUDE.md` and
 - **Adding a tool? Follow `docs/toolshed.md`.** A gateway-serviced tool spans five
   files (the protocol pair, the coordinator here, the gateway dispatch, and the
   service). The toolshed doc walks the checklist and names the precedent to mirror
-  (`edit_pr`/`comment_pr`). New coordinators extend `RequestCoordinator` in
-  `src/publish.ts`.
+  (`edit_pr`/`comment_pr`). New coordinators compose the exported `RequestCoordinator`
+  (`src/request-coordinator.ts`) — hold it as a `private readonly base` and delegate, as
+  `read-issue.ts`/`publish.ts` do; you don't subclass it.
 
 - **Ground every Agent SDK call in the real type definitions — don't recall the
   API.** Before writing code that calls `@anthropic-ai/claude-agent-sdk`, read its
