@@ -227,18 +227,23 @@ export class DockerRunner implements SessionRunner {
        *  measured service wall-clock. Return null for no event. */
       toEvent?: (outcome: TOutcome, elapsedMs: number) => RunnerEvent | null;
     },
-  ): AsyncGenerator<RunnerEvent, 'ok' | 'fatal', GateResume | BuildOutcome | ExecOutcome | undefined> {
+  ): AsyncGenerator<RunnerEvent, 'serviced' | 'skipped' | 'fatal', GateResume | BuildOutcome | ExecOutcome | undefined> {
+    // Verdict contract: 'serviced' = the service ran and a result was written, so the caller
+    // resets the turn deadline (real gateway-side work happened). 'skipped' = the line was
+    // malformed or missing its id, so no work ran and the caller must NOT reset the deadline
+    // — otherwise a container could keep its turn alive indefinitely by spamming bad lines.
+    // 'fatal' = stdin is no longer writable, so the run must end.
     const id = (parsed as { id?: unknown }).id;
     if (typeof id !== 'string') {
       console.error(`[gateway] malformed ${spec.requestType}: missing id — skipping`);
-      return 'ok';
+      return 'skipped';
     }
     const req = spec.validate(parsed);
     if (req === null) {
       if (this.child.stdin?.writable) {
         this.child.stdin.write(JSON.stringify(spec.malformedResult(id)) + '\n');
       }
-      return 'ok';
+      return 'skipped';
     }
     yield { type: 'status', text: spec.statusText(req) } as RunnerEvent;
     const start = this.now();
@@ -253,7 +258,7 @@ export class DockerRunner implements SessionRunner {
     if (event !== null && event !== undefined) {
       yield event;
     }
-    return 'ok';
+    return 'serviced';
   }
 
   private unexpectedExitMessage(): string {
@@ -522,6 +527,7 @@ export class DockerRunner implements SessionRunner {
               malformedResult: (id) => ({ type: 'clone_result', id, ok: false, error: 'malformed request' }),
             });
             if (cloneVerdict === 'fatal') return;
+            if (cloneVerdict === 'skipped') continue;
             // The clone is gateway-side work (lease + ephemeral git container), not the agent's —
             // give the post-clone continuation a fresh turn budget rather than charging it the
             // clone's wall-clock, the same reasoning the approval branch resets `deadline`.
@@ -656,6 +662,7 @@ export class DockerRunner implements SessionRunner {
                 : null,
             });
             if (publishVerdict === 'fatal') return;
+            if (publishVerdict === 'skipped') continue;
             // Publishing is gateway-side work (lease + push + PR), not the agent's — give the
             // post-publish continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
@@ -693,6 +700,7 @@ export class DockerRunner implements SessionRunner {
                 : null,
             });
             if (editVerdict === 'fatal') return;
+            if (editVerdict === 'skipped') continue;
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_pr_comment') {
@@ -722,6 +730,7 @@ export class DockerRunner implements SessionRunner {
                 : null,
             });
             if (commentVerdict === 'fatal') return;
+            if (commentVerdict === 'skipped') continue;
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_run_checks') {
@@ -751,6 +760,7 @@ export class DockerRunner implements SessionRunner {
               malformedResult: (id) => ({ type: 'run_checks_result', id, ok: false, reason: 'malformed request' }),
             });
             if (checksVerdict === 'fatal') return;
+            if (checksVerdict === 'skipped') continue;
             // Checks are gateway-side work (ephemeral check container), not the agent's — give
             // the post-check continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
@@ -776,6 +786,7 @@ export class DockerRunner implements SessionRunner {
               malformedResult: (id) => ({ type: 'provision_result', id, ok: false, error: 'malformed request' }),
             });
             if (provisionVerdict === 'fatal') return;
+            if (provisionVerdict === 'skipped') continue;
             // Provisioning is gateway-side work; give the post-provision continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
             continue;
