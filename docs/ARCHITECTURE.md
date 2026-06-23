@@ -43,6 +43,9 @@ Three layers:
 | **Protocol** | `src/runner/protocol.ts` ≡ `runner/src/protocol.ts` | Newline-delimited JSON over the container's stdin/stdout. The only channel between gateway and sandbox. |
 | **Runner** | `runner/` | Untrusted-ish sandbox. One per session. Runs the Claude Agent SDK (the Claude Code engine) with full tool access *inside* the container. |
 
+The agent reaches the host (GitHub, credentials) through gateway-serviced tools that ride
+the protocol. How they work and how to add one: `docs/toolshed.md`.
+
 ### Key design decisions (and why)
 
 - **Socket Mode** — the gateway dials out to Slack over a websocket, so it runs anywhere

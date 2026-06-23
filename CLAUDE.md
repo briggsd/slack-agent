@@ -94,6 +94,9 @@ test/                 gateway tests (offline)
   frame, and the resolved/parked design questions. Consult these before proposing
   architectural changes.
 - **`docs/ARCHITECTURE.md`** — the *as-built* system (security model, limitations).
+- **`docs/toolshed.md`** — how the agent's tools work and how to add one (the
+  gateway-serviced tool pattern: protocol pair → coordinator → docker dispatch →
+  service). Read it before wiring a new tool.
 - **`planning/`** — the *when*: the M1–M7 roadmap and per-milestone specs. New work
   starts from `planning/_spec-template.md`.
 
