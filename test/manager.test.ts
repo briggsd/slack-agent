@@ -691,6 +691,7 @@ describe('SessionManager — build_spec approval_requested', () => {
       result: null,
       cost_tokens: null,
       cost_micro_usd: 5_000_000,
+      durations_ms: null,
     });
 
     const accepted = await manager.enqueueExisting('TEAM:C:T', {
@@ -1267,6 +1268,18 @@ class DecisionRunner implements SessionRunner {
   async dispose(): Promise<void> {}
 }
 
+interface TimingDurations {
+  agentMs: number;
+  spawnMs?: number;
+  publishMs?: number;
+}
+
+function parseTimingDurations(event: AuditEvent | undefined): TimingDurations {
+  expect(event?.kind).toBe('timing');
+  expect(event?.durations_ms).not.toBeNull();
+  return JSON.parse(event?.durations_ms ?? '{}') as TimingDurations;
+}
+
 describe('SessionManager — audit emission', () => {
   it('emits a lifecycle/created event when a new session is created', async () => {
     const slack = new FakeSlackClient();
@@ -1722,6 +1735,100 @@ describe('SessionManager — audit emission', () => {
     });
     expect(store.pullRequests).toHaveLength(0);
     expect(slack.updates.some((u) => u.text.includes('http://x/pr/3'))).toBe(false);
+  });
+
+  it('writes one timing row per top-level turn with agentMs, and only the cold start turn carries spawnMs', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory = new FakeRunnerFactory([
+      [{ type: 'text', text: 'first turn done' }],
+      [{ type: 'text', text: 'second turn done' }],
+    ]);
+    const nowValues = [100, 140, 200, 275, 300, 355];
+    let nowIndex = 0;
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      now: () => nowValues[nowIndex++] ?? nowValues[nowValues.length - 1]!,
+    });
+
+    await manager.enqueueNew('TEAM:C:TIMING', {
+      message: 'first',
+      channel: 'C',
+      threadTs: 'TIMING',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    await manager.enqueueExisting('TEAM:C:TIMING', {
+      message: 'second',
+      channel: 'C',
+      threadTs: 'TIMING',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const timingAudits = store.audits.filter((a) => a.kind === 'timing');
+    expect(timingAudits).toHaveLength(2);
+
+    const first = parseTimingDurations(timingAudits[0]);
+    expect(first.agentMs).toBe(75);
+    expect(first.spawnMs).toBe(40);
+    expect(first.publishMs).toBeUndefined();
+
+    const second = parseTimingDurations(timingAudits[1]);
+    expect(second.agentMs).toBe(55);
+    expect(second.spawnMs).toBeUndefined();
+    expect(second.publishMs).toBeUndefined();
+  });
+
+  it('sums pr_* elapsedMs into publishMs on the turn timing row', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const factory: RunnerFactory = {
+      create: async (key) =>
+        new DecisionRunner(key, [
+          { type: 'pr_edited', url: 'http://x/pr/2', elapsedMs: 20 },
+          { type: 'pr_commented', url: 'http://x/pr/2', elapsedMs: 30 },
+          {
+            type: 'pr_opened',
+            url: 'http://x/pr/2',
+            repo: 'acme/widgets',
+            number: 9,
+            headSha: 'cafebabe1234',
+            elapsedMs: 40,
+          },
+        ]),
+    };
+    const nowValues = [100, 105, 200, 230, 260];
+    let nowIndex = 0;
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      now: () => nowValues[nowIndex++] ?? nowValues[nowValues.length - 1]!,
+    });
+
+    await manager.enqueueNew('TEAM:C:PUBLISH', {
+      message: 'publish timing',
+      channel: 'C',
+      threadTs: 'PUBLISH',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const timingAudits = store.audits.filter((a) => a.kind === 'timing');
+    expect(timingAudits).toHaveLength(1);
+    expect(parseTimingDurations(timingAudits[0])).toEqual({
+      agentMs: 60,
+      spawnMs: 5,
+      publishMs: 90,
+    });
   });
 
   it('a started exec reconciles to a terminal audit (started → succeeded_pr), summary is the PR URL only', async () => {
@@ -2572,6 +2679,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       result: null,
       cost_tokens: null,
       cost_micro_usd: 5_000_000, // $5 already spent
+      durations_ms: null,
     });
 
     const manager = new SessionManager({
@@ -2633,6 +2741,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       result: null,
       cost_tokens: null,
       cost_micro_usd: 10_000_000, // $10 global spend
+      durations_ms: null,
     });
 
     const manager = new SessionManager({
@@ -2695,6 +2804,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       result: null,
       cost_tokens: null,
       cost_micro_usd: 8_000_000, // $8 already spent
+      durations_ms: null,
     });
 
     const manager = new SessionManager({
@@ -2811,6 +2921,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       result: null,
       cost_tokens: null,
       cost_micro_usd: 5_000_000, // $5 — exceeds $3 cap
+      durations_ms: null,
     });
 
     const prevPosts = slack.posts.length;
@@ -2965,6 +3076,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       result: null,
       cost_tokens: null,
       cost_micro_usd: 10_000_000,
+      durations_ms: null,
     });
 
     const manager = new SessionManager({
@@ -3013,6 +3125,7 @@ describe('SessionManager — spend-caps enforcement', () => {
       result: null,
       cost_tokens: null,
       cost_micro_usd: 10_000_000, // $10, but outside window
+      durations_ms: null,
     });
 
     const manager = new SessionManager({

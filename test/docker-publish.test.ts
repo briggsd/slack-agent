@@ -56,19 +56,21 @@ const DEFAULT_CONFIG: DockerRunnerConfig = {
 };
 
 async function makeReadyRunner(opts?: {
+  config?: Partial<DockerRunnerConfig>;
   publishService?: FakePublishService;
   volume?: string;
 }): Promise<{ runner: DockerRunner; fake: FakeChildProcess }> {
   const fake = new FakeChildProcess();
+  const config = { ...DEFAULT_CONFIG, ...opts?.config };
   const runner = new DockerRunner(
     fake.asChildProcess(),
-    DEFAULT_CONFIG,
+    config,
     undefined,
     undefined,
     opts?.volume,
     opts?.publishService,
   );
-  const readyPromise = DockerRunner.waitReady(runner, DEFAULT_CONFIG.readyTimeoutMs);
+  const readyPromise = DockerRunner.waitReady(runner, config.readyTimeoutMs);
   fake.writeOut(JSON.stringify({ type: 'ready' }));
   await readyPromise;
   return { runner, fake };
@@ -94,6 +96,11 @@ function turnId(fake: FakeChildProcess): string {
   return (JSON.parse(fake.stdinLines[0] ?? '{}') as { id: string }).id;
 }
 
+function scriptedNow(...values: number[]): () => number {
+  let index = 0;
+  return () => values[index++] ?? values[values.length - 1]!;
+}
+
 describe('DockerRunner — request_publish round-trip', () => {
   it('request_publish → status + publish_result{ok:true} + pr_opened when publishService returns ok', async () => {
     const publishService = new FakePublishService();
@@ -103,7 +110,11 @@ describe('DockerRunner — request_publish round-trip', () => {
       prNumber: 17,
       headSha: 'publish-head-sha',
     });
-    const { runner, fake } = await makeReadyRunner({ publishService, volume: 'slackbot-ws-test' });
+    const { runner, fake } = await makeReadyRunner({
+      publishService,
+      volume: 'slackbot-ws-test',
+      config: { now: scriptedNow(100, 145) },
+    });
 
     const iter = runner.send('publish it')[Symbol.asyncIterator]();
     const e1Promise = iter.next();
@@ -146,6 +157,7 @@ describe('DockerRunner — request_publish round-trip', () => {
       number: 17,
       headSha: 'publish-head-sha',
       correlationId: 'build-77',
+      elapsedMs: 45,
     });
 
     const e3Promise = iter.next();

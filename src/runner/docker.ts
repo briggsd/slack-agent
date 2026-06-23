@@ -59,6 +59,8 @@ import type { ProvisionOutcome, RuntimeProvisionRequest } from './runtime-provis
 export interface DockerRunnerConfig {
   /** Docker image for the runner container */
   image: string;
+  /** Clock seam for publish timing tests. Default: Date.now. */
+  now?: () => number;
   /** Ready-handshake timeout in ms */
   readyTimeoutMs: number;
   /** Per-turn timeout in ms */
@@ -125,6 +127,7 @@ const SAFE_OWNER_REPO_SLUG = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 export class DockerRunner implements SessionRunner {
   private readonly child: ChildProcess;
   private readonly config: DockerRunnerConfig;
+  private readonly now: () => number;
   private readonly escalation: { containerName: string; spawnFn: SpawnFn } | null;
   private readonly cloneService?: CloneService;
   private readonly volume?: string;
@@ -163,6 +166,7 @@ export class DockerRunner implements SessionRunner {
   ) {
     this.child = child;
     this.config = config;
+    this.now = config.now ?? (() => Date.now());
     this.escalation = escalation ?? null;
     if (cloneService !== undefined) this.cloneService = cloneService;
     if (volume !== undefined) this.volume = volume;
@@ -619,8 +623,11 @@ export class DockerRunner implements SessionRunner {
             yield { type: 'status', text: `publishing ${publishReq.repo}…` } as RunnerEvent;
 
             let publishOutcome: PublishOutcome;
+            let publishElapsedMs = 0;
             if (self.publishService !== undefined && self.volume !== undefined) {
+              const publishStart = self.now();
               publishOutcome = await self.publishService.publish(publishReq);
+              publishElapsedMs = self.now() - publishStart;
             } else {
               publishOutcome = { ok: false, reason: 'publish unavailable' };
             }
@@ -640,6 +647,7 @@ export class DockerRunner implements SessionRunner {
                 repo: publishReq.repo,
                 number: publishOutcome.prNumber,
                 headSha: publishOutcome.headSha,
+                elapsedMs: publishElapsedMs,
                 ...(correlationId !== undefined ? { correlationId } : {}),
               } as RunnerEvent;
             }
@@ -680,8 +688,11 @@ export class DockerRunner implements SessionRunner {
             yield { type: 'status', text: `editing PR for ${editReq.repo}…` } as RunnerEvent;
 
             let editOutcome: PrEditOutcome;
+            let editElapsedMs = 0;
             if (self.publishService !== undefined && self.volume !== undefined) {
+              const editStart = self.now();
               editOutcome = await self.publishService.editPr(editReq);
+              editElapsedMs = self.now() - editStart;
             } else {
               editOutcome = { ok: false, reason: 'edit unavailable' };
             }
@@ -695,7 +706,7 @@ export class DockerRunner implements SessionRunner {
               : { type: 'pr_edit_result', id: editId, ok: false, reason: editOutcome.reason };
             self.child.stdin.write(JSON.stringify(editResult satisfies GatewayToRunnerMessage) + '\n');
             if (editOutcome.ok) {
-              yield { type: 'pr_edited', url: editOutcome.prUrl } as RunnerEvent;
+              yield { type: 'pr_edited', url: editOutcome.prUrl, elapsedMs: editElapsedMs } as RunnerEvent;
             }
             deadline = Date.now() + turnTimeoutMs;
             continue;
@@ -729,8 +740,11 @@ export class DockerRunner implements SessionRunner {
             yield { type: 'status', text: `commenting on PR for ${commentReq.repo}…` } as RunnerEvent;
 
             let commentOutcome: PrCommentOutcome;
+            let commentElapsedMs = 0;
             if (self.publishService !== undefined && self.volume !== undefined) {
+              const commentStart = self.now();
               commentOutcome = await self.publishService.commentPr(commentReq);
+              commentElapsedMs = self.now() - commentStart;
             } else {
               commentOutcome = { ok: false, reason: 'comment unavailable' };
             }
@@ -744,7 +758,7 @@ export class DockerRunner implements SessionRunner {
               : { type: 'pr_comment_result', id: commentId, ok: false, reason: commentOutcome.reason };
             self.child.stdin.write(JSON.stringify(commentResult satisfies GatewayToRunnerMessage) + '\n');
             if (commentOutcome.ok) {
-              yield { type: 'pr_commented', url: commentOutcome.prUrl } as RunnerEvent;
+              yield { type: 'pr_commented', url: commentOutcome.prUrl, elapsedMs: commentElapsedMs } as RunnerEvent;
             }
             deadline = Date.now() + turnTimeoutMs;
             continue;

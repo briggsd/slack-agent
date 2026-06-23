@@ -494,6 +494,7 @@ describe('S12a — SessionManager.runBuild via public drive path', () => {
         result: null,
         cost_tokens: null,
         cost_micro_usd: 5_000_000,
+        durations_ms: null,
       });
 
       releaseRouter();
