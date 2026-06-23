@@ -58,7 +58,7 @@ function turnId(fake: FakeChildProcess): string {
   return (JSON.parse(fake.stdinLines[0] ?? '{}') as { id: string }).id;
 }
 
-describe('DockerRunner — decision dispatch', () => {
+describe('DockerRunner — decision dispatch + protocol skips', () => {
   it('yields a decision event for a valid one-way decision line on the active turn id', async () => {
     const { runner, fake } = await makeReadyRunner();
 
@@ -96,7 +96,7 @@ describe('DockerRunner — decision dispatch', () => {
     const first = iter.next();
     await tick();
 
-    // Invalid verdict — must be skipped, not yielded and not fatal to the turn.
+    // Invalid verdict — must yield a protocol_skip event, not a decision event, and not be fatal.
     fake.writeOut(JSON.stringify({
       type: 'decision',
       id: turnId(fake),
@@ -104,10 +104,36 @@ describe('DockerRunner — decision dispatch', () => {
       verdict: 'maybe',
       rationale: 'not a real verdict',
     }));
-    // The turn drains to its terminal text; the bad decision never surfaces.
+    // The protocol_skip event surfaces first, then the terminal text.
     fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'done' }));
 
-    expect((await first).value).toEqual({ type: 'text', text: 'done' });
+    expect((await first).value).toEqual({ type: 'protocol_skip', reason: 'decision_invalid', bytes: expect.any(Number) });
+    expect((await iter.next()).value).toEqual({ type: 'text', text: 'done' });
+    expect((await iter.next()).done).toBe(true);
+  });
+
+  it('yields a protocol_skip (json_parse) for an unparseable line and then drains normally', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const iter = runner.send('hello')[Symbol.asyncIterator]();
+    const first = iter.next();
+    await tick();
+
+    // Deliberately unparseable — not valid JSON.
+    fake.writeOut('not json{');
+
+    const firstResult = await first;
+    expect(firstResult.value).toEqual({
+      type: 'protocol_skip',
+      reason: 'json_parse',
+      bytes: expect.any(Number),
+    });
+    expect((firstResult.value as { bytes: number }).bytes).toBeGreaterThan(0);
+
+    // Turn still drains to terminal text after the skip.
+    const second = iter.next();
+    fake.writeOut(JSON.stringify({ type: 'text', id: turnId(fake), text: 'done' }));
+    expect((await second).value).toEqual({ type: 'text', text: 'done' });
     expect((await iter.next()).done).toBe(true);
   });
 });

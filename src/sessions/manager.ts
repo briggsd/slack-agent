@@ -915,6 +915,20 @@ export class SessionManager {
             summary: event.correlationId ?? null,
             reasoning: this.decisionCapture ? event.rationale : null,
           });
+        } else if (event.type === 'protocol_skip') {
+          console.error(
+            `[session] protocol skip (${event.reason}) ${session.key}: ${event.bytes}b`,
+          );
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
+            kind: 'protocol_skip',
+            tool: null,
+            result: event.reason,
+            summary: `${event.bytes}b`,
+          });
         } else if (event.type === 'error') {
           // The message is safe for gateway logs + the audit ledger only when the
           // gateway itself generated it (timeout duration; container exit code/signal).
