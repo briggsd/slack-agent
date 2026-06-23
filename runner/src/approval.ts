@@ -18,6 +18,7 @@ import type {
   PrEditResultMessage,
   PrCommentResultMessage,
   ProvisionResultMessage,
+  ReadIssueResultMessage,
   RunChecksResult,
   RunChecksResultMessage,
   UserMessage,
@@ -186,6 +187,7 @@ export type InboundParsed =
   | { kind: 'pr_comment_result'; msg: PrCommentResultMessage }
   | { kind: 'run_checks_result'; msg: RunChecksResultMessage }
   | { kind: 'provision_result'; msg: ProvisionResultMessage }
+  | { kind: 'read_issue_result'; msg: ReadIssueResultMessage }
   | { kind: 'bad'; error: string };
 
 /**
@@ -366,6 +368,34 @@ export function parseInbound(line: string): InboundParsed {
         ? { type: 'provision_result', id, ok: false, error: obj['error'] }
         : { type: 'provision_result', id, ok: false };
     return { kind: 'provision_result', msg };
+  }
+  if (obj['type'] === 'read_issue_result') {
+    if (typeof obj['id'] !== 'string' || typeof obj['ok'] !== 'boolean') {
+      return { kind: 'bad', error: 'unexpected read_issue_result shape' };
+    }
+    const ok = obj['ok'];
+    const id = obj['id'];
+    let msg: ReadIssueResultMessage;
+    if (ok) {
+      const issue = obj['issue'];
+      if (
+        typeof issue !== 'object' ||
+        issue === null ||
+        typeof (issue as Record<string, unknown>)['title'] !== 'string' ||
+        typeof (issue as Record<string, unknown>)['body'] !== 'string' ||
+        ((issue as Record<string, unknown>)['state'] !== 'open' && (issue as Record<string, unknown>)['state'] !== 'closed') ||
+        typeof (issue as Record<string, unknown>)['author'] !== 'string'
+      ) {
+        return { kind: 'bad', error: 'unexpected read_issue_result shape' };
+      }
+      const issueTyped = issue as { title: string; body: string; state: 'open' | 'closed'; author: string };
+      msg = { type: 'read_issue_result', id, ok: true, issue: issueTyped };
+    } else if (typeof obj['reason'] === 'string') {
+      msg = { type: 'read_issue_result', id, ok: false, reason: obj['reason'] };
+    } else {
+      msg = { type: 'read_issue_result', id, ok: false };
+    }
+    return { kind: 'read_issue_result', msg };
   }
   return { kind: 'bad', error: 'unknown message type' };
 }

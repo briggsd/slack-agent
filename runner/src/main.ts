@@ -39,6 +39,8 @@ import { ChecksCoordinator } from './checks.js';
 import type { ChecksInput, ChecksOutcome } from './checks.js';
 import { ProvisionCoordinator } from './provision.js';
 import type { ProvisionInput, ProvisionOutcome } from './provision.js';
+import { ReadIssueCoordinator } from './read-issue.js';
+import type { ReadIssueInput, ReadIssueOutcome } from './read-issue.js';
 import type { RunChecksKind } from './protocol.js';
 
 type VerificationInput = {
@@ -121,6 +123,11 @@ export type SdkQueryFn = (params: {
    * pinned runtime from the gateway catalog onto the shared session volume.
    */
   provisionRuntime?: (input: ProvisionInput) => Promise<ProvisionOutcome>;
+  /**
+   * Bound at the runner so the SDK's `read_issue` tool can ask the gateway to read an issue
+   * from the host API. The gateway holds the credential; the token never enters the container.
+   */
+  readIssue?: (input: ReadIssueInput) => Promise<ReadIssueOutcome>;
   options?: {
     resume?: string;
     cwd?: string;
@@ -406,6 +413,27 @@ export async function runProvisionRuntime(
     : `RUNTIME NOT PROVISIONED: ${outcome.error}. Tell the user the short failure reason; do not fetch an arbitrary runtime yourself.`;
 }
 
+/**
+ * The read_issue tool flow: ask the gateway to read an issue from the host API and
+ * return the issue data as text to the agent. Never logs the body.
+ */
+export async function runReadIssue(
+  input: ReadIssueInput,
+  readIssue: (input: ReadIssueInput) => Promise<ReadIssueOutcome>,
+): Promise<string> {
+  const outcome = await readIssue(input);
+  if (!outcome.ok) {
+    return `READ ISSUE DID NOT COMPLETE: ${outcome.reason}. Tell the user the short failure reason.`;
+  }
+  const { title, state, author, body } = outcome.issue;
+  return [
+    `ISSUE #${input.number} (${state}) — ${title}`,
+    `Author: ${author}`,
+    '',
+    body,
+  ].join('\n');
+}
+
 function publishInputFromArgs(args: {
   repo: string;
   title?: string | undefined;
@@ -471,6 +499,18 @@ function execInputFromArgs(args: {
 
 function provisionInputFromArgs(args: { name: string }): ProvisionInput {
   return { name: args.name };
+}
+
+function readIssueInputFromArgs(args: {
+  repo: string;
+  number: number;
+  host?: ExecHost | undefined;
+}): ReadIssueInput {
+  return {
+    host: args.host ?? 'github',
+    repo: args.repo,
+    number: args.number,
+  };
 }
 
 // ── Stdout helpers (one line per event, no content logged) ───────────────────
@@ -593,6 +633,18 @@ export async function runLoop(opts: {
     });
   });
 
+  // The read_issue coordinator. `read_issue` calls requestReadIssue mid-turn; inbound
+  // read_issue_result lines are routed to readIssueCoordinator.handleResult by the dispatcher.
+  const readIssueCoordinator = new ReadIssueCoordinator((input, readIssueId) => {
+    emit({
+      type: 'request_read_issue',
+      id: readIssueId,
+      host: input.host,
+      repo: input.repo,
+      number: input.number,
+    });
+  });
+
   // Signal readiness
   emit({ type: 'ready' });
 
@@ -677,6 +729,12 @@ export async function runLoop(opts: {
           }
           return;
         }
+        if (parsed.kind === 'read_issue_result') {
+          if (!readIssueCoordinator.handleResult(parsed.msg)) {
+            log(`read_issue_result for unknown id ${parsed.msg.id} — ignored`);
+          }
+          return;
+        }
         if (parsed.kind === 'user') {
           turnQueue.push(parsed.msg);
           signal();
@@ -706,6 +764,7 @@ export async function runLoop(opts: {
     commentPrCoordinator.failAllPending();
     checksCoordinator.failAllPending();
     provisionCoordinator.failAllPending();
+    readIssueCoordinator.failAllPending();
     signal();
   });
 
@@ -723,6 +782,7 @@ export async function runLoop(opts: {
   const commentPr = (input: PrCommentInput): Promise<PrCommentOutcome> => commentPrCoordinator.requestCommentPr(input);
   const runChecks = (input: ChecksInput): Promise<ChecksOutcome> => checksCoordinator.requestChecks(input);
   const provisionRuntime = (input: ProvisionInput): Promise<ProvisionOutcome> => provisionCoordinator.requestProvision(input);
+  const readIssue = (input: ReadIssueInput): Promise<ReadIssueOutcome> => readIssueCoordinator.requestReadIssue(input);
 
   // Drain turns serially. A turn holds the loop until its SDK stream completes; verdicts for
   // an in-flight gate are delivered concurrently by the listener above, not from here.
@@ -756,6 +816,7 @@ export async function runLoop(opts: {
       editPr,
       commentPr,
       runChecks,
+      readIssue,
       reportVerification: async (turnId, input) => {
         const decision: RunnerToGatewayMessage = {
           type: 'decision',
@@ -794,6 +855,7 @@ async function processTurn(
     editPr: (input: PrEditInput) => Promise<PrEditOutcome>;
     commentPr: (input: PrCommentInput) => Promise<PrCommentOutcome>;
     runChecks: (input: ChecksInput) => Promise<ChecksOutcome>;
+    readIssue: (input: ReadIssueInput) => Promise<ReadIssueOutcome>;
     reportVerification: (turnId: string, input: VerificationInput) => Promise<void>;
     provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>;
   },
@@ -815,6 +877,7 @@ async function processTurn(
       editPr: deps.editPr,
       commentPr: deps.commentPr,
       runChecks: deps.runChecks,
+      readIssue: deps.readIssue,
       reportVerification: (input) => deps.reportVerification(id, input),
       provisionRuntime: deps.provisionRuntime,
       options: {
@@ -1144,6 +1207,7 @@ function buildCommitMcpServer(
   runChecksFn: (input: ChecksInput) => Promise<ChecksOutcome>,
   reportVerification: (input: VerificationInput) => Promise<void>,
   provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>,
+  readIssueFn: (input: ReadIssueInput) => Promise<ReadIssueOutcome>,
 ) {
   const buildSpecTool = tool(
     'build_spec',
@@ -1221,6 +1285,12 @@ function buildCommitMcpServer(
     name: z.string().describe('Runtime catalog name, for example "python".'),
   };
 
+  const readIssueSchema = {
+    repo: z.string().describe('Repository slug in "owner/name" format.'),
+    number: z.number().int().positive().describe('Issue number.'),
+    host: z.enum(['github', 'gitlab']).optional().describe('Git host. Omit for github.'),
+  };
+
   const runChecksTool = tool(
     'run_checks',
     'Run deterministic project checks on the local candidate through the gateway. Pass the ' +
@@ -1276,6 +1346,18 @@ function buildCommitMcpServer(
     },
   );
 
+  const readIssueTool = tool(
+    'read_issue',
+    'Read a repository issue (title, body, state, author) through the gateway credential path. ' +
+      'Pass the "owner/name" repo and the issue number. The gateway holds credentials; the token ' +
+      'never enters the container. The issue body is capped at 16384 characters.',
+    readIssueSchema,
+    async (args) => {
+      const text = await runReadIssue(readIssueInputFromArgs(args), readIssueFn);
+      return { content: [{ type: 'text' as const, text }] };
+    },
+  );
+
   const publishTool = tool(
     'publish',
     'Publish only a verified local candidate by asking the gateway to push the session worktree and open a PR, ' +
@@ -1324,7 +1406,7 @@ function buildCommitMcpServer(
   return createSdkMcpServer({
     name: 'commit',
     version: '0.0.0',
-    tools: [buildSpecTool, cloneRepoTool, runChecksTool, reportVerificationTool, provisionRuntimeTool, publishTool, openPrTool, editPrTool, commentPrTool, execTool],
+    tools: [buildSpecTool, cloneRepoTool, runChecksTool, reportVerificationTool, provisionRuntimeTool, publishTool, openPrTool, editPrTool, commentPrTool, execTool, readIssueTool],
     alwaysLoad: true,
   });
 }
@@ -1339,6 +1421,7 @@ function realSdkQuery(params: {
   editPr?: (input: PrEditInput) => Promise<PrEditOutcome>;
   commentPr?: (input: PrCommentInput) => Promise<PrCommentOutcome>;
   runChecks?: (input: ChecksInput) => Promise<ChecksOutcome>;
+  readIssue?: (input: ReadIssueInput) => Promise<ReadIssueOutcome>;
   reportVerification?: (input: VerificationInput) => Promise<void>;
   provisionRuntime?: (input: ProvisionInput) => Promise<ProvisionOutcome>;
   options?: {
@@ -1369,6 +1452,7 @@ function realSdkQuery(params: {
     && params.runChecks !== undefined
     && params.reportVerification !== undefined
     && params.provisionRuntime !== undefined
+    && params.readIssue !== undefined
       ? {
           commit: buildCommitMcpServer(
             params.submitSpec,
@@ -1382,6 +1466,7 @@ function realSdkQuery(params: {
             params.runChecks,
             params.reportVerification,
             params.provisionRuntime,
+            params.readIssue,
           ),
         }
       : undefined;
