@@ -76,6 +76,13 @@ export interface GitHostProvider {
     fetchFn: FetchFn;
     comment: string;
   }): Promise<{ url: string }>;
+  /** Read an issue (also matches PRs on GitHub). Returns title, body, state, and author. */
+  getIssue(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+  }): Promise<{ title: string; body: string; state: 'open' | 'closed'; author: string }>;
 }
 
 /** GitHub implementation. Credentials travel as Bearer tokens; never embedded in URLs. */
@@ -272,6 +279,40 @@ export class GithubProvider implements GitHostProvider {
       throw new Error('GitHub API returned no html_url for the comment');
     }
     return { url: data.html_url };
+  }
+
+  async getIssue(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+  }): Promise<{ title: string; body: string; state: 'open' | 'closed'; author: string }> {
+    const url = `https://api.github.com/repos/${req.repo}/issues/${req.number}`;
+    const res = await req.fetchFn(url, {
+      headers: {
+        Authorization: `Bearer ${req.token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'slack-agent',
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub API error ${res.status} fetching issue${await safeReason(res)}`);
+    }
+
+    const data = (await res.json()) as {
+      title?: unknown;
+      body?: unknown;
+      state?: unknown;
+      user?: { login?: unknown };
+    };
+
+    const title = typeof data.title === 'string' ? data.title : '';
+    const body = (data.body === null || data.body === undefined || typeof data.body !== 'string') ? '' : data.body;
+    const state: 'open' | 'closed' = data.state === 'closed' ? 'closed' : 'open';
+    const author = typeof data.user?.login === 'string' ? data.user.login : '';
+
+    return { title, body, state, author };
   }
 
   async getChangeRequestState(req: {

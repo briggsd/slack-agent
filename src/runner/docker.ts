@@ -46,6 +46,8 @@ import type { CheckService } from './check-service.js';
 import type { CheckOutcome, CheckServiceRequest, RunChecksKind } from './check-service.js';
 import type { RuntimeProvisionService } from './runtime-provision-service.js';
 import type { ProvisionOutcome, RuntimeProvisionRequest } from './runtime-provision-service.js';
+import type { ReadIssueService } from './read-issue-service.js';
+import type { ReadIssueOutcome, ReadIssueServiceRequest } from './read-issue-service.js';
 
 // ── Config types ──────────────────────────────────────────────────────────────
 
@@ -127,6 +129,7 @@ export class DockerRunner implements SessionRunner {
   private readonly publishService?: PublishService;
   private readonly checkService?: CheckService;
   private readonly runtimeProvisionService?: RuntimeProvisionService;
+  private readonly readIssueService?: ReadIssueService;
   private disposed = false;
 
   /** Buffer for partial stdout data (NDJSON framing — may receive split chunks) */
@@ -156,6 +159,7 @@ export class DockerRunner implements SessionRunner {
     publishService?: PublishService,
     checkService?: CheckService,
     runtimeProvisionService?: RuntimeProvisionService,
+    readIssueService?: ReadIssueService,
   ) {
     this.child = child;
     this.config = config;
@@ -166,6 +170,7 @@ export class DockerRunner implements SessionRunner {
     if (publishService !== undefined) this.publishService = publishService;
     if (checkService !== undefined) this.checkService = checkService;
     if (runtimeProvisionService !== undefined) this.runtimeProvisionService = runtimeProvisionService;
+    if (readIssueService !== undefined) this.readIssueService = readIssueService;
 
     // A broken pipe (container died mid-write) must not crash the gateway
     child.stdin?.on('error', () => {});
@@ -788,6 +793,39 @@ export class DockerRunner implements SessionRunner {
             // Provisioning is gateway-side work; give the post-provision continuation a fresh turn budget.
             deadline = Date.now() + turnTimeoutMs;
             continue;
+          } else if (parsed.type === 'request_read_issue') {
+            // The container's read_issue tool asked the gateway to read an issue from the host.
+            // Validate as data; service it inline via the credentialed gateway seam.
+            const readIssueVerdict = yield* self.serviceDispatch<ReadIssueServiceRequest, ReadIssueOutcome>(parsed, {
+              requestType: 'request_read_issue',
+              validate: (p) => {
+                const u = p as { host?: unknown; repo?: unknown; number?: unknown };
+                if (
+                  (u.host !== 'github' && u.host !== 'gitlab') ||
+                  typeof u.repo !== 'string' ||
+                  !SAFE_OWNER_REPO_SLUG.test(u.repo) ||
+                  typeof u.number !== 'number' ||
+                  !Number.isInteger(u.number) ||
+                  u.number <= 0
+                ) return null;
+                return { host: u.host, repo: u.repo, number: u.number };
+              },
+              statusText: (req) => `reading issue #${req.number} in ${req.repo}…`,
+              invoke: (req) =>
+                self.readIssueService !== undefined
+                  ? self.readIssueService.readIssue(req)
+                  : Promise.resolve({ ok: false, reason: 'read_issue unavailable' } as ReadIssueOutcome),
+              toResult: (id, outcome) => outcome.ok
+                ? { type: 'read_issue_result', id, ok: true, issue: outcome.issue }
+                : { type: 'read_issue_result', id, ok: false, reason: outcome.reason },
+              malformedResult: (id) => ({ type: 'read_issue_result', id, ok: false, reason: 'malformed request' }),
+              // no toEvent — a read is not audited as an action in this slice
+            });
+            if (readIssueVerdict === 'fatal') return;
+            if (readIssueVerdict === 'skipped') continue;
+            // read_issue is gateway-side work; give the continuation a fresh turn budget.
+            deadline = Date.now() + turnTimeoutMs;
+            continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
             yield self.errorEvent(parsed.message, 'runner_error');
             break;
@@ -865,6 +903,7 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
   private readonly publishService?: PublishService;
   private readonly checkService?: CheckService;
   private readonly runtimeProvisionService?: RuntimeProvisionService;
+  private readonly readIssueService?: ReadIssueService;
 
   constructor(
     config: DockerRunnerConfig,
@@ -873,6 +912,7 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
     publishService?: PublishService,
     checkService?: CheckService,
     runtimeProvisionService?: RuntimeProvisionService,
+    readIssueService?: ReadIssueService,
   ) {
     this.config = config;
     this.spawnFn = spawnFn;
@@ -880,6 +920,7 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
     if (publishService !== undefined) this.publishService = publishService;
     if (checkService !== undefined) this.checkService = checkService;
     if (runtimeProvisionService !== undefined) this.runtimeProvisionService = runtimeProvisionService;
+    if (readIssueService !== undefined) this.readIssueService = readIssueService;
   }
 
   /** Remove the Docker volume backing `sessionKey`. Resolves true when the volume is
@@ -979,7 +1020,7 @@ export class DockerRunnerFactory implements RunnerFactory, VolumeReaper {
     const runner = new DockerRunner(child, this.config, {
       containerName,
       spawnFn: this.spawnFn,
-    }, this.cloneService, volumeName, this.publishService, this.checkService, this.runtimeProvisionService);
+    }, this.cloneService, volumeName, this.publishService, this.checkService, this.runtimeProvisionService, this.readIssueService);
 
     await DockerRunner.waitReady(runner, this.config.readyTimeoutMs);
 

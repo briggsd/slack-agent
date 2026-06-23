@@ -27,7 +27,8 @@ export type GatewayToRunnerMessage =
   | PrEditResultMessage
   | PrCommentResultMessage
   | RunChecksResultMessage
-  | ProvisionResultMessage;
+  | ProvisionResultMessage
+  | ReadIssueResultMessage;
 
 export type UserMessage = {
   type: 'user_message';
@@ -183,6 +184,21 @@ export type ProvisionResultMessage = {
   error?: string;
 };
 
+/**
+ * The gateway's result of reading an issue the runner requested via a
+ * {@link RequestReadIssueMessage}. `id` echoes the `request_read_issue` this answers.
+ * `issue` is present iff `ok`. `reason` is a short diagnostic (present iff `!ok`, token-free).
+ * (`exactOptionalPropertyTypes` is on — `issue` and `reason` are genuinely optional, never
+ * `undefined`-valued.)
+ */
+export type ReadIssueResultMessage = {
+  type: 'read_issue_result';
+  id: string;       // echoes the request_read_issue this answers
+  ok: boolean;
+  issue?: { title: string; body: string; state: 'open' | 'closed'; author: string }; // present iff ok
+  reason?: string;  // present iff !ok — short, token-free
+};
+
 // ── Runner → Gateway ──────────────────────────────────────────────────────────
 
 export type RunnerToGatewayMessage =
@@ -201,6 +217,7 @@ export type RunnerToGatewayMessage =
   | RequestPrCommentMessage
   | RequestRunChecksMessage
   | RequestProvisionMessage
+  | RequestReadIssueMessage
   | ErrorMessage;
 
 /** Emitted once when the runner is ready to accept input. */
@@ -405,6 +422,22 @@ export type RequestProvisionMessage = {
   type: 'request_provision';
   id: string;    // the runner's own provision-correlation id
   name: string;  // runtime catalog name, e.g. "python"
+};
+
+/**
+ * The runner requests the gateway to read an issue from a repository. Raised from INSIDE a turn:
+ * the agent calls its `read_issue` tool, which emits this line and blocks until the gateway
+ * answers with a {@link ReadIssueResultMessage} bearing the same `id`. The gateway services the
+ * read inline — it mints a lease, hits the host API, revokes the lease, and returns the issue
+ * data (or a failure reason). The credential never enters the agent env; the body is capped
+ * at READ_ISSUE_BODY_MAX before the result is sent.
+ */
+export type RequestReadIssueMessage = {
+  type: 'request_read_issue';
+  id: string;      // the runner's own read-issue correlation id
+  host: ExecHost;  // 'github' | 'gitlab'
+  repo: string;    // "owner/name"
+  number: number;  // issue number (positive integer)
 };
 
 /** Per-message failure. The runner remains usable after an error. */
