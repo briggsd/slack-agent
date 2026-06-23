@@ -232,10 +232,7 @@ export class SqliteSessionStore implements SessionStore {
     [string, string | null, string, number, string, string | null, string, number]
   >;
   private readonly stmtGetAudit: Database.Statement<[string], AuditEvent>;
-  private readonly stmtListDecisionsToGrade: Database.Statement<[], DecisionToGrade>;
-  private readonly stmtListDecisionsToGradeSince: Database.Statement<[number], DecisionToGrade>;
-  private readonly stmtListDecisionsToGradeLimit: Database.Statement<[number], DecisionToGrade>;
-  private readonly stmtListDecisionsToGradeSinceLimit: Database.Statement<[number, number], DecisionToGrade>;
+  private readonly stmtListDecisionsToGrade: Database.Statement<[number, number], DecisionToGrade>;
   private readonly stmtListOpenPullRequests: Database.Statement<[], PullRequestRow>;
   private readonly stmtResolvePullRequest: Database.Statement<[string, number, number, number]>;
   private readonly stmtTouchPullRequestPolled: Database.Statement<[number, number]>;
@@ -314,45 +311,10 @@ export class SqliteSessionStore implements SessionStore {
       'SELECT session_key, team_id, user_id, profile_id, ts, kind, tool, summary, reasoning, result, cost_tokens, cost_micro_usd, durations_ms, graded_audit_id FROM audit_events WHERE session_key = ? ORDER BY id',
     );
 
-    this.stmtListDecisionsToGrade = this.db.prepare<[], DecisionToGrade>(`
-      SELECT d.id, d.session_key, d.team_id, d.profile_id, d.tool, d.result, d.reasoning
-      FROM audit_events d
-      WHERE d.kind = 'decision'
-        AND d.reasoning IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM audit_events c
-          WHERE c.kind = 'comprehension' AND c.graded_audit_id = d.id
-        )
-      ORDER BY d.id
-    `);
-
-    this.stmtListDecisionsToGradeSince = this.db.prepare<[number], DecisionToGrade>(`
-      SELECT d.id, d.session_key, d.team_id, d.profile_id, d.tool, d.result, d.reasoning
-      FROM audit_events d
-      WHERE d.kind = 'decision'
-        AND d.reasoning IS NOT NULL
-        AND d.ts >= ?
-        AND NOT EXISTS (
-          SELECT 1 FROM audit_events c
-          WHERE c.kind = 'comprehension' AND c.graded_audit_id = d.id
-        )
-      ORDER BY d.id
-    `);
-
-    this.stmtListDecisionsToGradeLimit = this.db.prepare<[number], DecisionToGrade>(`
-      SELECT d.id, d.session_key, d.team_id, d.profile_id, d.tool, d.result, d.reasoning
-      FROM audit_events d
-      WHERE d.kind = 'decision'
-        AND d.reasoning IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM audit_events c
-          WHERE c.kind = 'comprehension' AND c.graded_audit_id = d.id
-        )
-      ORDER BY d.id
-      LIMIT ?
-    `);
-
-    this.stmtListDecisionsToGradeSinceLimit = this.db.prepare<[number, number], DecisionToGrade>(`
+    // One statement defines the idempotency predicate in exactly one place. The two
+    // bind params are sentinels for the optional bounds: a `0` lower bound matches
+    // every real row (ts is always > 0), and a `-1` limit is SQLite's "unbounded".
+    this.stmtListDecisionsToGrade = this.db.prepare<[number, number], DecisionToGrade>(`
       SELECT d.id, d.session_key, d.team_id, d.profile_id, d.tool, d.result, d.reasoning
       FROM audit_events d
       WHERE d.kind = 'decision'
@@ -609,16 +571,8 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   listDecisionsToGrade(opts: ListDecisionsToGradeOptions): DecisionToGrade[] {
-    if (opts.sinceMs !== undefined && opts.limit !== undefined) {
-      return this.stmtListDecisionsToGradeSinceLimit.all(opts.sinceMs, opts.limit);
-    }
-    if (opts.sinceMs !== undefined) {
-      return this.stmtListDecisionsToGradeSince.all(opts.sinceMs);
-    }
-    if (opts.limit !== undefined) {
-      return this.stmtListDecisionsToGradeLimit.all(opts.limit);
-    }
-    return this.stmtListDecisionsToGrade.all();
+    // 0 = no lower bound (every real ts > 0); -1 = no LIMIT (SQLite unbounded).
+    return this.stmtListDecisionsToGrade.all(opts.sinceMs ?? 0, opts.limit ?? -1);
   }
 
   getAuditEvents(sessionKey: string): AuditEvent[] {
