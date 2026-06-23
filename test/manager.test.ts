@@ -1785,6 +1785,57 @@ describe('SessionManager — audit emission', () => {
     expect(second.publishMs).toBeUndefined();
   });
 
+  it('records a timing row for an errored cold-start turn and never leaks its spawnMs to the next turn', async () => {
+    // The spawning turn throws mid-drive. spawnMs must attach to THAT turn's timing row
+    // and the next (warm) turn must not inherit the stale spawn cost.
+    class FlakyFirstRunner implements SessionRunner {
+      private calls = 0;
+      async *send(_m: string): RunnerStream {
+        this.calls += 1;
+        if (this.calls === 1) throw new Error('boom on first turn');
+        yield { type: 'text', text: 'second ok' };
+      }
+      async dispose(): Promise<void> {}
+    }
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const runner = new FlakyFirstRunner();
+    const factory: RunnerFactory = { create: async () => runner };
+    const nowValues = [100, 150, 200, 230, 300, 340];
+    let nowIndex = 0;
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      factory,
+      slack,
+      store,
+      now: () => nowValues[nowIndex++] ?? nowValues[nowValues.length - 1]!,
+    });
+
+    await manager.enqueueNew('TEAM:C:FLAKY', {
+      message: 'first',
+      channel: 'C',
+      threadTs: 'FLAKY',
+      teamId: 'TEAM',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    await manager.enqueueExisting('TEAM:C:FLAKY', {
+      message: 'second',
+      channel: 'C',
+      threadTs: 'FLAKY',
+      userId: 'U1',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const timingAudits = store.audits.filter((a) => a.kind === 'timing');
+    expect(timingAudits).toHaveLength(2);
+    // The errored cold-start turn still records latency, and owns the spawn cost.
+    expect(parseTimingDurations(timingAudits[0]).spawnMs).toBe(50);
+    // The warm turn must not inherit it.
+    expect(parseTimingDurations(timingAudits[1]).spawnMs).toBeUndefined();
+  });
+
   it('sums pr_* elapsedMs into publishMs on the turn timing row', async () => {
     const slack = new FakeSlackClient();
     const store = new CapturingStore();

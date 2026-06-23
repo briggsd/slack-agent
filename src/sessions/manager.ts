@@ -1182,6 +1182,11 @@ export class SessionManager {
         );
         const runner = await this.ensureRunner(session);
         session.turnPublishMs = 0;
+        // Capture + clear the pending spawn cost up front so it attaches to exactly
+        // this turn and can never leak onto a later turn if this one errors before the
+        // timing row is written.
+        const spawnMsForTurn = session.pendingSpawnMs;
+        session.pendingSpawnMs = null;
 
         // Drive the run manually via driveToThread. The router turn ignores the
         // return value — it's only used when runBuild calls driveToThread for the tail.
@@ -1190,24 +1195,28 @@ export class SessionManager {
           item.approval !== undefined ? { approval: item.approval } : undefined,
         );
         const turnStart = this.now();
-        await this.driveToThread(iterator, placeholder, session, item);
-        const agentMs = this.now() - turnStart;
-        this.audit({
-          session_key: session.key,
-          team_id: session.teamId ?? null,
-          user_id: session.requestorUserId ?? null,
-          profile_id: session.profileId,
-          kind: 'timing',
-          tool: null,
-          result: null,
-          durations_ms: JSON.stringify({
-            agentMs,
-            ...(session.pendingSpawnMs !== null ? { spawnMs: session.pendingSpawnMs } : {}),
-            ...(session.turnPublishMs > 0 ? { publishMs: session.turnPublishMs } : {}),
-          }),
-        });
-        session.pendingSpawnMs = null;
-        session.turnPublishMs = 0;
+        try {
+          await this.driveToThread(iterator, placeholder, session, item);
+        } finally {
+          // Record per-turn latency for every driven turn — including errored/timed-out
+          // ones, where latency is most worth seeing. Best-effort like every audit row.
+          const agentMs = this.now() - turnStart;
+          this.audit({
+            session_key: session.key,
+            team_id: session.teamId ?? null,
+            user_id: session.requestorUserId ?? null,
+            profile_id: session.profileId,
+            kind: 'timing',
+            tool: null,
+            result: null,
+            durations_ms: JSON.stringify({
+              agentMs,
+              ...(spawnMsForTurn !== null ? { spawnMs: spawnMsForTurn } : {}),
+              ...(session.turnPublishMs > 0 ? { publishMs: session.turnPublishMs } : {}),
+            }),
+          });
+          session.turnPublishMs = 0;
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[session] error processing message in ${session.key}: ${msg}`);
