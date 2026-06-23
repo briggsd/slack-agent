@@ -12,6 +12,7 @@
  */
 
 import type { BuildResultMessage } from './protocol.js';
+import { RequestCoordinator } from './request-coordinator.js';
 
 /** The outcome of a build, as the build_spec tool sees it. */
 export type BuildOutcome =
@@ -22,26 +23,25 @@ export type BuildOutcome =
 export type EmitRequestBuildFn = (repo: string, id: string) => void;
 
 export class BuildCoordinator {
-  private readonly pending = new Map<string, (outcome: BuildOutcome) => void>();
-  private seq = 0;
-  /** Set once stdin closes: no result can arrive after this, so new builds resolve immediately. */
-  private drained = false;
+  private readonly base: RequestCoordinator<string, BuildResultMessage, BuildOutcome>;
 
-  constructor(private readonly emitRequest: EmitRequestBuildFn) {}
+  constructor(emitRequest: EmitRequestBuildFn) {
+    this.base = new RequestCoordinator(
+      'build',
+      emitRequest,
+      (msg) => msg.ok
+        ? { ok: true }
+        : { ok: false, reason: msg.reason ?? 'build failed' },
+      { ok: false, reason: 'shutting down' },
+    );
+  }
 
   /**
    * Request a build: emit `request_build` and resolve when the matching result arrives.
    * Once {@link failAllPending} has drained (stdin closed), resolve immediately as a failure.
    */
   requestBuild(repo: string): Promise<BuildOutcome> {
-    if (this.drained) {
-      return Promise.resolve({ ok: false, reason: 'shutting down' });
-    }
-    const id = `build-${++this.seq}`;
-    return new Promise<BuildOutcome>((resolve) => {
-      this.pending.set(id, resolve);
-      this.emitRequest(repo, id);
-    });
+    return this.base.request(repo);
   }
 
   /**
@@ -49,14 +49,7 @@ export class BuildCoordinator {
    * matched a pending request, false for an unknown or already-settled id.
    */
   handleResult(msg: BuildResultMessage): boolean {
-    const resolve = this.pending.get(msg.id);
-    if (resolve === undefined) return false;
-    this.pending.delete(msg.id);
-    const outcome: BuildOutcome = msg.ok
-      ? { ok: true }
-      : { ok: false, reason: msg.reason ?? 'build failed' };
-    resolve(outcome);
-    return true;
+    return this.base.handleResult(msg);
   }
 
   /**
@@ -64,10 +57,6 @@ export class BuildCoordinator {
    * on a result that will never come can't wedge the process at shutdown.
    */
   failAllPending(): void {
-    this.drained = true;
-    for (const [id, resolve] of this.pending) {
-      this.pending.delete(id);
-      resolve({ ok: false, reason: 'shutting down' });
-    }
+    this.base.failAllPending();
   }
 }

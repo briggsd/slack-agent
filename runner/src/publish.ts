@@ -7,6 +7,7 @@
  */
 
 import type { PublishResultMessage, PrEditResultMessage, PrCommentResultMessage } from './protocol.js';
+import { RequestCoordinator } from './request-coordinator.js';
 
 /** The outcome of publishing, as the publish tool sees it. */
 export type PublishOutcome =
@@ -43,46 +44,6 @@ export interface PrCommentInput {
 export type EmitRequestPublishFn = (input: PublishInput, id: string) => void;
 export type EmitRequestPrEditFn = (input: PrEditInput, id: string) => void;
 export type EmitRequestPrCommentFn = (input: PrCommentInput, id: string) => void;
-
-class RequestCoordinator<TInput, TResultMessage extends { id: string }, TOutcome> {
-  private readonly pending = new Map<string, (outcome: TOutcome) => void>();
-  private seq = 0;
-  private drained = false;
-
-  constructor(
-    private readonly prefix: string,
-    private readonly emitRequest: (input: TInput, id: string) => void,
-    private readonly fromMessage: (msg: TResultMessage) => TOutcome,
-    private readonly shutdownOutcome: TOutcome,
-  ) {}
-
-  request(input: TInput): Promise<TOutcome> {
-    if (this.drained) {
-      return Promise.resolve(this.shutdownOutcome);
-    }
-    const id = `${this.prefix}-${++this.seq}`;
-    return new Promise<TOutcome>((resolve) => {
-      this.pending.set(id, resolve);
-      this.emitRequest(input, id);
-    });
-  }
-
-  handleResult(msg: TResultMessage): boolean {
-    const resolve = this.pending.get(msg.id);
-    if (resolve === undefined) return false;
-    this.pending.delete(msg.id);
-    resolve(this.fromMessage(msg));
-    return true;
-  }
-
-  failAllPending(): void {
-    this.drained = true;
-    for (const [id, resolve] of this.pending) {
-      this.pending.delete(id);
-      resolve(this.shutdownOutcome);
-    }
-  }
-}
 
 export class PublishCoordinator {
   private readonly base: RequestCoordinator<PublishInput, PublishResultMessage, PublishOutcome>;

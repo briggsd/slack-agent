@@ -8,6 +8,7 @@
  */
 
 import type { RunChecksKind, RunChecksResult, RunChecksResultMessage } from './protocol.js';
+import { RequestCoordinator } from './request-coordinator.js';
 
 /** The outcome of run_checks, as the tool sees it. */
 export type ChecksOutcome =
@@ -23,27 +24,26 @@ export interface ChecksInput {
 export type EmitRequestChecksFn = (input: ChecksInput, id: string) => void;
 
 export class ChecksCoordinator {
-  private readonly pending = new Map<string, (outcome: ChecksOutcome) => void>();
-  private seq = 0;
-  /** Set once stdin closes: no result can arrive after this, so new requests resolve immediately. */
-  private drained = false;
+  private readonly base: RequestCoordinator<ChecksInput, RunChecksResultMessage, ChecksOutcome>;
 
-  constructor(private readonly emitRequest: EmitRequestChecksFn) {}
+  constructor(emitRequest: EmitRequestChecksFn) {
+    this.base = new RequestCoordinator(
+      'checks',
+      emitRequest,
+      (msg) => msg.ok
+        ? { ok: true, results: msg.results ?? [] }
+        : { ok: false, reason: msg.reason ?? 'run checks failed' },
+      { ok: false, reason: 'shutting down' },
+    );
+  }
 
   /**
    * Request checks: emit `request_run_checks` and resolve when the matching result arrives.
    * Once {@link failAllPending} has drained (stdin closed), resolve immediately as a failure.
    */
   requestChecks(input: ChecksInput): Promise<ChecksOutcome> {
-    if (this.drained) {
-      return Promise.resolve({ ok: false, reason: 'shutting down' });
-    }
-    const id = `checks-${++this.seq}`;
     const normalized: ChecksInput = { repo: input.repo, kind: input.kind ?? 'all' };
-    return new Promise<ChecksOutcome>((resolve) => {
-      this.pending.set(id, resolve);
-      this.emitRequest(normalized, id);
-    });
+    return this.base.request(normalized);
   }
 
   /**
@@ -51,14 +51,7 @@ export class ChecksCoordinator {
    * pending request, false for an unknown or already-settled id.
    */
   handleResult(msg: RunChecksResultMessage): boolean {
-    const resolve = this.pending.get(msg.id);
-    if (resolve === undefined) return false;
-    this.pending.delete(msg.id);
-    const outcome: ChecksOutcome = msg.ok
-      ? { ok: true, results: msg.results ?? [] }
-      : { ok: false, reason: msg.reason ?? 'run checks failed' };
-    resolve(outcome);
-    return true;
+    return this.base.handleResult(msg);
   }
 
   /**
@@ -66,10 +59,6 @@ export class ChecksCoordinator {
    * parked on a result that will never come can't wedge the process at shutdown.
    */
   failAllPending(): void {
-    this.drained = true;
-    for (const [id, resolve] of this.pending) {
-      this.pending.delete(id);
-      resolve({ ok: false, reason: 'shutting down' });
-    }
+    this.base.failAllPending();
   }
 }
