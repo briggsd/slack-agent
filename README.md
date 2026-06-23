@@ -70,15 +70,42 @@ npm run build
 npm start
 ```
 
-The bot will connect via Socket Mode and echo any message directed at it.
+The bot connects to Slack over Socket Mode. With the default `RUNNER_BACKEND=fake`
+it answers with a stubbed runner — enough to confirm the Slack wiring (mention to
+start a thread, reply to continue it) without Docker or an API key. For real Claude
+sessions, set up the Docker backend (see [Sandbox runner](#sandbox-runner)).
+
+## How you talk to it
+
+- **Mention the bot** (`@claude-bot …`) in a channel it's in, or DM it, to start a
+  thread. Each thread is one Claude Agent SDK session in its own sandbox; reply in
+  the thread to continue the conversation.
+- Inside a conversational thread the agent has a set of gateway-served tools — clone
+  a repo, run lint/test checks, provision a runtime, open / edit / comment on a PR,
+  and read an issue. What each does and how to add a new one is in
+  [docs/toolshed.md](docs/toolshed.md).
+- For a one-shot "go fix this repo and open a PR" task, use the `task` / `exec`
+  keywords (see [One-shot repo tasks](#one-shot-repo-tasks)).
 
 ## Development
 
+First checkout installs **both** packages (the gateway and the sandbox `runner/`),
+or the runner type-check can't resolve the Agent SDK:
+
 ```bash
-# Type-check + run tests
+npm ci && npm --prefix runner ci
+```
+
+The test suite is fully offline — no Slack, no Docker, no API, no network.
+
+```bash
+# Fast inner loop: tsc + the runner package's type-check + vitest
 npm run check
 
-# Just tests
+# What CI runs: the above plus the dependency-cruiser architecture rules
+npm run gate
+
+# Just the tests
 npm test
 ```
 
@@ -126,6 +153,11 @@ and includes `git`, `curl`, and `ripgrep` as agent tools.
 | `GIT_IMAGE` | no (default `slackbot-runner:latest`) | Image for the ephemeral credentialed git nodes (clone/push) |
 | `CLONE_REPO_ALLOWLIST` | no (default empty) | Comma-separated exact GitHub `owner/name` slugs the conversational `clone_repo` tool may clone. Empty/unset denies model-chosen clones. |
 | `RUNTIME_CATALOG_PATH` | no (default `config/runtimes.json`) | JSON catalog of pinned relocatable runtimes available to `provision_runtime`. Missing/empty catalog denies all runtime requests; malformed entries fail startup. |
+| `VOLUME_TTL_MS` | no (default 7 days) | Inactivity before a session's workspace volume + row are garbage-collected |
+| `VOLUME_GC_INTERVAL_MS` | no (default 1 hour) | How often the volume-GC sweep runs |
+
+This table covers the common knobs; `.env.example` is the complete, annotated reference
+(container resource limits, per-turn timeouts, one-shot check-command overrides, …).
 
 > Upgrade note: conversational `clone_repo` is deny-by-default. Existing deployments
 > that rely on the coordinator cloning repositories must set `CLONE_REPO_ALLOWLIST`;
@@ -192,15 +224,15 @@ On the next container start the runner reads the file and passes
 `resume: <session-id>` to `query()`, continuing the conversation from where
 it left off.
 
-**Note — volume garbage collection**: Docker volumes accumulate one per Slack
-thread and are never automatically removed. Run `docker volume prune` (or a
-scheduled cleanup script) to reclaim disk space from old sessions.
+**Note — volume garbage collection**: a periodic sweep removes a session's
+workspace volume *and* its session row after `VOLUME_TTL_MS` of inactivity
+(default 7 days; sweep interval `VOLUME_GC_INTERVAL_MS`, default 1 hour). Live
+sessions are skipped. `docker volume prune` remains a manual fallback for volumes
+left behind by an unclean shutdown.
 
-**Note — SQLite state files**: The session store runs in WAL mode, which means
-three files are written: `.db`, `.db-wal`, and `.db-shm`. Back up all three
-together, or use `sqlite3 <db-path> ".backup <dest>"` for a consistent snapshot.
-`sessions` table rows accumulate indefinitely until a future GC slice removes
-reaped rows.
+**Note — SQLite state files**: the session store runs in WAL mode, so three files
+are written: `.db`, `.db-wal`, and `.db-shm`. Back up all three together, or use
+`sqlite3 <db-path> ".backup <dest>"` for a consistent snapshot.
 
 ### File forwarding
 
@@ -225,4 +257,10 @@ and sends one message end-to-end.
 
 ## Architecture
 
-See `planning/ARCHITECTURE.md` for the full design.
+- **As-built system** — security model, trust boundaries, lifecycle, limitations:
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **Tool system** — the two kinds of tool, how a gateway-served tool's round trip
+  works, and the steps to add one: [docs/toolshed.md](docs/toolshed.md)
+
+(`planning/ARCHITECTURE.md` is the original pre-build sketch, kept for history;
+`docs/ARCHITECTURE.md` is authoritative.)
