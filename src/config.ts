@@ -157,6 +157,39 @@ function isSafeOwnerRepoSlug(repo: string): boolean {
 }
 
 /**
+ * Parse EXEC_OPT_IN_USERS as a comma-separated list of TEAM:USER pairs.
+ * Intentionally strict: an invalid entry fails startup so operators do not
+ * accidentally believe a user was granted exec access when they were not.
+ * De-duplicates repeated (team, user) pairs silently.
+ */
+export function parseExecOptInUsers(
+  raw: string | undefined,
+): ReadonlyArray<{ teamId: string; userId: string }> {
+  if (raw === undefined || raw.trim() === '') return [];
+
+  const seen = new Set<string>();
+  const result: Array<{ teamId: string; userId: string }> = [];
+  for (const part of raw.split(',')) {
+    const entry = part.trim();
+    if (entry === '') continue;
+    if (!/^[^\s:]+:[^\s:]+$/.test(entry)) {
+      throw new Error(
+        `Invalid EXEC_OPT_IN_USERS entry "${entry}": expected TEAM:USER (Slack team + user id)`,
+      );
+    }
+    const colonIdx = entry.indexOf(':');
+    const teamId = entry.slice(0, colonIdx);
+    const userId = entry.slice(colonIdx + 1);
+    const key = `${teamId}:${userId}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push({ teamId, userId });
+    }
+  }
+  return result;
+}
+
+/**
  * Parse CLONE_REPO_ALLOWLIST as a comma-separated list of exact owner/name slugs.
  * This is intentionally strict: an invalid entry fails startup so operators do not
  * accidentally believe a model-chosen repo was authorized when it was not.
@@ -302,6 +335,8 @@ export interface Config {
   oneshot: OneShotConfig;
   spendCaps: SpendCapsConfig;
   decisionCapture: boolean;
+  /** Users granted operator-level exec opt-in, reconciled into the store at startup. */
+  execOptInUsers: ReadonlyArray<{ teamId: string; userId: string }>;
 }
 
 /** Convert a dollar amount to integer micro-USD, clamping negatives to 0. */
@@ -320,6 +355,7 @@ export function loadConfig(): Config {
   const cloneRepoAllowlist = parseRepoAllowlist(process.env['CLONE_REPO_ALLOWLIST']);
   const checkCmds = parseCheckCmds(process.env['ONESHOT_CHECK_CMDS']);
   assertDogfoodGate(cloneRepoAllowlist, checkCmds);
+  const execOptInUsers = parseExecOptInUsers(process.env['EXEC_OPT_IN_USERS']);
 
   return {
     SLACK_BOT_TOKEN: requireEnv('SLACK_BOT_TOKEN'),
@@ -356,5 +392,6 @@ export function loadConfig(): Config {
       perGlobal24hMicroUsd: usdToMicro(optionalEnvNumber('SPEND_CAP_GLOBAL_24H_USD', 400)),
     },
     decisionCapture: optionalEnvBool('DECISION_CAPTURE', false),
+    execOptInUsers,
   };
 }

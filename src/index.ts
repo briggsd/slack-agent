@@ -80,6 +80,8 @@ async function main(): Promise<void> {
   await mkdir(dirname(config.SESSION_DB_PATH), { recursive: true });
   const store = new SqliteSessionStore(config.SESSION_DB_PATH);
   console.log(`[gateway] session store opened at ${config.SESSION_DB_PATH}`);
+  store.replaceExecOptIns(config.execOptInUsers, Date.now());
+  console.log(`[gateway] exec opt-in: ${config.execOptInUsers.length} user(s) granted`);
 
   const closeStore = (): void => {
     store.close();

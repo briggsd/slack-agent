@@ -191,6 +191,9 @@ export interface SessionStore {
   hasExecOptIn(teamId: string, userId: string): boolean;
   /** Record a standing human opt-in for ungated exec. Admin/operator seam; not user-chat driven. */
   recordExecOptIn(teamId: string, userId: string, atMs: number): void;
+  /** Reconcile the exec opt-in set to EXACTLY these (team,user) pairs: grant the listed,
+   *  revoke everyone else. Atomic. The operator allowlist is the single source of truth. */
+  replaceExecOptIns(entries: ReadonlyArray<{ teamId: string; userId: string }>, atMs: number): void;
 }
 
 // ─── SQLite implementation ────────────────────────────────────────────────────
@@ -246,6 +249,8 @@ export class SqliteSessionStore implements SessionStore {
   private readonly stmtAcceptanceByTeamSince: Database.Statement<[string, number], PullRequestStateCountRow>;
   private readonly stmtHasExecOptIn: Database.Statement<[string, string], { present: number }>;
   private readonly stmtRecordExecOptIn: Database.Statement<[string, string, number]>;
+  private readonly stmtDeleteAllExecOptIns: Database.Statement<[]>;
+  private readonly txReplaceExecOptIns: (entries: ReadonlyArray<{ teamId: string; userId: string }>, atMs: number) => void;
 
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
@@ -394,6 +399,20 @@ export class SqliteSessionStore implements SessionStore {
       VALUES (?, ?, ?)
       ON CONFLICT(team_id, user_id) DO UPDATE SET granted_at = excluded.granted_at
     `);
+
+    this.stmtDeleteAllExecOptIns = this.db.prepare<[]>('DELETE FROM exec_opt_ins');
+
+    // Capture references for use inside the transaction closure.
+    const deleteAll = this.stmtDeleteAllExecOptIns;
+    const insert = this.stmtRecordExecOptIn;
+    this.txReplaceExecOptIns = this.db.transaction(
+      (entries: ReadonlyArray<{ teamId: string; userId: string }>, atMs: number) => {
+        deleteAll.run();
+        for (const { teamId, userId } of entries) {
+          insert.run(teamId, userId, atMs);
+        }
+      },
+    );
   }
 
   /**
@@ -644,6 +663,10 @@ export class SqliteSessionStore implements SessionStore {
     this.stmtRecordExecOptIn.run(teamId, userId, atMs);
   }
 
+  replaceExecOptIns(entries: ReadonlyArray<{ teamId: string; userId: string }>, atMs: number): void {
+    this.txReplaceExecOptIns(entries, atMs);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -741,4 +764,5 @@ export class NoopSessionStore implements SessionStore {
   }
   hasExecOptIn(_teamId: string, _userId: string): boolean { return false; }
   recordExecOptIn(_teamId: string, _userId: string, _atMs: number): void { /* no-op */ }
+  replaceExecOptIns(_entries: ReadonlyArray<{ teamId: string; userId: string }>, _atMs: number): void { /* no-op */ }
 }
