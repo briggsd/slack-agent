@@ -74,6 +74,7 @@ export interface RuntimeCatalogEntry {
   url: string;
   sha256: string;
   binSubdir: string;
+  format: 'tar.gz' | 'zip';
 }
 
 export interface OneShotConfig {
@@ -289,7 +290,17 @@ export function parseRuntimeCatalog(raw: string | undefined): ReadonlyMap<string
       throw new Error(`Invalid runtime catalog entry "${name}": binSubdir must be a safe relative path`);
     }
 
-    result.set(name, { version, url, sha256: sha256.toLowerCase(), binSubdir });
+    const rawFormat = value['format'];
+    let format: 'tar.gz' | 'zip';
+    if (rawFormat === undefined) {
+      format = 'tar.gz';
+    } else if (rawFormat === 'tar.gz' || rawFormat === 'zip') {
+      format = rawFormat;
+    } else {
+      throw new Error(`Invalid runtime catalog entry "${name}": format must be "tar.gz" or "zip"`);
+    }
+
+    result.set(name, { version, url, sha256: sha256.toLowerCase(), binSubdir, format });
   }
   return result;
 }

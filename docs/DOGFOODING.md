@@ -76,6 +76,33 @@ The broker's GitHub PAT also needs Pull-requests read/write on `briggsd/slack-ag
 bound to the supervised profile, so unsupervised conversational sessions can't reach
 the self-repo.
 
+## Adjacent-owned repos
+
+Some repos are owned by the same org but are *not* the bot's own codebase — they
+live outside the self-host blast radius. The first example is `briggsd/code-reviewer`,
+the AI review factory that CI invokes on every PR (including slack-agent's own PRs).
+
+**Blast radius differs from the self-repo.** Cloning and running the review engine
+does not spawn the bot or touch the gateway, so there's no container-escapes-its-host
+risk. But `briggsd/code-reviewer` *is* the review net — a bad merge there silently
+degrades the review signal for every repo the org runs checks on, including
+slack-agent's own PRs. That's reason enough to keep its review-engine core
+human-reviewed and to treat the rest like Tier-2 work: supervised profile + approval
+gate, human reads the diff before merge.
+
+**Toolchain.** `briggsd/code-reviewer` is a Bun repo. `provision_runtime('bun')`
+(now available in the catalog) supplies the toolchain; no manual install needed.
+Set `ONESHOT_CHECK_CMDS` for it to run the full gate:
+
+```sh
+ONESHOT_CHECK_CMDS={"briggsd/code-reviewer":{"test":"bun run gate"}}
+```
+
+Add it to the clone allowlist and ensure the PAT covers Contents read + Pull-requests
+read/write on `briggsd/code-reviewer`, exactly like the self-repo setup above. Keep
+these knobs env/operator-controlled and uncommitted — turning on adjacent-repo
+dogfooding is a deliberate deploy decision.
+
 ## The startup guardrail
 
 `assertDogfoodGate` runs at config load: **if `briggsd/slack-agent` is in the clone

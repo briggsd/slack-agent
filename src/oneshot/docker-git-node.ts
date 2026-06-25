@@ -516,7 +516,9 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
       `url=${shellQuote(req.entry.url)}`,
       `expected=${shellQuote(req.entry.sha256)}`,
       'if [ -d "$bin_dir" ]; then exit 0; fi',
-      'archive="$(mktemp /tmp/runtime.XXXXXX.tar.gz)"',
+      req.entry.format === 'zip'
+        ? 'archive="$(mktemp /tmp/runtime.XXXXXX.zip)"'
+        : 'archive="$(mktemp /tmp/runtime.XXXXXX.tar.gz)"',
       'cleanup() { rm -f "$archive"; rm -rf "$tmp_dir"; }',
       'trap cleanup EXIT',
       'mkdir -p /workspace/.runtimes',
@@ -525,7 +527,9 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
       'if [ "$actual" != "$expected" ]; then echo "sha256 mismatch" >&2; exit 23; fi',
       'rm -rf "$tmp_dir"',
       'mkdir -p "$tmp_dir"',
-      'tar -xzf "$archive" -C "$tmp_dir"',
+      req.entry.format === 'zip'
+        ? 'unzip -q "$archive" -d "$tmp_dir"'
+        : 'tar -xzf "$archive" -C "$tmp_dir"',
       'rm -rf "$target"',
       'mv "$tmp_dir" "$target"',
       'test -d "$bin_dir"',

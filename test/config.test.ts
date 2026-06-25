@@ -175,11 +175,64 @@ describe('parseRuntimeCatalog', () => {
     expect(parseRuntimeCatalog('').size).toBe(0);
   });
 
-  it('parses a valid catalog entry into a map', () => {
+  it('parses a valid catalog entry (no format field) and defaults format to tar.gz', () => {
     const result = parseRuntimeCatalog(JSON.stringify(valid));
 
     expect(result.size).toBe(1);
-    expect(result.get('python')).toEqual(valid.python);
+    expect(result.get('python')).toEqual({ ...valid.python, format: 'tar.gz' });
+  });
+
+  it('parses a zip entry with explicit format: "zip"', () => {
+    const catalog = {
+      bun: {
+        version: '1.3.14',
+        url: 'https://example.test/bun.zip',
+        sha256: 'b'.repeat(64),
+        binSubdir: 'bun-linux-x64-baseline',
+        format: 'zip',
+      },
+    };
+    const result = parseRuntimeCatalog(JSON.stringify(catalog));
+
+    expect(result.size).toBe(1);
+    const entry = result.get('bun');
+    expect(entry?.format).toBe('zip');
+    expect(entry?.binSubdir).toBe('bun-linux-x64-baseline');
+  });
+
+  it('parses an explicit format: "tar.gz" entry', () => {
+    const catalog = { python: { ...valid.python, format: 'tar.gz' } };
+    const result = parseRuntimeCatalog(JSON.stringify(catalog));
+
+    expect(result.get('python')?.format).toBe('tar.gz');
+  });
+
+  it('throws for an unrecognized format value (fail-closed)', () => {
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { ...valid.python, format: 'rar' },
+    }))).toThrow(/format must be "tar.gz" or "zip"/);
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { ...valid.python, format: 'tgz' },
+    }))).toThrow(/format must be "tar.gz" or "zip"/);
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { ...valid.python, format: '' },
+    }))).toThrow(/format must be "tar.gz" or "zip"/);
+  });
+
+  it('parses the real config/runtimes.json: bun has format zip, python defaults to tar.gz', () => {
+    const { readFileSync } = require('node:fs');
+    const raw: string = readFileSync('config/runtimes.json', 'utf-8');
+    const catalog = parseRuntimeCatalog(raw);
+
+    expect(catalog.size).toBe(2);
+
+    const python = catalog.get('python');
+    expect(python?.format).toBe('tar.gz');
+
+    const bun = catalog.get('bun');
+    expect(bun?.format).toBe('zip');
+    expect(bun?.binSubdir).toBe('bun-linux-x64-baseline');
+    expect(bun?.version).toBe('1.3.14');
   });
 
   it('throws for malformed JSON and non-object catalogs', () => {

@@ -166,12 +166,13 @@ This table covers the common knobs; `.env.example` is the complete, annotated re
 > `owner/name` slugs, not URLs or `.git` URLs; malformed entries fail startup.
 
 The conversational runner also exposes `mcp__commit__provision_runtime` for
-missing toolchains. The model can name only a catalog runtime such as `python`;
-the gateway resolves that name to the pinned URL and SHA256 in
+missing toolchains. The model can name only a catalog runtime such as `python`
+or `bun`; the gateway resolves that name to the pinned URL and SHA256 in
 `config/runtimes.json`, downloads it in an ephemeral no-credential container,
 verifies the checksum, and extracts it onto the session volume under
 `/workspace/.runtimes`. `run_checks` prepends provisioned runtime `bin`
-directories to `PATH`.
+directories to `PATH`. The catalog ships pinned Python and Bun runtimes; both
+zip- and tar.gz-format archives are supported.
 
 ## One-shot repo tasks
 
