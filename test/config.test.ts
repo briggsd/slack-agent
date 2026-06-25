@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   assertDogfoodGate,
   parseCheckCmds,
+  parseExecOptInUsers,
   parseRepoAllowlist,
   parseRuntimeCatalog,
 } from '../src/config.js';
@@ -459,5 +460,76 @@ describe('spendCaps config (Slice B1)', () => {
     process.env['SPEND_CAP_PER_TASK_USD'] = 'unlimited';
     const { loadConfig } = await import('../src/config.js');
     expect(() => loadConfig()).toThrow(/SPEND_CAP_PER_TASK_USD/);
+  });
+});
+
+describe('parseExecOptInUsers', () => {
+  it('returns an empty array for undefined input', () => {
+    expect(parseExecOptInUsers(undefined)).toEqual([]);
+  });
+
+  it('returns an empty array for an empty string', () => {
+    expect(parseExecOptInUsers('')).toEqual([]);
+  });
+
+  it('returns an empty array for a whitespace-only string', () => {
+    expect(parseExecOptInUsers('   ')).toEqual([]);
+  });
+
+  it('parses a well-formed T1:U1,T1:U2 into two pairs', () => {
+    const result = parseExecOptInUsers('T1:U1,T1:U2');
+    expect(result).toEqual([
+      { teamId: 'T1', userId: 'U1' },
+      { teamId: 'T1', userId: 'U2' },
+    ]);
+  });
+
+  it('tolerates whitespace around comma separators', () => {
+    const result = parseExecOptInUsers(' T1:U1 , T2:U2 ');
+    expect(result).toEqual([
+      { teamId: 'T1', userId: 'U1' },
+      { teamId: 'T2', userId: 'U2' },
+    ]);
+  });
+
+  it('skips empty segments (trailing/leading/double commas)', () => {
+    const result = parseExecOptInUsers(',T1:U1,,T2:U2,');
+    expect(result).toEqual([
+      { teamId: 'T1', userId: 'U1' },
+      { teamId: 'T2', userId: 'U2' },
+    ]);
+  });
+
+  it('collapses duplicate (team, user) pairs without error', () => {
+    const result = parseExecOptInUsers('T1:U1,T1:U1,T1:U2');
+    expect(result).toEqual([
+      { teamId: 'T1', userId: 'U1' },
+      { teamId: 'T1', userId: 'U2' },
+    ]);
+  });
+
+  it('throws for an entry without a colon', () => {
+    expect(() => parseExecOptInUsers('U1')).toThrow(/EXEC_OPT_IN_USERS/);
+  });
+
+  it('throws for an entry with an empty team (colon at start)', () => {
+    expect(() => parseExecOptInUsers(':U1')).toThrow(/EXEC_OPT_IN_USERS/);
+  });
+
+  it('throws for an entry with an empty user (colon at end)', () => {
+    expect(() => parseExecOptInUsers('T1:')).toThrow(/EXEC_OPT_IN_USERS/);
+  });
+
+  it('throws for an entry with more than one colon (extra colon)', () => {
+    expect(() => parseExecOptInUsers('T1:U1:x')).toThrow(/EXEC_OPT_IN_USERS/);
+  });
+
+  it('throws for an entry containing internal whitespace', () => {
+    expect(() => parseExecOptInUsers('T 1:U1')).toThrow(/EXEC_OPT_IN_USERS/);
+    expect(() => parseExecOptInUsers('T1:U 1')).toThrow(/EXEC_OPT_IN_USERS/);
+  });
+
+  it('includes the offending entry text in the error message', () => {
+    expect(() => parseExecOptInUsers('BADENTRY')).toThrow(/"BADENTRY"/);
   });
 });

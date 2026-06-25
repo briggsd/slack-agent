@@ -144,6 +144,7 @@ class SeededStore implements SessionStore {
   sumCostGlobalSince(_sinceMs: number): number { return 0; }
   hasExecOptIn(_teamId: string, _userId: string): boolean { return false; }
   recordExecOptIn(_teamId: string, _userId: string, _atMs: number): void {}
+  replaceExecOptIns(_entries: ReadonlyArray<{ teamId: string; userId: string }>, _atMs: number): void {}
 }
 
 function makeManager(idleTimeoutMs = 60_000, script: TurnScript[] = []) {
@@ -1055,6 +1056,13 @@ class CapturingStore implements SessionStore {
 
   recordExecOptIn(teamId: string, userId: string, _atMs: number): void {
     this.execOptIns.add(`${teamId}:${userId}`);
+  }
+
+  replaceExecOptIns(entries: ReadonlyArray<{ teamId: string; userId: string }>, _atMs: number): void {
+    this.execOptIns.clear();
+    for (const { teamId, userId } of entries) {
+      this.execOptIns.add(`${teamId}:${userId}`);
+    }
   }
 
   private readonly execOptIns = new Set<string>();

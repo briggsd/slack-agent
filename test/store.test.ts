@@ -1589,3 +1589,44 @@ describe('SessionManager — rehydrate-on-reply', () => {
     expect(factory.runners[0]?.sends).toContain('second');
   });
 });
+
+// ─── replaceExecOptIns reconcile semantics ────────────────────────────────────
+
+describe('SqliteSessionStore — replaceExecOptIns', () => {
+  let store: SqliteSessionStore;
+
+  beforeEach(() => {
+    store = new SqliteSessionStore(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it('starts empty: hasExecOptIn is false for any pair', () => {
+    expect(store.hasExecOptIn('T', 'U1')).toBe(false);
+  });
+
+  it('replaceExecOptIns([{T,U1},{T,U2}]) grants both', () => {
+    store.replaceExecOptIns([{ teamId: 'T', userId: 'U1' }, { teamId: 'T', userId: 'U2' }], 1000);
+    expect(store.hasExecOptIn('T', 'U1')).toBe(true);
+    expect(store.hasExecOptIn('T', 'U2')).toBe(true);
+  });
+
+  it('second replace grants new + revokes old in a single atomic call', () => {
+    store.replaceExecOptIns([{ teamId: 'T', userId: 'U1' }, { teamId: 'T', userId: 'U2' }], 1000);
+    store.replaceExecOptIns([{ teamId: 'T', userId: 'U2' }, { teamId: 'T', userId: 'U3' }], 2000);
+
+    expect(store.hasExecOptIn('T', 'U1')).toBe(false); // revoked
+    expect(store.hasExecOptIn('T', 'U2')).toBe(true);  // still granted
+    expect(store.hasExecOptIn('T', 'U3')).toBe(true);  // newly granted
+  });
+
+  it('replaceExecOptIns([]) revokes everyone', () => {
+    store.replaceExecOptIns([{ teamId: 'T', userId: 'U1' }, { teamId: 'T', userId: 'U2' }], 1000);
+    store.replaceExecOptIns([], 2000);
+
+    expect(store.hasExecOptIn('T', 'U1')).toBe(false);
+    expect(store.hasExecOptIn('T', 'U2')).toBe(false);
+  });
+});

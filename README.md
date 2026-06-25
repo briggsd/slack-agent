@@ -152,6 +152,7 @@ and includes `git`, `curl`, and `ripgrep` as agent tools.
 | `GITLAB_BOT_TOKEN` | no | Same, for GitLab (provider not yet implemented). |
 | `GIT_IMAGE` | no (default `slackbot-runner:latest`) | Image for the ephemeral credentialed git nodes (clone/push) |
 | `CLONE_REPO_ALLOWLIST` | no (default empty) | Comma-separated exact GitHub `owner/name` slugs the conversational `clone_repo` tool may clone. Empty/unset denies model-chosen clones. |
+| `EXEC_OPT_IN_USERS` | no (default empty) | Comma-separated `TEAM:USER` pairs allowed to run the un-gated `exec` one-shot. Reconciled at startup — the list is the full source of truth, so removing a user and restarting revokes them. Unset/empty = nobody may exec. |
 | `RUNTIME_CATALOG_PATH` | no (default `config/runtimes.json`) | JSON catalog of pinned relocatable runtimes available to `provision_runtime`. Missing/empty catalog denies all runtime requests; malformed entries fail startup. |
 | `VOLUME_TTL_MS` | no (default 7 days) | Inactivity before a session's workspace volume + row are garbage-collected |
 | `VOLUME_GC_INTERVAL_MS` | no (default 1 hour) | How often the volume-GC sweep runs |
@@ -197,6 +198,8 @@ thread. Nothing is written until you respond in-thread:
 - no reply within `GATE_TIMEOUT_MS` (default 15 min) — abandon.
 
 **`exec` — fire-and-forget.** No gate; the plan flows straight into implementation.
+The gateway refuses `exec` unless the requesting user is listed in `EXEC_OPT_IN_USERS`
+(see the env table above). `task` is unaffected and requires no opt-in.
 
 > **Heads-up — who can start a credentialed run.** The gate is *supervision*, not an
 > invocation gate: only the thread's originator can approve/cancel/redirect a run
