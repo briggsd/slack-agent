@@ -1134,18 +1134,26 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 describe('DockerGitNodeExecutor — provisionRuntime', () => {
   const image = 'slackbot-runner:test';
   const volume = 'slackbot-ws-team01-c123-t456';
-  const entry = {
+  const tarGzEntry = {
     version: '3.12.13+20260610',
     url: 'https://example.test/python.tar.gz',
     sha256: 'a'.repeat(64),
     binSubdir: 'python/bin',
+    format: 'tar.gz' as const,
+  };
+  const zipEntry = {
+    version: '1.3.14',
+    url: 'https://example.test/bun.zip',
+    sha256: 'b'.repeat(64),
+    binSubdir: 'bun-linux-x64-baseline',
+    format: 'zip' as const,
   };
 
-  it('spawns a named no-credential provision container with sha256 verification before extraction', async () => {
+  it('spawns a named no-credential provision container with sha256 verification before extraction (tar.gz)', async () => {
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
 
-    await exec.provisionRuntime({ name: 'python', entry, volume });
+    await exec.provisionRuntime({ name: 'python', entry: tarGzEntry, volume });
 
     expect(calls).toHaveLength(1);
     const { command, args, options } = calls[0]!;
@@ -1170,11 +1178,66 @@ describe('DockerGitNodeExecutor — provisionRuntime', () => {
     const shellCmd = args[cIdx + 1] ?? '';
     expect(shellCmd).toContain('if [ -d "$bin_dir" ]; then exit 0; fi');
     expect(shellCmd).toContain('curl -L --fail');
-    expect(shellCmd).toContain(entry.url);
+    expect(shellCmd).toContain(tarGzEntry.url);
     expect(shellCmd).toContain('sha256sum "$archive"');
-    expect(shellCmd).toContain(entry.sha256);
+    expect(shellCmd).toContain(tarGzEntry.sha256);
     expect(shellCmd.indexOf('sha256sum "$archive"')).toBeLessThan(shellCmd.indexOf('tar -xzf "$archive"'));
     expect(shellCmd).toContain('/workspace/.runtimes/python/python/bin');
+  });
+
+  it('tar.gz entry: uses .tar.gz temp suffix and tar -xzf, NOT unzip', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.provisionRuntime({ name: 'python', entry: tarGzEntry, volume });
+
+    const cIdx = calls[0]!.args.indexOf('-c');
+    const shellCmd = calls[0]!.args[cIdx + 1] ?? '';
+    expect(shellCmd).toContain('.tar.gz');
+    expect(shellCmd).toContain('tar -xzf "$archive"');
+    expect(shellCmd).not.toContain('unzip');
+    expect(shellCmd).not.toContain('.zip');
+  });
+
+  it('zip entry: uses .zip temp suffix and unzip -q, NOT tar -xzf', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.provisionRuntime({ name: 'bun', entry: zipEntry, volume });
+
+    expect(calls).toHaveLength(1);
+    const cIdx = calls[0]!.args.indexOf('-c');
+    const shellCmd = calls[0]!.args[cIdx + 1] ?? '';
+
+    // correct temp suffix
+    expect(shellCmd).toContain('.zip');
+    // correct extract command
+    expect(shellCmd).toContain('unzip -q "$archive" -d "$tmp_dir"');
+    // no tar
+    expect(shellCmd).not.toContain('tar -xzf');
+    // sha256 still verified before extraction
+    expect(shellCmd).toContain('sha256sum "$archive"');
+    expect(shellCmd.indexOf('sha256sum "$archive"')).toBeLessThan(shellCmd.indexOf('unzip -q'));
+    // bin_dir short-circuit still present
+    expect(shellCmd).toContain('if [ -d "$bin_dir" ]; then exit 0; fi');
+    // atomic mv still present
+    expect(shellCmd).toContain('mv "$tmp_dir" "$target"');
+    // final test -d still present
+    expect(shellCmd).toContain('test -d "$bin_dir"');
+  });
+
+  it('zip entry: no credential, correct container name', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.provisionRuntime({ name: 'bun', entry: zipEntry, volume });
+
+    const { args, options } = calls[0]!;
+    const nameIdx = args.indexOf('--name');
+    expect(args[nameIdx + 1]).toMatch(/^slackbot-runtime-provision-bun-/);
+    expect(args).not.toContain('GIT_TOKEN');
+    const env = options.env as Record<string, string | undefined>;
+    expect(env['GIT_TOKEN']).toBeUndefined();
   });
 
   it('TIMEOUT: stalled provision removes the named container and kills the docker client', async () => {
@@ -1190,7 +1253,7 @@ describe('DockerGitNodeExecutor — provisionRuntime', () => {
     };
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, provisionTimeoutMs: 10 });
 
-    await expect(exec.provisionRuntime({ name: 'python', entry, volume })).rejects.toThrow(/runtime provision timed out/);
+    await expect(exec.provisionRuntime({ name: 'python', entry: tarGzEntry, volume })).rejects.toThrow(/runtime provision timed out/);
 
     expect(killed).toBe(true);
     expect(calls).toHaveLength(2);

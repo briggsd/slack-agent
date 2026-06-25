@@ -9,6 +9,7 @@ export interface RuntimeCatalogEntry {
   url: string;
   sha256: string;
   binSubdir: string;
+  format: 'tar.gz' | 'zip';
 }
 
 export interface RuntimeProvisionRequest {
