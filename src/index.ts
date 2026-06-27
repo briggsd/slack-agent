@@ -114,6 +114,7 @@ async function main(): Promise<void> {
       ...(oc.lintCommand !== undefined ? { lintCmd: oc.lintCommand } : {}),
       ...(oc.testCommand !== undefined ? { testCmd: oc.testCommand } : {}),
       ...(oc.checkCmds.size > 0 ? { checkCmds: oc.checkCmds } : {}),
+      runtimeCatalog: oc.runtimeCatalog,
     });
     const cloneService = new RealCloneService(broker, gitNodes, {
       allowedRepos: oc.cloneRepoAllowlist,

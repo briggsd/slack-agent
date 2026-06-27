@@ -14,6 +14,7 @@ import { DIFF_BASE_REF, DockerGitNodeExecutor, credentialHelper } from '../src/o
 import { GithubProvider, providerFor } from '../src/oneshot/git-host.js';
 import type { SpawnFn } from '../src/runner/docker.js';
 import type { CredentialLease } from '../src/broker/types.js';
+import type { RuntimeCatalogEntry } from '../src/config.js';
 
 // ── FakeChildProcess (mirrored from test/docker.test.ts) ─────────────────────
 
@@ -926,18 +927,30 @@ describe('DockerGitNodeExecutor — runCheck', () => {
   });
 
   it('prepends provisioned runtime bin directories to PATH without injecting credentials', async () => {
+    const catalogFixture = new Map<string, RuntimeCatalogEntry>([
+      ['python', { version: '3.12.0', url: 'https://example.com/python.tar.gz', sha256: 'abc123', binSubdir: 'python/bin', format: 'tar.gz' }],
+      ['bun', { version: '1.0.0', url: 'https://example.com/bun.tar.gz', sha256: 'def456', binSubdir: 'bun-linux-x64-baseline', format: 'tar.gz' }],
+    ]);
     const { spawnFn, calls } = makeFakeSpawn(0);
-    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, runtimeCatalog: catalogFixture });
 
     await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
     const shellCmd = args[cIdx + 1] ?? '';
-    expect(shellCmd).toContain('find /workspace/.runtimes');
-    expect(shellCmd).toContain('-type d -name bin');
+
+    // Both catalog-derived dirs appear, each guarded by an existence test
+    expect(shellCmd).toContain('/workspace/.runtimes/python/python/bin');
+    expect(shellCmd).toContain('/workspace/.runtimes/bun/bun-linux-x64-baseline');
+    expect(shellCmd).toContain('[ -d ');
     expect(shellCmd).toContain('export PATH="${runtime_bins}$PATH"');
     expect(shellCmd).toContain('npm run lint');
+
+    // Old glob is gone
+    expect(shellCmd).not.toContain('-name bin');
+
+    // No credentials injected
     expect(args).not.toContain('GIT_TOKEN');
   });
 
@@ -949,7 +962,6 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toContain('/workspace/.runtimes');
     expect(args[cIdx + 1]).toContain('make lint');
   });
 
@@ -961,8 +973,28 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toContain('/workspace/.runtimes');
     expect(args[cIdx + 1]).toContain('make test');
+  });
+
+  it('with no catalog configured, does not add .runtimes to PATH but still runs check command', async () => {
+    const { spawnFn, calls } = makeFakeSpawn(0);
+    // No runtimeCatalog passed → defaults to empty map
+    const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn });
+
+    await exec.runCheck({ kind: 'lint', repo: 'acme/widgets', workdir, volume });
+
+    const { args } = calls[0]!;
+    const cIdx = args.indexOf('-c');
+    const shellCmd = args[cIdx + 1] ?? '';
+
+    // No .runtimes PATH manipulation when catalog is empty
+    expect(shellCmd).not.toContain('/workspace/.runtimes');
+
+    // Default check command still runs
+    expect(shellCmd).toContain('npm run lint');
+
+    // No credential leak
+    expect(args).not.toContain('GIT_TOKEN');
   });
 
   it('a non-zero exit RESOLVES with that exitCode (does not reject)', async () => {
@@ -1047,7 +1079,6 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toContain('/workspace/.runtimes');
     expect(args[cIdx + 1]).toContain('ruff check .');
     expect(result.skipped).toBe(false);
   });
@@ -1061,7 +1092,6 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 
     const { args } = calls[0]!;
     const cIdx = args.indexOf('-c');
-    expect(args[cIdx + 1]).toContain('/workspace/.runtimes');
     expect(args[cIdx + 1]).toContain('pytest');
     expect(result.skipped).toBe(false);
   });
