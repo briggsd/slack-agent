@@ -16,6 +16,7 @@ import type { ChildProcess } from 'child_process';
 import type { SpawnFn } from '../runner/docker.js';
 import type { GitNodeExecutor, CloneRequest, BranchRequest, PushRequest, VerifyRepoRequest, OpenChangeRequest, EditChangeRequest, CommentChangeRequest, ChangeRequestMutationResult, CheckRequest, CheckResult, ProvisionRuntimeRequest } from './git-node.js';
 import { providerFor, type FetchFn } from './git-host.js';
+import type { RuntimeCatalogEntry } from '../config.js';
 
 /** Env vars the docker CLI itself may need; everything else (incl. host secrets) is dropped. */
 const DOCKER_CLI_ENV_PASSTHROUGH = [
@@ -272,11 +273,6 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function runtimePathPrefixScript(): string {
-  return 'runtime_bins="$(find /workspace/.runtimes -mindepth 2 -maxdepth 3 -type d -name bin -print 2>/dev/null | tr \'\\n\' :)"; ' +
-    'if [ -n "$runtime_bins" ]; then export PATH="${runtime_bins}$PATH"; fi';
-}
-
 export class DockerGitNodeExecutor implements GitNodeExecutor {
   private readonly image: string;
   private readonly spawnFn: SpawnFn;
@@ -286,6 +282,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
   private readonly checkCmds: ReadonlyMap<string, { lint?: string; test?: string }>;
   private readonly cloneTimeoutMs: number;
   private readonly provisionTimeoutMs: number;
+  private readonly runtimeCatalog: ReadonlyMap<string, RuntimeCatalogEntry>;
 
   constructor(opts: {
     image: string;
@@ -298,6 +295,8 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     cloneTimeoutMs?: number;
     /** Bound on a single runtime provision in ms (default 180000). */
     provisionTimeoutMs?: number;
+    /** Catalog of known runtimes; used to build the PATH prefix for run_checks. */
+    runtimeCatalog?: ReadonlyMap<string, RuntimeCatalogEntry>;
   }) {
     this.image = opts.image;
     this.spawnFn = opts.spawn ?? nodeSpawn;
@@ -307,6 +306,29 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     this.checkCmds = opts.checkCmds ?? new Map();
     this.cloneTimeoutMs = opts.cloneTimeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS;
     this.provisionTimeoutMs = opts.provisionTimeoutMs ?? DEFAULT_PROVISION_TIMEOUT_MS;
+    this.runtimeCatalog = opts.runtimeCatalog ?? new Map();
+  }
+
+  /**
+   * Build a shell snippet that prepends provisioned runtime bin dirs to PATH.
+   * Each entry in the catalog contributes `/workspace/.runtimes/<name>/<binSubdir>`,
+   * guarded by an existence check so only actually-provisioned runtimes land on PATH.
+   * Returns a `:` no-op when the catalog is empty so the caller's `"<script>; <cmd>"`
+   * concatenation is always valid shell.
+   */
+  private runtimePathPrefixScript(): string {
+    if (this.runtimeCatalog.size === 0) {
+      return ':';
+    }
+    const dirs = [...this.runtimeCatalog.entries()]
+      .map(([name, entry]) =>
+        shellQuote(`/workspace/.runtimes/${name}/${entry.binSubdir}`),
+      )
+      .join(' ');
+    return (
+      `runtime_bins=''; for d in ${dirs}; do if [ -d "$d" ]; then runtime_bins="\${runtime_bins}\${d}:"; fi; done; ` +
+      `if [ -n "$runtime_bins" ]; then export PATH="\${runtime_bins}$PATH"; fi`
+    );
   }
 
   /**
@@ -491,7 +513,7 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
    * credential (defense-in-depth on the boundary).
    */
   private dockerCheckArgs(volume: string, workdir: string, shellCmd: string): string[] {
-    const wrappedShellCmd = `${runtimePathPrefixScript()}; ${shellCmd}`;
+    const wrappedShellCmd = `${this.runtimePathPrefixScript()}; ${shellCmd}`;
     return [
       'run',
       '--rm',
