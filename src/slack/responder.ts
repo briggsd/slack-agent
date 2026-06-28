@@ -27,7 +27,7 @@ export interface Placeholder {
   ts: string;
 }
 
-/** Slack's maximum text field length — safely below Slack's 40,000-char limit. */
+/** Cap for Slack text fields — kept safely below Slack's 40,000-char limit (which rejects with `msg_too_long`). */
 export const SLACK_TEXT_LIMIT = 39000;
 
 const MARKER = '\n\n…[truncated]';
