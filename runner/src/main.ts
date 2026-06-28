@@ -1195,7 +1195,7 @@ async function realMkdir(path: string): Promise<void> {
   await mkdir(path, { recursive: true });
 }
 
-async function realListFiles(dir: string): Promise<ScannedFile[]> {
+export async function realListFiles(dir: string): Promise<ScannedFile[]> {
   const { readdir, stat } = await import('fs/promises');
   const results: ScannedFile[] = [];
 
@@ -1205,6 +1205,14 @@ async function realListFiles(dir: string): Promise<ScannedFile[]> {
       const raw = await readdir(currentDir, { withFileTypes: true, encoding: 'utf-8' });
       entries = raw as import('fs').Dirent<string>[];
     } catch {
+      return;
+    }
+    // A directory containing a `.git` entry is a cloned repo root (or git worktree):
+    // its files are not agent-authored artifacts — they reach the user via the git/PR
+    // path, not file-forward. Skip the whole subtree so a review of a cloned repo
+    // doesn't dump every repo file into Slack. `.git` may be a dir (normal clone) or a
+    // file (worktree gitlink) — match by name regardless of type.
+    if (entries.some((e) => e.name === '.git')) {
       return;
     }
     for (const entry of entries) {
