@@ -101,7 +101,12 @@ for (const line of raw.split('\n')) {
   if (line.trim() === '') continue;
   let o;
   try { o = JSON.parse(line); } catch { continue; }
-  const ts = typeof o.timestamp === 'string' ? o.timestamp.slice(11, 19) : '--:--:--';
+  // Full ISO timestamp is the chronological sort key (ISO sorts lexically); the
+  // HH:MM:SS slice is just for display. A volume can hold more than one transcript
+  // file (e.g. after a resume), and `cat *.jsonl` concatenates them in glob order —
+  // sort by `key` below so the timeline stays chronological across files.
+  const key = typeof o.timestamp === 'string' ? o.timestamp : '';
+  const ts = key !== '' ? key.slice(11, 19) : '--:--:--';
   const content = o.message?.content;
   if (!Array.isArray(content)) continue;
   for (const b of content) {
@@ -109,12 +114,12 @@ for (const line of raw.split('\n')) {
       const detail =
         b.name === 'Bash' ? (b.input?.command ?? '')
         : JSON.stringify(b.input ?? {});
-      events.push({ ts, kind: `TOOL ${b.name}`, detail: clip(detail, full ? 1e9 : 160) });
+      events.push({ key, ts, kind: `TOOL ${b.name}`, detail: clip(detail, full ? 1e9 : 160) });
     } else if (b?.type === 'tool_result') {
       const txt = Array.isArray(b.content)
         ? b.content.map((x) => x.text ?? '').join(' ')
         : String(b.content ?? '');
-      events.push({ ts, kind: '  └ result', detail: clip(txt, full ? 1e9 : 90) });
+      events.push({ key, ts, kind: '  └ result', detail: clip(txt, full ? 1e9 : 90) });
     }
   }
 }
@@ -123,6 +128,10 @@ if (events.length === 0) {
   process.stderr.write(`peek-session: transcript on "${volume}" had no tool calls\n`);
   process.exit(1);
 }
+
+// Stable sort by ISO timestamp so multiple concatenated transcript files interleave
+// chronologically (Node's sort is stable, so timestamp-less events keep their order).
+events.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
 const shown = tail === 0 ? events : events.slice(-tail);
 process.stdout.write(`session volume: ${volume}\n`);
