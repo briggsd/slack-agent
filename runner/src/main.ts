@@ -1116,33 +1116,21 @@ async function emitNewFiles(
 
   let fileCount = 0;
   let totalBytes = 0;
+  let skippedCountCap = 0;
+  let skippedTooLarge = 0;
+  let skippedTotalCap = 0;
 
   for (const f of newFiles) {
     if (fileCount >= MAX_FILES_PER_TURN) {
-      emit({
-        type: 'status',
-        id,
-        text: `skipped file ${f.name}: per-turn file limit (${MAX_FILES_PER_TURN}) reached`,
-      });
-      log(`skipped file ${f.name} (file count cap)`);
+      skippedCountCap++;
       continue;
     }
     if (f.size > MAX_FILE_BYTES) {
-      emit({
-        type: 'status',
-        id,
-        text: `skipped file ${f.name}: file too large (${f.size} bytes, limit ${MAX_FILE_BYTES})`,
-      });
-      log(`skipped file ${f.name} (${f.size} bytes, over per-file cap)`);
+      skippedTooLarge++;
       continue;
     }
     if (totalBytes + f.size > MAX_TOTAL_BYTES) {
-      emit({
-        type: 'status',
-        id,
-        text: `skipped file ${f.name}: total size limit (${MAX_TOTAL_BYTES} bytes) would be exceeded`,
-      });
-      log(`skipped file ${f.name} (would exceed total bytes cap)`);
+      skippedTotalCap++;
       continue;
     }
 
@@ -1170,6 +1158,17 @@ async function emitNewFiles(
     };
     emit(fileMsg);
     log(`forwarded file ${f.name} (${f.size} bytes)`);
+  }
+
+  const skippedTotal = skippedCountCap + skippedTooLarge + skippedTotalCap;
+  if (skippedTotal > 0) {
+    const reasons: string[] = [];
+    if (skippedCountCap > 0) reasons.push(`${skippedCountCap} over the ${MAX_FILES_PER_TURN}-file limit`);
+    if (skippedTooLarge > 0) reasons.push(`${skippedTooLarge} too large (>${MAX_FILE_BYTES} bytes)`);
+    if (skippedTotalCap > 0) reasons.push(`${skippedTotalCap} over the ${MAX_TOTAL_BYTES}-byte total`);
+    const summary = `${skippedTotal} file${skippedTotal === 1 ? '' : 's'} not delivered: ${reasons.join(', ')}`;
+    emit({ type: 'status', id, text: summary });
+    log(`file-forward: ${summary}`);
   }
 }
 
