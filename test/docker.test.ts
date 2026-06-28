@@ -13,7 +13,7 @@ import { DockerRunner, DockerRunnerFactory, sanitizeKey, volumeNameFor } from '.
 import type { DockerRunnerConfig, SpawnFn } from '../src/runner/docker.js';
 import type { RunnerFactory } from '../src/runner/types.js';
 import { SessionManager } from '../src/sessions/manager.js';
-import { FakeSlackClient } from './responder.test.js';
+import { FakeSlackClient } from '../src/slack/fake-slack-client.js';
 
 // ── FakeChildProcess ──────────────────────────────────────────────────────────
 

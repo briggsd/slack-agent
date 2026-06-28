@@ -4,7 +4,7 @@ import type { HandlerDeps, MentionEventBody, MessageEventBody, OneShotTrigger } 
 import { FakeRunnerFactory } from '../src/runner/fake.js';
 import { SessionManager } from '../src/sessions/manager.js';
 import type { QueueItem } from '../src/sessions/manager.js';
-import { FakeSlackClient } from './responder.test.js';
+import { FakeSlackClient } from '../src/slack/fake-slack-client.js';
 
 function makeDeps(idleTimeoutMs = 60_000): {
   deps: HandlerDeps;

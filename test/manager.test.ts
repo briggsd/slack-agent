@@ -25,7 +25,7 @@ import type {
   PullRequestTerminalState,
 } from '../src/sessions/store.js';
 import { SqliteSessionStore } from '../src/sessions/store.js';
-import { FakeSlackClient } from './responder.test.js';
+import { FakeSlackClient } from '../src/slack/fake-slack-client.js';
 import type { SlackClientLike } from '../src/slack/responder.js';
 import type { PrState, PrStateReader } from '../src/sessions/pr-state-reader.js';
 
