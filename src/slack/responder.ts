@@ -30,6 +30,13 @@ export interface Placeholder {
 /** Cap for Slack text fields — kept safely below Slack's 40,000-char limit (which rejects with `msg_too_long`). */
 export const SLACK_TEXT_LIMIT = 39000;
 
+/** Replies up to this length post inline; longer ones are uploaded as a file
+ *  (a comfortable margin under Slack's ~40k message limit, which rejects at the edge). */
+export const SLACK_INLINE_LIMIT = 30000;
+
+/** Number of characters shown as a preview before the "full text attached" note. */
+export const PREVIEW_LEN = 2000;
+
 const MARKER = '\n\n…[truncated]';
 
 /**

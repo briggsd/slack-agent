@@ -27,6 +27,7 @@ import type {
 import { SqliteSessionStore } from '../src/sessions/store.js';
 import { FakeSlackClient } from '../src/slack/fake-slack-client.js';
 import type { SlackClientLike } from '../src/slack/responder.js';
+import { SLACK_INLINE_LIMIT } from '../src/slack/responder.js';
 import { gatewayErrorMeta, isSlackMsgTooLong } from '../src/sessions/manager.js';
 import type { PrState, PrStateReader } from '../src/sessions/pr-state-reader.js';
 
@@ -3521,6 +3522,136 @@ describe('SessionManager — drain catch posts friendly message for msg_too_long
       const lastUpdate = slack.updates[slack.updates.length - 1];
       expect(lastUpdate?.text).toContain(':x: Unexpected error:');
       expect(lastUpdate?.text).toContain('some internal failure');
+    } finally {
+      errorSpy.mockRestore();
+      await manager.disposeAll();
+    }
+  });
+});
+
+describe('SessionManager — long reply file-forward (tryUpdateOrFile)', () => {
+  it('short reply (≤ SLACK_INLINE_LIMIT) posts inline — no upload', async () => {
+    const slack = new FakeSlackClient();
+    const shortText = 'a'.repeat(SLACK_INLINE_LIMIT);
+    const factory = new FakeRunnerFactory([
+      [{ type: 'text', text: shortText }] as RunnerEvent[],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    await manager.enqueueNew('TEAM:C:T', { message: 'hi', channel: 'C', threadTs: 'T' });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // The last update must contain the full text
+    const lastUpdate = slack.updates[slack.updates.length - 1];
+    expect(lastUpdate?.text).toBe(shortText);
+    // No file upload
+    expect(slack.uploads).toHaveLength(0);
+  });
+
+  it('long reply (> SLACK_INLINE_LIMIT, plain branch) posts preview + uploads full text as response.md', async () => {
+    const slack = new FakeSlackClient();
+    const longText = 'x'.repeat(SLACK_INLINE_LIMIT + 1000);
+    const factory = new FakeRunnerFactory([
+      [{ type: 'text', text: longText }] as RunnerEvent[],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    await manager.enqueueNew('TEAM:C:T', { message: 'hi', channel: 'C', threadTs: 'T' });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Update must contain the "attached as response.md" note
+    const updateTexts = slack.updates.map((u) => u.text);
+    const noteUpdate = updateTexts.find((t) => t.includes('full text attached as response.md'));
+    expect(noteUpdate).toBeDefined();
+    // Update text must be well under the inline limit (preview + short note)
+    expect((noteUpdate ?? '').length).toBeLessThan(SLACK_INLINE_LIMIT);
+
+    // Exactly one upload with filename 'response.md' whose data is the full original text
+    expect(slack.uploads).toHaveLength(1);
+    const upload = slack.uploads[0];
+    expect(upload?.filename).toBe('response.md');
+    expect(upload?.channel).toBe('C');
+    expect(upload?.thread_ts).toBe('T');
+    expect(upload?.data.toString('utf-8')).toBe(longText);
+  });
+
+  it('long reply (> SLACK_INLINE_LIMIT, build-spec-wrapped branch) posts preview + uploads full text as response.md', async () => {
+    // The build-spec-wrapped branch fires when approval_requested and text events arrive in
+    // the SAME send() call (first turn) — pendingApproval is set by approval_requested, then
+    // still present when the text event is processed, so formatBuildSpecApprovalPrompt wraps
+    // the text before it's handed to tryUpdateOrFile.
+    const slack = new FakeSlackClient();
+    const longAgentText = 'y'.repeat(SLACK_INLINE_LIMIT + 500);
+    class BuildSpecLongTextRunner implements SessionRunner {
+      constructor(readonly sessionKey: string) {}
+      async *send(_message: string): RunnerStream {
+        // First (and only) turn: emit approval_requested (sets pendingApproval) then a long
+        // text reply — text branch sees pendingApproval.kind === 'build_spec' and wraps it.
+        yield { type: 'approval_requested', approvalId: 'appr-1', prompt: 'SPEC: short', specRef: 'SPEC: short' };
+        yield { type: 'text', text: longAgentText };
+      }
+      async dispose(): Promise<void> {}
+    }
+    const factory: RunnerFactory = {
+      create: async (key) => new BuildSpecLongTextRunner(key),
+    };
+    const manager = new SessionManager({
+      idleTimeoutMs: 60_000,
+      gateTimeoutMs: 60_000,
+      factory,
+      slack,
+    });
+
+    await manager.enqueueNew('TEAM:C:T', {
+      message: 'build this',
+      channel: 'C',
+      threadTs: 'T',
+      userId: 'U-REQ',
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // The update should contain the "full text attached" note
+    const updateTexts = slack.updates.map((u) => u.text);
+    const noteUpdate = updateTexts.find((t) => t.includes('full text attached as response.md'));
+    expect(noteUpdate).toBeDefined();
+    expect((noteUpdate ?? '').length).toBeLessThan(SLACK_INLINE_LIMIT);
+
+    // Exactly one upload: the full wrapped text (prompt + instruction + longAgentText)
+    const responseUploads = slack.uploads.filter((u) => u.filename === 'response.md');
+    expect(responseUploads).toHaveLength(1);
+    const uploadedText = responseUploads[0]?.data.toString('utf-8') ?? '';
+    // The full uploaded content must include the agent text and the spec prompt
+    expect(uploadedText).toContain(longAgentText);
+    expect(uploadedText).toContain('SPEC: short');
+  });
+
+  it('upload failure after long reply still posts preview without throwing', async () => {
+    const slack = new FakeSlackClient();
+    slack.uploadError = new Error('network failure');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const longText = 'z'.repeat(SLACK_INLINE_LIMIT + 100);
+    const factory = new FakeRunnerFactory([
+      [{ type: 'text', text: longText }] as RunnerEvent[],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    try {
+      await manager.enqueueNew('TEAM:C:T', { message: 'hi', channel: 'C', threadTs: 'T' });
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Preview is still posted (note present in updates)
+      const updateTexts = slack.updates.map((u) => u.text);
+      const noteUpdate = updateTexts.find((t) => t.includes('full text attached as response.md'));
+      expect(noteUpdate).toBeDefined();
+
+      // No uploads recorded (uploadError caused the upload to fail)
+      expect(slack.uploads).toHaveLength(0);
+
+      // The turn completed without throwing — the drain catch was NOT hit
+      // (if it had, there would be an :x: Unexpected error update)
+      const hasUnexpectedError = updateTexts.some((t) => t.includes(':x: Unexpected error'));
+      expect(hasUnexpectedError).toBe(false);
     } finally {
       errorSpy.mockRestore();
       await manager.disposeAll();

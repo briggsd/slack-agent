@@ -12,7 +12,7 @@ import type {
   ExecInput,
 } from '../runner/types.js';
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
-import { postPlaceholder, updatePlaceholder, boundSlackText } from '../slack/responder.js';
+import { postPlaceholder, updatePlaceholder, boundSlackText, SLACK_INLINE_LIMIT, PREVIEW_LEN } from '../slack/responder.js';
 import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
 import type { SessionStore, AuditEvent } from './store.js';
 import { NoopSessionStore } from './store.js';
@@ -789,6 +789,32 @@ export class SessionManager {
         await updatePlaceholder(this.slack, placeholder, text);
       }
     };
+    // Post `text`; if it exceeds the inline limit, post a short preview and upload the
+    // full text as a file so the content is never dropped. No-op when no placeholder.
+    const tryUpdateOrFile = async (text: string, filename: string): Promise<void> => {
+      if (placeholder === null) return;
+      if (text.length <= SLACK_INLINE_LIMIT) {
+        await updatePlaceholder(this.slack, placeholder, text);
+        return;
+      }
+      const preview = text.slice(0, PREVIEW_LEN);
+      await updatePlaceholder(
+        this.slack,
+        placeholder,
+        `${preview}\n\n_…reply too long for Slack — full text attached as ${filename}._`,
+      );
+      try {
+        await this.slack.uploadFile({
+          channel: item.channel,
+          thread_ts: item.threadTs,
+          filename,
+          data: Buffer.from(text, 'utf-8'),
+        });
+      } catch (uploadErr: unknown) {
+        console.error(`[session] reply file upload failed in ${session.key}: ${gatewayErrorMeta(uploadErr)}`);
+        // The preview is already posted; nothing more to do.
+      }
+    };
     try {
       let resume: GateResume | BuildOutcome | ExecOutcome | undefined;
       while (true) {
@@ -820,9 +846,9 @@ export class SessionManager {
           }
         } else if (event.type === 'text') {
           if (session.pendingApproval?.kind === 'build_spec') {
-            await tryUpdate(formatBuildSpecApprovalPrompt(session.pendingApproval.prompt, event.text));
+            await tryUpdateOrFile(formatBuildSpecApprovalPrompt(session.pendingApproval.prompt, event.text), 'response.md');
           } else {
-            await tryUpdate(event.text);
+            await tryUpdateOrFile(event.text, 'response.md');
           }
         } else if (event.type === 'approval_requested') {
           session.pendingApproval = {
