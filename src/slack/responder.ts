@@ -27,6 +27,22 @@ export interface Placeholder {
   ts: string;
 }
 
+/** Slack's maximum text field length (UTF-16 code units). */
+export const SLACK_TEXT_LIMIT = 40000;
+
+const MARKER = '\n\n…[truncated]';
+
+/**
+ * Bound text to Slack's 40k-char limit.
+ * Returns text unchanged when within the limit; truncates with a fixed marker otherwise.
+ */
+export function boundSlackText(text: string): string {
+  if (text.length <= SLACK_TEXT_LIMIT) {
+    return text;
+  }
+  return text.slice(0, SLACK_TEXT_LIMIT - MARKER.length) + MARKER;
+}
+
 /** Post the initial "thinking…" placeholder in a thread and return its ts. */
 export async function postPlaceholder(
   slack: SlackClientLike,
@@ -36,7 +52,7 @@ export async function postPlaceholder(
   const result = await slack.postMessage({
     channel,
     thread_ts: threadTs,
-    text: '_thinking…_',
+    text: boundSlackText('_thinking…_'),
   });
   return { channel, ts: result.ts };
 }
@@ -50,6 +66,6 @@ export async function updatePlaceholder(
   await slack.update({
     channel: placeholder.channel,
     ts: placeholder.ts,
-    text,
+    text: boundSlackText(text),
   });
 }
