@@ -83,7 +83,7 @@ describe('conversational profile flows to factory.create', () => {
 
   it('SessionManager passes the conversational profile to factory.create on enqueueNew', async () => {
     const { FakeRunnerFactory } = await import('../src/runner/fake.js');
-    const { FakeSlackClient } = await import('./responder.test.js');
+    const { FakeSlackClient } = await import('../src/slack/fake-slack-client.js');
     const { SessionManager } = await import('../src/sessions/manager.js');
 
     const slack = new FakeSlackClient();
@@ -105,7 +105,7 @@ describe('conversational profile flows to factory.create', () => {
 
   it('SessionManager defaults to conversational when profileId is absent', async () => {
     const { FakeRunnerFactory } = await import('../src/runner/fake.js');
-    const { FakeSlackClient } = await import('./responder.test.js');
+    const { FakeSlackClient } = await import('../src/slack/fake-slack-client.js');
     const { SessionManager } = await import('../src/sessions/manager.js');
 
     const slack = new FakeSlackClient();

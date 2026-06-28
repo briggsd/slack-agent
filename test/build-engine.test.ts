@@ -24,7 +24,7 @@ import { SessionManager } from '../src/sessions/manager.js';
 import { SqliteSessionStore } from '../src/sessions/store.js';
 import type { BuildRunnerFactory, ExecInput } from '../src/runner/types.js';
 import type { SessionRunner, RunnerStream, RunnerEvent } from '../src/runner/types.js';
-import { FakeSlackClient } from './responder.test.js';
+import { FakeSlackClient } from '../src/slack/fake-slack-client.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

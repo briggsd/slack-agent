@@ -15,7 +15,7 @@ import { SqliteSessionStore } from '../src/sessions/store.js';
 import type { SessionStore, AuditEvent } from '../src/sessions/store.js';
 import { SessionManager } from '../src/sessions/manager.js';
 import { FakeRunnerFactory } from '../src/runner/fake.js';
-import { FakeSlackClient } from './responder.test.js';
+import { FakeSlackClient } from '../src/slack/fake-slack-client.js';
 
 // ─── SqliteSessionStore unit tests ───────────────────────────────────────────
 
