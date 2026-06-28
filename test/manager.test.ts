@@ -27,6 +27,7 @@ import type {
 import { SqliteSessionStore } from '../src/sessions/store.js';
 import { FakeSlackClient } from '../src/slack/fake-slack-client.js';
 import type { SlackClientLike } from '../src/slack/responder.js';
+import { gatewayErrorMeta, isSlackMsgTooLong } from '../src/sessions/manager.js';
 import type { PrState, PrStateReader } from '../src/sessions/pr-state-reader.js';
 
 /**
@@ -3370,6 +3371,156 @@ describe('SessionManager — gateway catch logs structured metadata without mess
       // The user-facing Slack update still carries the full message (their own thread)
       const lastUpdate = slack.updates[slack.updates.length - 1];
       expect(lastUpdate?.text).toContain('Unexpected error');
+    } finally {
+      errorSpy.mockRestore();
+      await manager.disposeAll();
+    }
+  });
+});
+
+// ── Slack msg_too_long — gatewayErrorMeta, isSlackMsgTooLong, drain behaviour ──
+
+/** Simulate a Slack WebAPIPlatformError for msg_too_long. */
+function makeSlackMsgTooLongError(): Error & { code: string; data: { error: string } } {
+  return Object.assign(new Error('An API error occurred: msg_too_long'), {
+    code: 'slack_webapi_platform_error',
+    data: { error: 'msg_too_long' },
+  });
+}
+
+describe('gatewayErrorMeta — Slack error codes', () => {
+  it('includes code and slackCode for a WebAPIPlatformError on err', () => {
+    const err = makeSlackMsgTooLongError();
+    const meta = gatewayErrorMeta(err);
+    expect(meta).toContain('code=slack_webapi_platform_error');
+    expect(meta).toContain('slackCode=msg_too_long');
+  });
+
+  it('includes code and slackCode for a WebAPIPlatformError on err.cause', () => {
+    const cause = makeSlackMsgTooLongError();
+    const wrapper = Object.assign(new Error('wrapped'), { cause });
+    const meta = gatewayErrorMeta(wrapper);
+    expect(meta).toContain('code=slack_webapi_platform_error');
+    expect(meta).toContain('slackCode=msg_too_long');
+  });
+
+  it('does NOT include message body in the metadata', () => {
+    const err = makeSlackMsgTooLongError();
+    const meta = gatewayErrorMeta(err);
+    expect(meta).not.toContain('An API error occurred');
+  });
+
+  it('emits no code or slackCode for a plain Error', () => {
+    const meta = gatewayErrorMeta(new Error('some failure'));
+    expect(meta).not.toContain('code=');
+    expect(meta).not.toContain('slackCode=');
+  });
+});
+
+describe('isSlackMsgTooLong', () => {
+  it('returns true for a Slack msg_too_long error on err', () => {
+    expect(isSlackMsgTooLong(makeSlackMsgTooLongError())).toBe(true);
+  });
+
+  it('returns true when the Slack error is on err.cause', () => {
+    const cause = makeSlackMsgTooLongError();
+    const wrapper = Object.assign(new Error('wrapped'), { cause });
+    expect(isSlackMsgTooLong(wrapper)).toBe(true);
+  });
+
+  it('returns false for a plain Error', () => {
+    expect(isSlackMsgTooLong(new Error('oops'))).toBe(false);
+  });
+
+  it('returns false for a Slack error with a different data.error code', () => {
+    const err = Object.assign(new Error('rate limited'), {
+      code: 'slack_webapi_platform_error',
+      data: { error: 'ratelimited' },
+    });
+    expect(isSlackMsgTooLong(err)).toBe(false);
+  });
+
+  it('returns false for null and undefined', () => {
+    expect(isSlackMsgTooLong(null)).toBe(false);
+    expect(isSlackMsgTooLong(undefined)).toBe(false);
+  });
+});
+
+describe('SessionManager — drain catch posts friendly message for msg_too_long', () => {
+  it('posts the friendly too-long message when the runner throws a Slack msg_too_long error', async () => {
+    const slack = new FakeSlackClient();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const slackErr = makeSlackMsgTooLongError();
+    class TooLongRunner implements SessionRunner {
+      async *send(_msg: string): RunnerStream {
+        throw slackErr;
+        // eslint-disable-next-line @typescript-eslint/no-unreachable
+        yield { type: 'text', text: 'never' };
+      }
+      async dispose(): Promise<void> {}
+    }
+
+    const factory: RunnerFactory = { create: async () => new TooLongRunner() };
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    try {
+      await manager.enqueueNew('TEAM:C:TOOLONG', {
+        message: 'big response',
+        channel: 'C',
+        threadTs: 'TOOLONG',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const lastUpdate = slack.updates[slack.updates.length - 1];
+      expect(lastUpdate?.text).toBe(
+        ':x: That response was too long to post in Slack — try a narrower question.',
+      );
+
+      // The log line must carry slackCode but NOT the message body
+      const errorCalls = errorSpy.mock.calls.map((c) => String(c[0]));
+      const catchLine = errorCalls.find((l) => l.includes('error processing message in'));
+      expect(catchLine).toBeDefined();
+      expect(catchLine).toContain('slackCode=msg_too_long');
+      expect(catchLine).not.toContain('An API error occurred');
+    } finally {
+      errorSpy.mockRestore();
+      await manager.disposeAll();
+    }
+  });
+
+  it('posts the generic unexpected-error message for a non-Slack error', async () => {
+    const slack = new FakeSlackClient();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const genericErr = new Error('some internal failure');
+    class GenericThrowingRunner implements SessionRunner {
+      async *send(_msg: string): RunnerStream {
+        throw genericErr;
+        // eslint-disable-next-line @typescript-eslint/no-unreachable
+        yield { type: 'text', text: 'never' };
+      }
+      async dispose(): Promise<void> {}
+    }
+
+    const factory: RunnerFactory = { create: async () => new GenericThrowingRunner() };
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    try {
+      await manager.enqueueNew('TEAM:C:GENERIC', {
+        message: 'trigger',
+        channel: 'C',
+        threadTs: 'GENERIC',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const lastUpdate = slack.updates[slack.updates.length - 1];
+      expect(lastUpdate?.text).toContain(':x: Unexpected error:');
+      expect(lastUpdate?.text).toContain('some internal failure');
     } finally {
       errorSpy.mockRestore();
       await manager.disposeAll();

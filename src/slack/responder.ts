@@ -27,13 +27,13 @@ export interface Placeholder {
   ts: string;
 }
 
-/** Slack's maximum text field length (UTF-16 code units). */
-export const SLACK_TEXT_LIMIT = 40000;
+/** Slack's maximum text field length — safely below Slack's 40,000-char limit. */
+export const SLACK_TEXT_LIMIT = 39000;
 
 const MARKER = '\n\n…[truncated]';
 
 /**
- * Bound text to Slack's 40k-char limit.
+ * Bound text safely below Slack's 40k-char limit.
  * Returns text unchanged when within the limit; truncates with a fixed marker otherwise.
  */
 export function boundSlackText(text: string): string {

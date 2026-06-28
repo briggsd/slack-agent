@@ -75,6 +75,22 @@ describe('boundSlackText', () => {
     expect(result.length).toBe(SLACK_TEXT_LIMIT);
     expect(result.endsWith('\n\n…[truncated]')).toBe(true);
   });
+
+  it('SLACK_TEXT_LIMIT is 39000 (safely below Slack 40k edge)', () => {
+    expect(SLACK_TEXT_LIMIT).toBe(39000);
+  });
+
+  it('truncates a string of exactly 39001 chars to 39000 with the marker', () => {
+    const text = 'd'.repeat(39001);
+    const result = boundSlackText(text);
+    expect(result.length).toBe(39000);
+    expect(result.endsWith('\n\n…[truncated]')).toBe(true);
+  });
+
+  it('returns a string of exactly 39000 chars unchanged', () => {
+    const text = 'e'.repeat(39000);
+    expect(boundSlackText(text)).toBe(text);
+  });
 });
 
 describe('updatePlaceholder with over-limit text', () => {
