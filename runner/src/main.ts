@@ -58,6 +58,34 @@ export function classifyResultError(subtype: string): RunnerErrorClass {
   }
 }
 
+/** Safe, content-free structured summary of a thrown error (NO message body). */
+export function safeErrorDetail(err: unknown): { class: RunnerErrorClass; detail: string } {
+  if (err instanceof AbortError) return { class: 'aborted', detail: 'AbortError' };
+  // Duck-type the Anthropic SDK error shape on err and err.cause.
+  const candidates = [err, (err as { cause?: unknown })?.cause];
+  for (const c of candidates) {
+    if (c !== null && c !== undefined && typeof c === 'object') {
+      const o = c as { name?: unknown; status?: unknown; type?: unknown; code?: unknown; error?: { type?: unknown } };
+      const status = typeof o.status === 'number' ? o.status : undefined;
+      const apiType = typeof o.error?.type === 'string' ? o.error.type
+                    : typeof o.type === 'string' ? o.type : undefined;
+      if (status !== undefined || apiType !== undefined) {
+        const name = typeof o.name === 'string' ? o.name : 'Error';
+        const code = typeof o.code === 'string' ? o.code : undefined;
+        const parts: string[] = [
+          `name=${name}`,
+          ...(status !== undefined ? [`status=${status}`] : []),
+          ...(apiType !== undefined ? [`type=${apiType}`] : []),
+          ...(code !== undefined ? [`code=${code}`] : []),
+        ];
+        return { class: 'api_error', detail: parts.join(' ') };
+      }
+    }
+  }
+  const name = err instanceof Error ? err.name : 'unknown';
+  return { class: 'unknown', detail: `name=${name}` };
+}
+
 type VerificationInput = {
   verdict: 'pass' | 'fail';
   rationale: string;
@@ -1086,9 +1114,9 @@ async function processTurn(
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`error processing message: ${message}`);
-    const errorClass: RunnerErrorClass = err instanceof AbortError ? 'aborted' : 'unknown';
-    emit({ type: 'error', id, message, errorClass });
+    const d = safeErrorDetail(err);
+    log(`turn error: class=${d.class} ${d.detail}`);
+    emit({ type: 'error', id, message, errorClass: d.class });
   }
 
   return currentSessionId;

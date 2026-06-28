@@ -100,6 +100,41 @@ const DEFAULT_PLANNING_IDLE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const BUILD_SPEC_APPROVE = new Set(['approve', 'approved']);
 const BUILD_SPEC_REJECT = new Set(['cancel', 'abort', 'reject']);
 
+/**
+ * Extract safe, content-free structured metadata from a thrown error (and its `.cause`).
+ * Never includes the error message body — only name, status, type, and the first stack frame.
+ * Used in the gateway catch to produce diagnosable log output without echoing user content.
+ */
+function gatewayErrorMeta(err: unknown): string {
+  let name = err instanceof Error ? err.name : 'unknown';
+  let status: number | undefined;
+  let apiType: string | undefined;
+
+  const candidates = [err, (err as { cause?: unknown })?.cause];
+  for (const c of candidates) {
+    if (c !== null && c !== undefined && typeof c === 'object') {
+      const o = c as { name?: unknown; status?: unknown; type?: unknown; error?: { type?: unknown } };
+      if (typeof o.name === 'string' && o.name !== '') name = o.name;
+      if (status === undefined && typeof o.status === 'number') status = o.status;
+      if (apiType === undefined) {
+        if (typeof o.error?.type === 'string') apiType = o.error.type;
+        else if (typeof o.type === 'string') apiType = o.type;
+      }
+    }
+  }
+
+  const firstFrame =
+    err instanceof Error && typeof err.stack === 'string'
+      ? (err.stack.split('\n')[1]?.trim() ?? '')
+      : '';
+
+  const parts: string[] = [`name=${name}`];
+  if (status !== undefined) parts.push(`status=${status}`);
+  if (apiType !== undefined) parts.push(`type=${apiType}`);
+  if (firstFrame) parts.push(`@ ${firstFrame}`);
+  return parts.join(' ');
+}
+
 function classifyBuildSpecApprovalReply(approvalId: string, specRef: string, reply: string): ApprovalControl {
   const norm = reply.trim().toLowerCase();
   if (BUILD_SPEC_APPROVE.has(norm)) {
@@ -1233,7 +1268,8 @@ export class SessionManager {
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[session] error processing message in ${session.key}: ${msg}`);
+        const meta = gatewayErrorMeta(err);
+        console.error(`[session] error processing message in ${session.key}: ${meta}`);
         if (placeholder !== null) {
           try {
             await updatePlaceholder(
