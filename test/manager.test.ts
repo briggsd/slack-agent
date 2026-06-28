@@ -2227,6 +2227,48 @@ describe('SessionManager — audit emission', () => {
     }
   });
 
+  it('logs + audits errorClass (max_turns) for a runner_error; message never reaches logs or audit', async () => {
+    const slack = new FakeSlackClient();
+    const store = new CapturingStore();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const relayed = 'model said: <secret prompt text>';
+    const factory = new FakeRunnerFactory([
+      [{ type: 'error', message: relayed, reason: 'runner_error', errorClass: 'max_turns' }],
+    ]);
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack, store });
+
+    try {
+      await manager.enqueueNew('TEAM:C:T', {
+        message: 'hello',
+        channel: 'C',
+        threadTs: 'T',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Audit summary is the validated errorClass, not null and not the relayed message.
+      const errorAudits = store.audits.filter((a) => a.kind === 'error');
+      expect(errorAudits).toHaveLength(1);
+      expect(errorAudits[0]).toMatchObject({
+        session_key: 'TEAM:C:T',
+        tool: null,
+        result: 'runner_error',
+        summary: 'max_turns',
+      });
+
+      // The log line includes the safe class but never the relayed message.
+      expect(errorSpy).toHaveBeenCalledWith('[session] turn error (runner_error) TEAM:C:T: max_turns');
+      expect(errorSpy.mock.calls.every((c) => !String(c[0]).includes('secret prompt'))).toBe(true);
+
+      // The user still sees the full detail in their own thread.
+      const lastUpdate = slack.updates[slack.updates.length - 1];
+      expect(lastUpdate?.text).toBe(`:x: Error: ${relayed}`);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('rehydrate emits lifecycle/rehydrated (not a second created) with the stored identity', async () => {
     const slack = new FakeSlackClient();
     const store = new CapturingStore();

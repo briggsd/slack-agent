@@ -440,9 +440,45 @@ export type RequestReadIssueMessage = {
   number: number;  // issue number (positive integer)
 };
 
+/**
+ * A closed enum of diagnosable error categories derived from typed signals inside the
+ * runner (SDK result subtype, error instance type, or a specific emit site). Each value
+ * is content-free — it never echoes prompt/tool/file text — so the gateway may safely
+ * log and audit it even though `message` is redacted. The gateway MUST validate a
+ * value received off the wire against this closed set via {@link isRunnerErrorClass}
+ * before accepting it; an unrecognised value is dropped to `undefined`.
+ */
+export type RunnerErrorClass =
+  | 'max_turns'       // result.subtype === 'error_max_turns'
+  | 'budget_exceeded' // result.subtype === 'error_max_budget_usd'
+  | 'output_retries'  // result.subtype === 'error_max_structured_output_retries'
+  | 'execution_error' // result.subtype === 'error_during_execution' (SDK catch-all)
+  | 'no_result'       // stream ended with no result event
+  | 'aborted'         // err instanceof AbortError in the outer catch
+  | 'malformed_input' // a malformed input line could not be parsed
+  | 'unknown';        // any other thrown error
+
+const RUNNER_ERROR_CLASS_SET: ReadonlySet<string> = new Set<RunnerErrorClass>([
+  'max_turns',
+  'budget_exceeded',
+  'output_retries',
+  'execution_error',
+  'no_result',
+  'aborted',
+  'malformed_input',
+  'unknown',
+]);
+
+/** Type guard: true iff `x` is a member of the closed {@link RunnerErrorClass} set. */
+export function isRunnerErrorClass(x: unknown): x is RunnerErrorClass {
+  return typeof x === 'string' && RUNNER_ERROR_CLASS_SET.has(x);
+}
+
 /** Per-message failure. The runner remains usable after an error. */
 export type ErrorMessage = {
   type: 'error';
   id: string;
   message: string;
+  /** Safe, content-free error class; absent on legacy/unknown. */
+  errorClass?: RunnerErrorClass;
 };

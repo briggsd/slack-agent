@@ -1,4 +1,5 @@
 import type { Profile } from '../profiles/registry.js';
+import type { RunnerErrorClass } from './protocol.js';
 
 export type ErrorReason = 'timeout' | 'container_exit' | 'runner_error';
 
@@ -37,7 +38,7 @@ export type RunnerEvent =
   // decision fields). Content-free — session key + reason + byte count only. Does NOT terminate
   // the stream; the turn drains normally after the skip. Never crosses the container boundary.
   | { type: 'protocol_skip'; reason: ProtocolSkipReason; bytes: number }
-  | { type: 'error'; message: string; reason: ErrorReason }
+  | { type: 'error'; message: string; reason: ErrorReason; errorClass?: RunnerErrorClass }
   // gateway-internal: the coordinator's build_spec tool asked the gateway to run the build
   // tail (a fresh implementer container on the shared volume). The manager services it and
   // feeds a BuildOutcome back via next(); it never crosses the container boundary as-is.
