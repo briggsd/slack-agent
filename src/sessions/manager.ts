@@ -12,7 +12,7 @@ import type {
   ExecInput,
 } from '../runner/types.js';
 import type { SlackClientLike, Placeholder } from '../slack/responder.js';
-import { postPlaceholder, updatePlaceholder } from '../slack/responder.js';
+import { postPlaceholder, updatePlaceholder, boundSlackText } from '../slack/responder.js';
 import { getProfile, DEFAULT_PROFILE_ID } from '../profiles/registry.js';
 import type { SessionStore, AuditEvent } from './store.js';
 import { NoopSessionStore } from './store.js';
@@ -102,24 +102,36 @@ const BUILD_SPEC_REJECT = new Set(['cancel', 'abort', 'reject']);
 
 /**
  * Extract safe, content-free structured metadata from a thrown error (and its `.cause`).
- * Never includes the error message body — only name, status, type, and the first stack frame.
+ * Never includes the error message body — only name, status, type, Slack error codes,
+ * and the first stack frame.
  * Used in the gateway catch to produce diagnosable log output without echoing user content.
  */
-function gatewayErrorMeta(err: unknown): string {
+export function gatewayErrorMeta(err: unknown): string {
   let name = err instanceof Error ? err.name : 'unknown';
   let status: number | undefined;
   let apiType: string | undefined;
+  let slackErrCode: string | undefined;
+  let slackDataErr: string | undefined;
 
   const candidates = [err, (err as { cause?: unknown })?.cause];
   for (const c of candidates) {
     if (c !== null && c !== undefined && typeof c === 'object') {
-      const o = c as { name?: unknown; status?: unknown; type?: unknown; error?: { type?: unknown } };
+      const o = c as {
+        name?: unknown;
+        status?: unknown;
+        type?: unknown;
+        error?: { type?: unknown };
+        code?: unknown;
+        data?: { error?: unknown };
+      };
       if (typeof o.name === 'string' && o.name !== '') name = o.name;
       if (status === undefined && typeof o.status === 'number') status = o.status;
       if (apiType === undefined) {
         if (typeof o.error?.type === 'string') apiType = o.error.type;
         else if (typeof o.type === 'string') apiType = o.type;
       }
+      if (slackErrCode === undefined && typeof o.code === 'string') slackErrCode = o.code;
+      if (slackDataErr === undefined && typeof o.data?.error === 'string') slackDataErr = o.data.error;
     }
   }
 
@@ -131,8 +143,21 @@ function gatewayErrorMeta(err: unknown): string {
   const parts: string[] = [`name=${name}`];
   if (status !== undefined) parts.push(`status=${status}`);
   if (apiType !== undefined) parts.push(`type=${apiType}`);
+  if (slackErrCode !== undefined) parts.push(`code=${slackErrCode}`);
+  if (slackDataErr !== undefined) parts.push(`slackCode=${slackDataErr}`);
   if (firstFrame) parts.push(`@ ${firstFrame}`);
   return parts.join(' ');
+}
+
+/** True if the thrown error is Slack rejecting an over-length message. */
+export function isSlackMsgTooLong(err: unknown): boolean {
+  for (const c of [err, (err as { cause?: unknown })?.cause]) {
+    if (c && typeof c === 'object') {
+      const o = c as { data?: { error?: unknown } };
+      if (o.data?.error === 'msg_too_long') return true;
+    }
+  }
+  return false;
 }
 
 function classifyBuildSpecApprovalReply(approvalId: string, specRef: string, reply: string): ApprovalControl {
@@ -441,7 +466,7 @@ export class SessionManager {
   ): void {
     const text = this.capMessage(cap, ctx.userId, ctx.sessionKey);
     void this.slack
-      .postMessage({ channel: ctx.channel, thread_ts: ctx.threadTs, text })
+      .postMessage({ channel: ctx.channel, thread_ts: ctx.threadTs, text: boundSlackText(text) })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[session] failed to post cap notice for ${ctx.sessionKey}: ${msg}`);
@@ -535,7 +560,7 @@ export class SessionManager {
             .postMessage({
               channel: item.channel,
               thread_ts: item.threadTs,
-              text: `Only ${who} can approve or cancel this plan.`,
+              text: boundSlackText(`Only ${who} can approve or cancel this plan.`),
             })
             .catch((err: unknown) => {
               const msg = err instanceof Error ? err.message : String(err);
@@ -693,7 +718,7 @@ export class SessionManager {
       .postMessage({
         channel: session.channel,
         thread_ts: session.threadTs,
-        text: 'Planning expired - mention me to resume.',
+        text: boundSlackText('Planning expired - mention me to resume.'),
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1267,16 +1292,14 @@ export class SessionManager {
           session.turnPublishMs = 0;
         }
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
         const meta = gatewayErrorMeta(err);
         console.error(`[session] error processing message in ${session.key}: ${meta}`);
         if (placeholder !== null) {
           try {
-            await updatePlaceholder(
-              this.slack,
-              placeholder,
-              `:x: Unexpected error: ${msg}`,
-            );
+            const userMsg = isSlackMsgTooLong(err)
+              ? ':x: That response was too long to post in Slack — try a narrower question.'
+              : `:x: Unexpected error: ${err instanceof Error ? err.message : String(err)}`;
+            await updatePlaceholder(this.slack, placeholder, userMsg);
           } catch {
             // best effort
           }

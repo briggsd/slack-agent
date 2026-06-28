@@ -1,6 +1,6 @@
 # Error model
 
-This document covers how errors move through the system, why message bodies are kept out of logs, the `RunnerErrorClass` table, how to diagnose a live failure, and the open `msg_too_long` question.
+This document covers how errors move through the system, why message bodies are kept out of logs, the `RunnerErrorClass` table, how to diagnose a live failure, and the `msg_too_long` case (a Slack limit, now handled).
 
 ## Flow
 
@@ -61,16 +61,12 @@ This log line now includes the first stack frame so you can locate where the exc
 
 To read the full in-container SDK transcript from a session volume, use `scripts/peek-session.mjs` (introduced in commit `bcbd77`).
 
-## Known open issue: `msg_too_long`
+## `msg_too_long` — resolved
 
-A live turn produced `:x: Unexpected error: An API error occurred: msg_too_long`. The error string `"An API error occurred: …"` is the Agent SDK's own wording, not anything in this codebase. The gateway (`src/`) makes no Anthropic API calls — the error originated inside the container.
+`msg_too_long` is a Slack error, not Anthropic. Slack rejects any `chat.update` or `chat.postMessage` call whose text exceeds 40,000 characters. The throw origin — `platformErrorFromResult` in `@slack/web-api` — confirmed this via the #89 instrumentation. The earlier theory about a context-window overflow on `claude-opus-4-8` was wrong.
 
-Ruled out: a context-window overflow on `claude-opus-4-8`. That model has a 1M-token context window natively (no beta header required), and overflowing it surfaces as `stop_reason: 'model_context_window_exceeded'` on the result event, not a thrown error. Thinking blocks are stripped from context automatically by the SDK.
+Three changes close the issue:
 
-Remaining candidates:
-
-- **Request byte-size limit**: the raw HTTP request body (prompt + system + tools) exceeded a per-request size cap enforced by the API, distinct from the token-count window.
-- **Single over-long content block**: one message or content block exceeded a per-block byte limit.
-- **Org-tier gating**: the error code `msg_too_long` may map to a tier-specific restriction not reflected in the model's advertised context window.
-
-With the instrumentation added in this slice (`safeErrorDetail` in the runner catch, `gatewayErrorMeta` in the gateway catch), the next occurrence will log `status` and `type` alongside the class, making the specific API condition identifiable. Track issue `412e0d`.
+- `SLACK_TEXT_LIMIT` is now `39000` (down from `40000`), keeping all posts safely under Slack's edge.
+- The gateway drain catch calls `isSlackMsgTooLong` and posts `:x: That response was too long to post in Slack — try a narrower question.` instead of the generic unexpected-error message.
+- `gatewayErrorMeta` now includes `code` and `slackCode` fields from a `WebAPIPlatformError`, so the structured log line identifies the Slack error code without touching the message body.
