@@ -45,11 +45,11 @@ describe('DIFF_BASE_REF synchronization', () => {
     const runnerValue = runnerMatch[1];
     const gatewayValue = gatewayMatch[1];
 
-    expect(runnerValue).toBe(
-      gatewayValue,
+    expect(
+      runnerValue,
       `DIFF_BASE_REF mismatch: ` +
         `runner=${JSON.stringify(runnerValue)} (${RUNNER_FILE}), ` +
-        `gateway=${JSON.stringify(gatewayValue)} (${GATEWAY_FILE})`
-    );
+        `gateway=${JSON.stringify(gatewayValue)} (${GATEWAY_FILE})`,
+    ).toBe(gatewayValue);
   });
 });
