@@ -31,6 +31,7 @@ const baseFactory = new DockerRunnerFactory({
   image: 'slackbot-runner:latest',
   readyTimeoutMs: 30_000,
   turnTimeoutMs: 5 * 60_000,
+  absoluteTurnTimeoutMs: 30 * 60_000,
   killGraceMs: 5_000,
   memory: '512m',
   cpus: '1.0',
