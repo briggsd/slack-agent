@@ -3316,3 +3316,63 @@ describe('SessionManager — spend-caps enforcement', () => {
     await manager.disposeAll();
   });
 });
+
+// ── Gateway catch — structured error metadata ─────────────────────────────────
+
+describe('SessionManager — gateway catch logs structured metadata without message body', () => {
+  it('logs name/status/type from a thrown API-shaped error, not the message body', async () => {
+    const slack = new FakeSlackClient();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // A runner whose send() generator throws an API-shaped error
+    const secretMessage = 'An API error occurred: msg_too_long (secret user content)';
+    const apiErr = Object.assign(new Error(secretMessage), {
+      name: 'APIError',
+      status: 400,
+      type: 'invalid_request_error',
+    });
+
+    class ThrowingRunner implements SessionRunner {
+      async *send(_msg: string): RunnerStream {
+        throw apiErr;
+        // eslint-disable-next-line @typescript-eslint/no-unreachable
+        yield { type: 'text', text: 'never' };
+      }
+      async dispose(): Promise<void> {}
+    }
+
+    const factory: RunnerFactory = { create: async () => new ThrowingRunner() };
+    const manager = new SessionManager({ idleTimeoutMs: 60_000, factory, slack });
+
+    try {
+      await manager.enqueueNew('TEAM:C:THROW', {
+        message: 'trigger',
+        channel: 'C',
+        threadTs: 'THROW',
+        teamId: 'TEAM',
+        userId: 'U1',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      // The log line must include structured metadata
+      const errorCalls = errorSpy.mock.calls.map((c) => String(c[0]));
+      const catchLine = errorCalls.find((l) => l.includes('error processing message in'));
+      expect(catchLine).toBeDefined();
+      expect(catchLine).toContain('TEAM:C:THROW');
+      expect(catchLine).toContain('name=APIError');
+      expect(catchLine).toContain('status=400');
+      expect(catchLine).toContain('type=invalid_request_error');
+      // Must NOT contain the message body
+      expect(catchLine).not.toContain('msg_too_long');
+      expect(catchLine).not.toContain('secret user content');
+      expect(catchLine).not.toContain('An API error occurred');
+
+      // The user-facing Slack update still carries the full message (their own thread)
+      const lastUpdate = slack.updates[slack.updates.length - 1];
+      expect(lastUpdate?.text).toContain('Unexpected error');
+    } finally {
+      errorSpy.mockRestore();
+      await manager.disposeAll();
+    }
+  });
+});

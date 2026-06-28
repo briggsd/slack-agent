@@ -468,6 +468,7 @@ export type RunnerErrorClass =
   | 'no_result'       // stream ended with no result event
   | 'aborted'         // err instanceof AbortError in the outer catch
   | 'malformed_input' // a malformed input line could not be parsed
+  | 'api_error'       // a thrown Anthropic API/SDK error — see status/type in the runner log
   | 'unknown';        // any other thrown error
 
 const RUNNER_ERROR_CLASS_SET: ReadonlySet<string> = new Set<RunnerErrorClass>([
@@ -478,6 +479,7 @@ const RUNNER_ERROR_CLASS_SET: ReadonlySet<string> = new Set<RunnerErrorClass>([
   'no_result',
   'aborted',
   'malformed_input',
+  'api_error',
   'unknown',
 ]);
 

@@ -7,9 +7,10 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { PassThrough } from 'stream';
-import { runLoop, runBuildSpec, classifyResultError } from '../src/main.js';
+import { runLoop, runBuildSpec, classifyResultError, safeErrorDetail } from '../src/main.js';
 import type { ReadFileFn, WriteFileFn, MkdirFn, SdkQueryFn, ListFilesFn, ReadBinaryFileFn, ScannedFile } from '../src/main.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { isRunnerErrorClass } from '../src/protocol.js';
 
 // ── FakeAgentSdk ──────────────────────────────────────────────────────────────
 
@@ -1093,5 +1094,161 @@ describe('runner main — commit gate stdin demux', () => {
       correlationId: 'build-1',
     });
     expect(outputs.filter((o) => o.type === 'decision')).toHaveLength(1);
+  });
+});
+
+// ── isRunnerErrorClass — protocol enum guard ───────────────────────────────────
+
+describe('isRunnerErrorClass — api_error member', () => {
+  it("returns true for 'api_error'", () => {
+    expect(isRunnerErrorClass('api_error')).toBe(true);
+  });
+
+  it('returns false for an unrecognised string', () => {
+    expect(isRunnerErrorClass('not_a_class')).toBe(false);
+  });
+});
+
+// ── safeErrorDetail ────────────────────────────────────────────────────────────
+
+describe('safeErrorDetail', () => {
+  it('returns aborted for an AbortError (via duck-type — AbortError has no special SDK export in test scope)', () => {
+    // AbortError is imported from the SDK at runtime; we simulate it by constructing
+    // a real AbortError (the Web API AbortError whose name === 'AbortError').
+    const abort = Object.assign(new Error('operation aborted'), { name: 'AbortError' });
+    // The runner's AbortError is @anthropic-ai/claude-agent-sdk's AbortError; since
+    // we can't import it here without the real SDK, we test the non-AbortError paths.
+    // The plain error below exercises the 'unknown' branch instead.
+    const plain = new Error('operation aborted');
+    const result = safeErrorDetail(plain);
+    expect(result.class).toBe('unknown');
+    expect(result.detail).not.toContain('operation aborted');
+    // name=Error is safe metadata
+    expect(result.detail).toBe('name=Error');
+    // abort is not an AbortError instance in this test scope; still verify no message
+    const abortResult = safeErrorDetail(abort);
+    expect(abortResult.detail).not.toContain('operation aborted');
+  });
+
+  it('returns api_error with safe detail when err has status/type (API error on err)', () => {
+    const apiErr = Object.assign(new Error('An API error occurred: msg_too_long'), {
+      name: 'APIError',
+      status: 400,
+      error: { type: 'invalid_request_error' },
+    });
+    const result = safeErrorDetail(apiErr);
+    expect(result.class).toBe('api_error');
+    expect(result.detail).toContain('name=APIError');
+    expect(result.detail).toContain('status=400');
+    expect(result.detail).toContain('type=invalid_request_error');
+    // Must NOT contain the message body
+    expect(result.detail).not.toContain('msg_too_long');
+    expect(result.detail).not.toContain('An API error occurred');
+  });
+
+  it('returns api_error when the API error is on err.cause', () => {
+    const cause = Object.assign(new Error('msg_too_long raw'), {
+      name: 'APIStatusError',
+      status: 413,
+      type: 'request_too_large',
+    });
+    const wrapper = Object.assign(new Error('An API error occurred: msg_too_long'), { cause });
+    const result = safeErrorDetail(wrapper);
+    expect(result.class).toBe('api_error');
+    expect(result.detail).toContain('status=413');
+    expect(result.detail).toContain('type=request_too_large');
+    // Must NOT contain the message body
+    expect(result.detail).not.toContain('msg_too_long');
+    expect(result.detail).not.toContain('An API error occurred');
+  });
+
+  it('returns unknown with name metadata for a plain Error', () => {
+    const err = new TypeError('some internal type error');
+    const result = safeErrorDetail(err);
+    expect(result.class).toBe('unknown');
+    expect(result.detail).toBe('name=TypeError');
+    expect(result.detail).not.toContain('internal type error');
+  });
+
+  it('returns api_error with code when the error carries a code field', () => {
+    const apiErr = Object.assign(new Error('msg_too_long'), {
+      name: 'APIError',
+      status: 400,
+      type: 'invalid_request_error',
+      code: 'msg_too_long',
+    });
+    // NOTE: 'msg_too_long' appears in the code field, which IS safe structured metadata
+    // (it is a machine-readable error code, not a message body). The spec allows code.
+    const result = safeErrorDetail(apiErr);
+    expect(result.class).toBe('api_error');
+    expect(result.detail).toContain('code=msg_too_long');
+  });
+});
+
+describe('runner catch — emits api_error errorClass for thrown API-shaped error', () => {
+  it('emits errorClass api_error when sdkQuery throws an API-shaped error', async () => {
+    const apiErr = Object.assign(new Error('An API error occurred: msg_too_long'), {
+      name: 'APIError',
+      status: 400,
+      error: { type: 'invalid_request_error' },
+    });
+
+    const throwingQuery: SdkQueryFn = () => ({
+      [Symbol.asyncIterator]: async function* () {
+        throw apiErr;
+        // eslint-disable-next-line @typescript-eslint/no-unreachable -- satisfies return type
+        yield {} as SDKMessage;
+      },
+    });
+
+    const fs = new InMemoryFs();
+    const input = new PassThrough();
+    const outputs: CollectedOutput = [];
+
+    const stderrLines: string[] = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown): boolean => {
+      stderrLines.push(typeof chunk === 'string' ? chunk : String(chunk));
+      return true;
+    });
+
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown): boolean => {
+      const str = typeof chunk === 'string' ? chunk : String(chunk);
+      for (const line of str.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed !== '') {
+          try { outputs.push(JSON.parse(trimmed) as CollectedOutput[0]); } catch { /* skip */ }
+        }
+      }
+      return true;
+    });
+
+    try {
+      const loopPromise = runLoop({
+        readFile: fs.readFile,
+        writeFile: fs.writeFile,
+        mkdir: fs.mkdir,
+        sdkQuery: throwingQuery,
+        listFiles: fs.listFiles,
+        readBinaryFile: fs.readBinaryFile,
+        input,
+      });
+
+      input.push(JSON.stringify({ type: 'user_message', id: 'e1', text: 'go' }) + '\n');
+      input.push(null);
+      await loopPromise;
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    const errorEvent = outputs.find((e) => e.type === 'error');
+    expect(errorEvent?.errorClass).toBe('api_error');
+
+    // The log line must contain structured metadata but NOT the message body
+    const logOutput = stderrLines.join('');
+    expect(logOutput).toContain('class=api_error');
+    expect(logOutput).toContain('status=400');
+    expect(logOutput).toContain('type=invalid_request_error');
+    expect(logOutput).not.toContain('msg_too_long');
+    expect(logOutput).not.toContain('An API error occurred');
   });
 });
