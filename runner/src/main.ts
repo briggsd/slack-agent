@@ -160,6 +160,12 @@ export type SdkQueryFn = (params: {
       append?: string;
       excludeDynamicSections?: boolean;
     };
+    /**
+     * When true, SDKPartialAssistantMessage (type: 'stream_event') events will be emitted
+     * during streaming. The runner uses these for heartbeat throttling.
+     * Verified in runner/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts:1594-1596.
+     */
+    includePartialMessages?: boolean;
   };
 }) => AsyncIterable<SDKMessage>;
 
@@ -174,6 +180,12 @@ const MAX_FILES_PER_TURN = 5;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 /** Maximum total bytes forwarded per turn (16 MiB). */
 const MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+/**
+ * Minimum gap between heartbeat protocol messages (ms). SDK partial-stream events
+ * fire at token frequency — throttling ensures a heartbeat at most every 10s so we
+ * don't flood the gateway. 10s is far below the default 5-min idle window.
+ */
+const HEARTBEAT_THROTTLE_MS = 10_000;
 
 /**
  * Tools the agent must never use inside the container. `AskUserQuestion` blocks
@@ -548,8 +560,11 @@ export async function runLoop(opts: {
   listFiles: ListFilesFn;
   readBinaryFile: ReadBinaryFileFn;
   input: NodeJS.ReadableStream;
+  /** Clock seam for heartbeat throttle tests. Default: Date.now. */
+  now?: () => number;
 }): Promise<void> {
   const { readFile, writeFile, mkdir, sdkQuery, listFiles, readBinaryFile, input } = opts;
+  const nowFn = opts.now;
   let activeBuildCorrelationId: string | undefined;
 
   // Load persisted session ID (for resume-after-reap)
@@ -844,6 +859,7 @@ export async function runLoop(opts: {
         emit(decision);
       },
       provisionRuntime,
+      ...(nowFn !== undefined ? { now: nowFn } : {}),
     });
   }
 }
@@ -873,14 +889,21 @@ async function processTurn(
     readIssue: (input: ReadIssueInput) => Promise<ReadIssueOutcome>;
     reportVerification: (turnId: string, input: VerificationInput) => Promise<void>;
     provisionRuntime: (input: ProvisionInput) => Promise<ProvisionOutcome>;
+    /** Clock seam for heartbeat throttle tests. Default: Date.now. */
+    now?: () => number;
   },
 ): Promise<string | null> {
   const { id, text } = msg;
   let currentSessionId = sessionId;
+  // Resolve clock seam: injectable for heartbeat throttle tests; defaults to Date.now.
+  const now = deps.now ?? (() => Date.now());
 
   try {
-    // Record turn start for file mtime filtering
-    const turnStartMs = Date.now();
+    // Record turn start for file mtime filtering (also used as lastHeartbeatMs base).
+    const turnStartMs = now();
+    // Throttle heartbeats: at most one per HEARTBEAT_THROTTLE_MS.
+    // Initialised to 0 so the first stream_event in each turn always emits.
+    let lastHeartbeatMs = 0;
 
     const stream = deps.sdkQuery({
       prompt: text,
@@ -901,6 +924,11 @@ async function processTurn(
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         disallowedTools: DISALLOWED_TOOLS,
+        // includePartialMessages: enables SDKPartialAssistantMessage (type: 'stream_event')
+        // events, which the runner throttles into content-free heartbeat protocol messages
+        // so the gateway can reset its inactivity timer during long model thinking.
+        // Verified against runner/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts:1594.
+        includePartialMessages: true,
         // Verified against runner/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts
         // Options.systemPrompt supports { type: 'preset', preset: 'claude_code', append?: string }
         systemPrompt: {
@@ -955,6 +983,19 @@ async function processTurn(
           text: event.summary,
         };
         emit(statusMsg);
+        continue;
+      }
+
+      // SDK partial-stream event (SDKPartialAssistantMessage, type: 'stream_event') — fired
+      // token-by-token during model generation. Throttle to a content-free heartbeat protocol
+      // message so the gateway can reset its inactivity timer without being flooded.
+      // The partial content is NEVER forwarded — liveness only. Final text ships via 'result'.
+      // Verified against sdk.d.ts:3733: SDKPartialAssistantMessage = { type: 'stream_event'; ... }.
+      if (event.type === 'stream_event') {
+        if (now() - lastHeartbeatMs >= HEARTBEAT_THROTTLE_MS) {
+          lastHeartbeatMs = now();
+          emit({ type: 'heartbeat', id });
+        }
         continue;
       }
 

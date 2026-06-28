@@ -48,8 +48,10 @@ export interface DockerConfig {
   RUNNER_IMAGE: string;
   /** Time to wait for container `ready` handshake, ms */
   RUNNER_READY_TIMEOUT_MS: number;
-  /** Per-turn timeout, ms */
+  /** Per-turn inactivity timeout, ms */
   RUNNER_TURN_TIMEOUT_MS: number;
+  /** Absolute per-turn ceiling, ms — never reset within a turn */
+  RUNNER_TURN_ABSOLUTE_TIMEOUT_MS: number;
   /** Grace period before SIGKILL on dispose, ms */
   RUNNER_KILL_GRACE_MS: number;
   /** Container memory limit */
@@ -413,6 +415,7 @@ export function loadConfig(): Config {
       RUNNER_IMAGE: optionalEnvString('RUNNER_IMAGE', 'slackbot-runner:latest'),
       RUNNER_READY_TIMEOUT_MS: optionalEnvNumber('RUNNER_READY_TIMEOUT_MS', 30_000),
       RUNNER_TURN_TIMEOUT_MS: optionalEnvNumber('RUNNER_TURN_TIMEOUT_MS', 5 * 60_000),
+      RUNNER_TURN_ABSOLUTE_TIMEOUT_MS: optionalEnvNumber('RUNNER_TURN_ABSOLUTE_TIMEOUT_MS', 30 * 60_000),
       RUNNER_KILL_GRACE_MS: optionalEnvNumber('RUNNER_KILL_GRACE_MS', 5_000),
       RUNNER_MEMORY: optionalEnvString('RUNNER_MEMORY', '512m'),
       RUNNER_CPUS: optionalEnvString('RUNNER_CPUS', '1.0'),

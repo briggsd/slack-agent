@@ -60,8 +60,10 @@ export interface DockerRunnerConfig {
   now?: () => number;
   /** Ready-handshake timeout in ms */
   readyTimeoutMs: number;
-  /** Per-turn timeout in ms */
+  /** Per-turn inactivity timeout in ms — reset on every liveness message */
   turnTimeoutMs: number;
+  /** Absolute per-turn ceiling in ms — never reset within a turn. Default: 30*60_000. */
+  absoluteTurnTimeoutMs: number;
   /** Grace period before SIGKILL on dispose, in ms */
   killGraceMs: number;
   /** Container memory limit (e.g. "512m") */
@@ -421,21 +423,34 @@ export class DockerRunner implements SessionRunner {
         };
         self.child.stdin.write(JSON.stringify(outMsg) + '\n');
 
-        // Read events until we get text or error for this id
-        const { turnTimeoutMs } = self.config;
-        let deadline = Date.now() + turnTimeoutMs;
+        // Read events until we get text or error for this id.
+        // Two deadlines: an inactivity timer (idleDeadline) that resets on every liveness
+        // message, and a hard absolute ceiling (absoluteDeadline) that never resets.
+        // Route all time reads through self.now() so the timeouts are deterministically
+        // testable via the clock seam.
+        const { turnTimeoutMs, absoluteTurnTimeoutMs } = self.config;
+        const turnStart = self.now();
+        let idleDeadline = turnStart + turnTimeoutMs;
+        const absoluteDeadline = turnStart + absoluteTurnTimeoutMs;
+
+        const timeoutReason = (t: number): string =>
+          t >= absoluteDeadline
+            ? `turn exceeded absolute limit of ${absoluteTurnTimeoutMs}ms`
+            : `turn timed out after ${turnTimeoutMs}ms`;
 
         while (true) {
-          const remaining = deadline - Date.now();
+          const now = self.now();
+          const effectiveDeadline = Math.min(idleDeadline, absoluteDeadline);
+          const remaining = effectiveDeadline - now;
           if (remaining <= 0) {
-            yield self.errorEvent(`turn timed out after ${turnTimeoutMs}ms`, 'timeout');
+            yield self.errorEvent(timeoutReason(now), 'timeout');
             break;
           }
 
           const rawLine = await self.nextLineWithTimeout(remaining);
 
           if (rawLine === 'timeout') {
-            yield self.errorEvent(`turn timed out after ${turnTimeoutMs}ms`, 'timeout');
+            yield self.errorEvent(timeoutReason(self.now()), 'timeout');
             break;
           }
 
@@ -458,6 +473,12 @@ export class DockerRunner implements SessionRunner {
 
           if (parsed.type === 'status' && parsed.id === id) {
             yield { type: 'status', text: parsed.text } as RunnerEvent;
+            idleDeadline = self.now() + turnTimeoutMs;
+          } else if (parsed.type === 'heartbeat' && parsed.id === id) {
+            // Liveness ping from the runner during model thinking — reset the idle
+            // deadline and continue. Never forwarded (no yield), so Slack never sees it.
+            idleDeadline = self.now() + turnTimeoutMs;
+            continue;
           } else if (parsed.type === 'file' && parsed.id === id) {
             // Decode base64 → Buffer; malformed base64 → status, not crash
             let data: Buffer;
@@ -471,6 +492,7 @@ export class DockerRunner implements SessionRunner {
               continue;
             }
             yield { type: 'file', name: parsed.name, data } as RunnerEvent;
+            idleDeadline = self.now() + turnTimeoutMs;
           } else if (parsed.type === 'usage' && parsed.id === id) {
             yield {
               type: 'usage',
@@ -480,6 +502,7 @@ export class DockerRunner implements SessionRunner {
               cacheReadTokens: toCount(parsed.cacheReadTokens),
               cacheCreationTokens: toCount(parsed.cacheCreationTokens),
             } as RunnerEvent;
+            idleDeadline = self.now() + turnTimeoutMs;
           } else if (parsed.type === 'decision' && parsed.id === id) {
             if (
               parsed.point !== 'verify' ||
@@ -497,6 +520,7 @@ export class DockerRunner implements SessionRunner {
               rationale: parsed.rationale,
               ...(parsed.correlationId !== undefined ? { correlationId: parsed.correlationId } : {}),
             } as RunnerEvent;
+            idleDeadline = self.now() + turnTimeoutMs;
           } else if (parsed.type === 'text' && parsed.id === id) {
             yield { type: 'text', text: parsed.text } as RunnerEvent;
             break;
@@ -542,7 +566,7 @@ export class DockerRunner implements SessionRunner {
             // The clone is gateway-side work (lease + ephemeral git container), not the agent's —
             // give the post-clone continuation a fresh turn budget rather than charging it the
             // clone's wall-clock, the same reasoning the approval branch resets `deadline`.
-            deadline = Date.now() + turnTimeoutMs;
+            idleDeadline = self.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_build') {
             // The container's build_spec tool asked the gateway to run the build tail (S12a). Validate as
@@ -573,7 +597,7 @@ export class DockerRunner implements SessionRunner {
             self.child.stdin.write(JSON.stringify(buildResult) + '\n');
             // The build is gateway-side work (a fresh container producing a local candidate), not the agent's — give the
             // post-build continuation a fresh turn budget, the same reasoning the approval/clone branches use.
-            deadline = Date.now() + turnTimeoutMs;
+            idleDeadline = self.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_exec') {
             // The container's exec tool asked the gateway to run the ungated repo-oneshot
@@ -621,7 +645,7 @@ export class DockerRunner implements SessionRunner {
                   };
             self.child.stdin.write(JSON.stringify(execResult satisfies GatewayToRunnerMessage) + '\n');
             // Exec is gateway-side work, so give the post-exec continuation a fresh turn budget.
-            deadline = Date.now() + turnTimeoutMs;
+            idleDeadline = self.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_publish') {
             // The container requested publication of a verified local candidate. Validate the
@@ -673,7 +697,7 @@ export class DockerRunner implements SessionRunner {
             if (publishVerdict === 'skipped') continue;
             // Publishing is gateway-side work (lease + push + PR), not the agent's — give the
             // post-publish continuation a fresh turn budget.
-            deadline = Date.now() + turnTimeoutMs;
+            idleDeadline = self.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_pr_edit') {
             const editVerdict = yield* self.serviceDispatch<PrEditServiceRequest, PrEditOutcome>(parsed, {
@@ -709,7 +733,7 @@ export class DockerRunner implements SessionRunner {
             });
             if (editVerdict === 'fatal') return;
             if (editVerdict === 'skipped') continue;
-            deadline = Date.now() + turnTimeoutMs;
+            idleDeadline = self.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_pr_comment') {
             const commentVerdict = yield* self.serviceDispatch<PrCommentServiceRequest, PrCommentOutcome>(parsed, {
@@ -739,7 +763,7 @@ export class DockerRunner implements SessionRunner {
             });
             if (commentVerdict === 'fatal') return;
             if (commentVerdict === 'skipped') continue;
-            deadline = Date.now() + turnTimeoutMs;
+            idleDeadline = self.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_run_checks') {
             // The container requested deterministic checks for a verified local candidate.
@@ -771,7 +795,7 @@ export class DockerRunner implements SessionRunner {
             if (checksVerdict === 'skipped') continue;
             // Checks are gateway-side work (ephemeral check container), not the agent's — give
             // the post-check continuation a fresh turn budget.
-            deadline = Date.now() + turnTimeoutMs;
+            idleDeadline = self.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_provision') {
             // The container requested a pinned runtime be provisioned onto the session volume.
@@ -796,7 +820,7 @@ export class DockerRunner implements SessionRunner {
             if (provisionVerdict === 'fatal') return;
             if (provisionVerdict === 'skipped') continue;
             // Provisioning is gateway-side work; give the post-provision continuation a fresh turn budget.
-            deadline = Date.now() + turnTimeoutMs;
+            idleDeadline = self.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'request_read_issue') {
             // The container's read_issue tool asked the gateway to read an issue from the host.
@@ -829,7 +853,7 @@ export class DockerRunner implements SessionRunner {
             if (readIssueVerdict === 'fatal') return;
             if (readIssueVerdict === 'skipped') continue;
             // read_issue is gateway-side work; give the continuation a fresh turn budget.
-            deadline = Date.now() + turnTimeoutMs;
+            idleDeadline = self.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
             yield self.errorEvent(

@@ -48,6 +48,7 @@ const DEFAULT_CONFIG: DockerRunnerConfig = {
   image: 'slackbot-runner:test',
   readyTimeoutMs: 1_000,
   turnTimeoutMs: 2_000,
+  absoluteTurnTimeoutMs: 30 * 60_000,
   killGraceMs: 100,
   memory: '512m',
   cpus: '1.0',
@@ -107,7 +108,8 @@ describe('DockerRunner — request_pr_edit/request_pr_comment round-trip', () =>
     const { runner, fake } = await makeReadyRunner({
       publishService,
       volume: 'slackbot-ws-edit',
-      config: { now: scriptedNow(200, 245) },
+      // Two extra leading values for the new turnStart + loop-head now() calls.
+      config: { now: scriptedNow(0, 0, 200, 245) },
     });
 
     const iter = runner.send('edit it')[Symbol.asyncIterator]();
@@ -182,7 +184,8 @@ describe('DockerRunner — request_pr_edit/request_pr_comment round-trip', () =>
     const { runner, fake } = await makeReadyRunner({
       publishService,
       volume: 'slackbot-ws-comment',
-      config: { now: scriptedNow(300, 360) },
+      // Two extra leading values for the new turnStart + loop-head now() calls.
+      config: { now: scriptedNow(0, 0, 300, 360) },
     });
 
     const iter = runner.send('comment it')[Symbol.asyncIterator]();

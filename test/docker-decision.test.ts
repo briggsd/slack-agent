@@ -37,6 +37,7 @@ const DEFAULT_CONFIG: DockerRunnerConfig = {
   image: 'slackbot-runner:test',
   readyTimeoutMs: 1_000,
   turnTimeoutMs: 2_000,
+  absoluteTurnTimeoutMs: 30 * 60_000,
   killGraceMs: 100,
   memory: '512m',
   cpus: '1.0',

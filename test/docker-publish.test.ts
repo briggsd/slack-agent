@@ -49,6 +49,7 @@ const DEFAULT_CONFIG: DockerRunnerConfig = {
   image: 'slackbot-runner:test',
   readyTimeoutMs: 1_000,
   turnTimeoutMs: 2_000,
+  absoluteTurnTimeoutMs: 30 * 60_000,
   killGraceMs: 100,
   memory: '512m',
   cpus: '1.0',
@@ -113,7 +114,9 @@ describe('DockerRunner — request_publish round-trip', () => {
     const { runner, fake } = await makeReadyRunner({
       publishService,
       volume: 'slackbot-ws-test',
-      config: { now: scriptedNow(100, 145) },
+      // Two extra leading values for the new turnStart + loop-head now() calls added
+      // by the inactivity-timer rework. serviceDispatch still sees 100 and 145.
+      config: { now: scriptedNow(0, 0, 100, 145) },
     });
 
     const iter = runner.send('publish it')[Symbol.asyncIterator]();

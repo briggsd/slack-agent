@@ -93,6 +93,7 @@ if (RUNNER_BACKEND === 'docker') {
     image: envString('RUNNER_IMAGE', 'slackbot-runner:latest'),
     readyTimeoutMs: envNumber('RUNNER_READY_TIMEOUT_MS', 30_000),
     turnTimeoutMs: envNumber('RUNNER_TURN_TIMEOUT_MS', 5 * 60_000),
+    absoluteTurnTimeoutMs: envNumber('RUNNER_TURN_ABSOLUTE_TIMEOUT_MS', 30 * 60_000),
     killGraceMs: envNumber('RUNNER_KILL_GRACE_MS', 5_000),
     memory: envString('RUNNER_MEMORY', '512m'),
     cpus: envString('RUNNER_CPUS', '1.0'),
