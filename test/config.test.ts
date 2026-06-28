@@ -161,13 +161,24 @@ describe('parseRepoAllowlist', () => {
 });
 
 describe('parseRuntimeCatalog', () => {
-  const valid = {
-    python: {
-      version: '3.12.13+20260610',
-      url: 'https://example.test/python.tar.gz',
-      sha256: 'a'.repeat(64),
-      binSubdir: 'python/bin',
-    },
+  // Helpers for building valid arch-aware catalog entries
+  const validArtifact = {
+    url: 'https://example.test/python.tar.gz',
+    sha256: 'a'.repeat(64),
+    binSubdir: 'python/bin',
+  };
+  const validArtifactAlt = {
+    url: 'https://example.test/python-arm64.tar.gz',
+    sha256: 'b'.repeat(64),
+    binSubdir: 'python/bin',
+  };
+  const validEntry = {
+    version: '3.12.13+20260610',
+    arch: { amd64: validArtifact },
+  };
+  const validEntryBothArches = {
+    version: '3.12.13+20260610',
+    arch: { amd64: validArtifact, arm64: validArtifactAlt },
   };
 
   it('returns an empty map for undefined or empty input', () => {
@@ -175,21 +186,41 @@ describe('parseRuntimeCatalog', () => {
     expect(parseRuntimeCatalog('').size).toBe(0);
   });
 
-  it('parses a valid catalog entry (no format field) and defaults format to tar.gz', () => {
-    const result = parseRuntimeCatalog(JSON.stringify(valid));
+  it('parses a valid single-arch entry (no format field) and defaults format to tar.gz', () => {
+    const result = parseRuntimeCatalog(JSON.stringify({ python: validEntry }));
 
     expect(result.size).toBe(1);
-    expect(result.get('python')).toEqual({ ...valid.python, format: 'tar.gz' });
+    const entry = result.get('python');
+    expect(entry?.version).toBe('3.12.13+20260610');
+    expect(entry?.format).toBe('tar.gz');
+    expect(entry?.arch.amd64?.url).toBe(validArtifact.url);
+    expect(entry?.arch.amd64?.sha256).toBe(validArtifact.sha256.toLowerCase());
+    expect(entry?.arch.amd64?.binSubdir).toBe('python/bin');
+    expect(entry?.arch.arm64).toBeUndefined();
+  });
+
+  it('parses a valid 2-arch entry with both amd64 and arm64 present', () => {
+    const result = parseRuntimeCatalog(JSON.stringify({ python: validEntryBothArches }));
+
+    expect(result.size).toBe(1);
+    const entry = result.get('python');
+    expect(entry?.arch.amd64?.url).toBe(validArtifact.url);
+    expect(entry?.arch.arm64?.url).toBe(validArtifactAlt.url);
+    expect(entry?.arch.arm64?.binSubdir).toBe('python/bin');
   });
 
   it('parses a zip entry with explicit format: "zip"', () => {
     const catalog = {
       bun: {
         version: '1.3.14',
-        url: 'https://example.test/bun.zip',
-        sha256: 'b'.repeat(64),
-        binSubdir: 'bun-linux-x64-baseline',
         format: 'zip',
+        arch: {
+          amd64: {
+            url: 'https://example.test/bun.zip',
+            sha256: 'b'.repeat(64),
+            binSubdir: 'bun-linux-x64-baseline',
+          },
+        },
       },
     };
     const result = parseRuntimeCatalog(JSON.stringify(catalog));
@@ -197,11 +228,11 @@ describe('parseRuntimeCatalog', () => {
     expect(result.size).toBe(1);
     const entry = result.get('bun');
     expect(entry?.format).toBe('zip');
-    expect(entry?.binSubdir).toBe('bun-linux-x64-baseline');
+    expect(entry?.arch.amd64?.binSubdir).toBe('bun-linux-x64-baseline');
   });
 
   it('parses an explicit format: "tar.gz" entry', () => {
-    const catalog = { python: { ...valid.python, format: 'tar.gz' } };
+    const catalog = { python: { ...validEntry, format: 'tar.gz' } };
     const result = parseRuntimeCatalog(JSON.stringify(catalog));
 
     expect(result.get('python')?.format).toBe('tar.gz');
@@ -209,17 +240,80 @@ describe('parseRuntimeCatalog', () => {
 
   it('throws for an unrecognized format value (fail-closed)', () => {
     expect(() => parseRuntimeCatalog(JSON.stringify({
-      python: { ...valid.python, format: 'rar' },
+      python: { ...validEntry, format: 'rar' },
     }))).toThrow(/format must be "tar.gz" or "zip"/);
     expect(() => parseRuntimeCatalog(JSON.stringify({
-      python: { ...valid.python, format: 'tgz' },
+      python: { ...validEntry, format: 'tgz' },
     }))).toThrow(/format must be "tar.gz" or "zip"/);
     expect(() => parseRuntimeCatalog(JSON.stringify({
-      python: { ...valid.python, format: '' },
+      python: { ...validEntry, format: '' },
     }))).toThrow(/format must be "tar.gz" or "zip"/);
   });
 
-  it('parses the real config/runtimes.json: bun has format zip, python defaults to tar.gz', () => {
+  it('throws when arch is missing', () => {
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { version: '3.12.0' },
+    }))).toThrow(/arch must be an object/);
+  });
+
+  it('throws when arch is an empty object (fail-closed: must define at least one arch)', () => {
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { version: '3.12.0', arch: {} },
+    }))).toThrow(/at least one arch/);
+  });
+
+  it('throws for unknown arch key (fail-closed — no silent drop)', () => {
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: {
+        version: '3.12.0',
+        arch: { x86_64: validArtifact },
+      },
+    }))).toThrow(/unknown arch key/);
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: {
+        version: '3.12.0',
+        arch: { arm: validArtifact },
+      },
+    }))).toThrow(/unknown arch key/);
+  });
+
+  it('throws for bad per-arch sha256', () => {
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { version: '3.12.0', arch: { amd64: { ...validArtifact, sha256: 'a'.repeat(63) } } },
+    }))).toThrow(/sha256/);
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { version: '3.12.0', arch: { amd64: { ...validArtifact, sha256: `${'a'.repeat(63)}z` } } },
+    }))).toThrow(/sha256/);
+  });
+
+  it('throws for per-arch non-https url', () => {
+    expect(() => parseRuntimeCatalog(JSON.stringify({
+      python: { version: '3.12.0', arch: { amd64: { ...validArtifact, url: 'http://example.test/python.tar.gz' } } },
+    }))).toThrow(/https/);
+  });
+
+  it('throws for per-arch unsafe binSubdir values', () => {
+    for (const binSubdir of ['../bin', 'python/../bin', '/python/bin']) {
+      expect(() => parseRuntimeCatalog(JSON.stringify({
+        python: { version: '3.12.0', arch: { amd64: { ...validArtifact, binSubdir } } },
+      }))).toThrow(/binSubdir/);
+    }
+  });
+
+  it('throws for malformed JSON and non-object catalogs', () => {
+    expect(() => parseRuntimeCatalog('{nope')).toThrow(/runtime catalog/i);
+    expect(() => parseRuntimeCatalog('[]')).toThrow(/runtime catalog/i);
+  });
+
+  it('throws for unsafe runtime names (catalog keys interpolate into the rm -rf/mv target)', () => {
+    for (const name of ['.', '..', '../evil', 'py/bin', 'a b']) {
+      expect(() => parseRuntimeCatalog(JSON.stringify({
+        [name]: validEntry,
+      }))).toThrow(/name/);
+    }
+  });
+
+  it('parses the real config/runtimes.json: both python and bun have amd64 and arm64, bun is zip', () => {
     const { readFileSync } = require('node:fs');
     const raw: string = readFileSync('config/runtimes.json', 'utf-8');
     const catalog = parseRuntimeCatalog(raw);
@@ -228,47 +322,16 @@ describe('parseRuntimeCatalog', () => {
 
     const python = catalog.get('python');
     expect(python?.format).toBe('tar.gz');
+    expect(python?.arch.amd64?.binSubdir).toBe('python/bin');
+    expect(python?.arch.arm64?.binSubdir).toBe('python/bin');
+    expect(python?.arch.amd64?.url).toContain('x86_64');
+    expect(python?.arch.arm64?.url).toContain('aarch64');
 
     const bun = catalog.get('bun');
     expect(bun?.format).toBe('zip');
-    expect(bun?.binSubdir).toBe('bun-linux-x64-baseline');
+    expect(bun?.arch.amd64?.binSubdir).toBe('bun-linux-x64-baseline');
+    expect(bun?.arch.arm64?.binSubdir).toBe('bun-linux-aarch64');
     expect(bun?.version).toBe('1.3.14');
-  });
-
-  it('throws for malformed JSON and non-object catalogs', () => {
-    expect(() => parseRuntimeCatalog('{nope')).toThrow(/runtime catalog/i);
-    expect(() => parseRuntimeCatalog('[]')).toThrow(/runtime catalog/i);
-  });
-
-  it('throws for bad sha256 length or charset', () => {
-    expect(() => parseRuntimeCatalog(JSON.stringify({
-      python: { ...valid.python, sha256: 'a'.repeat(63) },
-    }))).toThrow(/sha256/);
-    expect(() => parseRuntimeCatalog(JSON.stringify({
-      python: { ...valid.python, sha256: `${'a'.repeat(63)}z` },
-    }))).toThrow(/sha256/);
-  });
-
-  it('throws for non-https urls', () => {
-    expect(() => parseRuntimeCatalog(JSON.stringify({
-      python: { ...valid.python, url: 'http://example.test/python.tar.gz' },
-    }))).toThrow(/https/);
-  });
-
-  it('throws for unsafe binSubdir values', () => {
-    for (const binSubdir of ['../bin', 'python/../bin', '/python/bin']) {
-      expect(() => parseRuntimeCatalog(JSON.stringify({
-        python: { ...valid.python, binSubdir },
-      }))).toThrow(/binSubdir/);
-    }
-  });
-
-  it('throws for unsafe runtime names (catalog keys interpolate into the rm -rf/mv target)', () => {
-    for (const name of ['.', '..', '../evil', 'py/bin', 'a b']) {
-      expect(() => parseRuntimeCatalog(JSON.stringify({
-        [name]: valid.python,
-      }))).toThrow(/name/);
-    }
   });
 });
 

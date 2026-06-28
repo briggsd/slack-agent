@@ -69,12 +69,19 @@ export interface RepoCheckCmds {
 const SELF_REPO = 'briggsd/slack-agent';
 const REQUIRED_SELF_CHECK_CMD = 'npm run gate';
 
+export type RuntimeArch = 'amd64' | 'arm64';
+
+export interface RuntimeArchArtifact {
+  url: string;       // https only
+  sha256: string;    // 64 hex, stored lowercased
+  binSubdir: string; // safe relative path (no '..', no leading '/')
+}
+
 export interface RuntimeCatalogEntry {
   version: string;
-  url: string;
-  sha256: string;
-  binSubdir: string;
   format: 'tar.gz' | 'zip';
+  /** At least one arch must be present. Keys constrained to RuntimeArch. */
+  arch: { readonly [A in RuntimeArch]?: RuntimeArchArtifact };
 }
 
 export interface OneShotConfig {
@@ -259,6 +266,8 @@ export function parseRuntimeCatalog(raw: string | undefined): ReadonlyMap<string
     throw new Error('Invalid runtime catalog: expected a JSON object');
   }
 
+  const VALID_ARCH_KEYS: ReadonlySet<string> = new Set(['amd64', 'arm64']);
+
   const result = new Map<string, RuntimeCatalogEntry>();
   for (const [name, value] of Object.entries(parsed)) {
     if (!isSafeRuntimeName(name)) {
@@ -269,25 +278,8 @@ export function parseRuntimeCatalog(raw: string | undefined): ReadonlyMap<string
     }
 
     const version = value['version'];
-    const url = value['url'];
-    const sha256 = value['sha256'];
-    const binSubdir = value['binSubdir'];
-    if (
-      typeof version !== 'string' || version === '' ||
-      typeof url !== 'string' ||
-      typeof sha256 !== 'string' ||
-      typeof binSubdir !== 'string'
-    ) {
-      throw new Error(`Invalid runtime catalog entry "${name}": expected version, url, sha256, binSubdir strings`);
-    }
-    if (!url.startsWith('https://')) {
-      throw new Error(`Invalid runtime catalog entry "${name}": url must use https://`);
-    }
-    if (!/^[a-fA-F0-9]{64}$/.test(sha256)) {
-      throw new Error(`Invalid runtime catalog entry "${name}": sha256 must be 64 hex characters`);
-    }
-    if (!isSafeRuntimeBinSubdir(binSubdir)) {
-      throw new Error(`Invalid runtime catalog entry "${name}": binSubdir must be a safe relative path`);
+    if (typeof version !== 'string' || version === '') {
+      throw new Error(`Invalid runtime catalog entry "${name}": expected non-empty version string`);
     }
 
     const rawFormat = value['format'];
@@ -300,7 +292,46 @@ export function parseRuntimeCatalog(raw: string | undefined): ReadonlyMap<string
       throw new Error(`Invalid runtime catalog entry "${name}": format must be "tar.gz" or "zip"`);
     }
 
-    result.set(name, { version, url, sha256: sha256.toLowerCase(), binSubdir, format });
+    const archRaw = value['arch'];
+    if (!isRuntimeRecord(archRaw)) {
+      throw new Error(`Invalid runtime catalog entry "${name}": arch must be an object`);
+    }
+    const archKeys = Object.keys(archRaw);
+    if (archKeys.length === 0) {
+      throw new Error(`Invalid runtime catalog entry "${name}": arch must define at least one arch`);
+    }
+    for (const archKey of archKeys) {
+      if (!VALID_ARCH_KEYS.has(archKey)) {
+        throw new Error(`Invalid runtime catalog entry "${name}": unknown arch key "${archKey}" (must be amd64 or arm64)`);
+      }
+    }
+
+    const arch: { [A in RuntimeArch]?: RuntimeArchArtifact } = {};
+    for (const archKey of archKeys) {
+      const a = archKey as RuntimeArch;
+      const artifactRaw = archRaw[archKey];
+      if (!isRuntimeRecord(artifactRaw)) {
+        throw new Error(`Invalid runtime catalog entry "${name}" arch "${a}": expected an object`);
+      }
+      const url = artifactRaw['url'];
+      const sha256 = artifactRaw['sha256'];
+      const binSubdir = artifactRaw['binSubdir'];
+      if (typeof url !== 'string') {
+        throw new Error(`Invalid runtime catalog entry "${name}" arch "${a}": expected url string`);
+      }
+      if (!url.startsWith('https://')) {
+        throw new Error(`Invalid runtime catalog entry "${name}" arch "${a}": url must use https://`);
+      }
+      if (typeof sha256 !== 'string' || !/^[a-fA-F0-9]{64}$/.test(sha256)) {
+        throw new Error(`Invalid runtime catalog entry "${name}" arch "${a}": sha256 must be 64 hex characters`);
+      }
+      if (typeof binSubdir !== 'string' || !isSafeRuntimeBinSubdir(binSubdir)) {
+        throw new Error(`Invalid runtime catalog entry "${name}" arch "${a}": binSubdir must be a safe relative path`);
+      }
+      arch[a] = { url, sha256: sha256.toLowerCase(), binSubdir };
+    }
+
+    result.set(name, { version, format, arch });
   }
   return result;
 }

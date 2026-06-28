@@ -1,15 +1,34 @@
 {
   "python": {
     "version": "3.12.13+20260610",
-    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13%2B20260610-x86_64-unknown-linux-gnu-install_only.tar.gz",
-    "sha256": "c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a",
-    "binSubdir": "python/bin"
+    "format": "tar.gz",
+    "arch": {
+      "amd64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13%2B20260610-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "sha256": "c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a",
+        "binSubdir": "python/bin"
+      },
+      "arm64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13%2B20260610-aarch64-unknown-linux-gnu-install_only.tar.gz",
+        "sha256": "bc74cf1bb517651868342b0619b21eaaf9f94a2022c9c61886dd980e16fb091b",
+        "binSubdir": "python/bin"
+      }
+    }
   },
   "bun": {
     "version": "1.3.14",
-    "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-baseline.zip",
-    "sha256": "a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7",
-    "binSubdir": "bun-linux-x64-baseline",
-    "format": "zip"
+    "format": "zip",
+    "arch": {
+      "amd64": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-baseline.zip",
+        "sha256": "a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7",
+        "binSubdir": "bun-linux-x64-baseline"
+      },
+      "arm64": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip",
+        "sha256": "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b",
+        "binSubdir": "bun-linux-aarch64"
+      }
+    }
   }
 }

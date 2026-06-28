@@ -320,11 +320,18 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
     if (this.runtimeCatalog.size === 0) {
       return ':';
     }
-    const dirs = [...this.runtimeCatalog.entries()]
-      .map(([name, entry]) =>
-        shellQuote(`/workspace/.runtimes/${name}/${entry.binSubdir}`),
-      )
-      .join(' ');
+    // Collect every per-arch binSubdir path, deduped.
+    // (e.g. python's amd64 and arm64 both use 'python/bin' → emitted once)
+    // The [ -d ] guard in the loop ensures only the installed arch's dir lands on PATH.
+    const dirSet = new Set<string>();
+    for (const [name, entry] of this.runtimeCatalog.entries()) {
+      for (const artifact of Object.values(entry.arch)) {
+        if (artifact !== undefined) {
+          dirSet.add(`/workspace/.runtimes/${name}/${artifact.binSubdir}`);
+        }
+      }
+    }
+    const dirs = [...dirSet].map(shellQuote).join(' ');
     return (
       `runtime_bins=''; for d in ${dirs}; do if [ -d "$d" ]; then runtime_bins="\${runtime_bins}\${d}:"; fi; done; ` +
       `if [ -n "$runtime_bins" ]; then export PATH="\${runtime_bins}$PATH"; fi`
@@ -528,15 +535,32 @@ export class DockerGitNodeExecutor implements GitNodeExecutor {
 
   private dockerProvisionArgs(req: ProvisionRuntimeRequest, containerName: string): string[] {
     const target = `/workspace/.runtimes/${req.name}`;
-    const binDir = `${target}/${req.entry.binSubdir}`;
     const tmpDir = `${target}.tmp`;
+
+    // Build a case arm only for each arch present in the entry (fail-closed on absent arches).
+    const caseArms: string[] = [];
+    const amd64 = req.entry.arch['amd64'];
+    const arm64 = req.entry.arch['arm64'];
+    if (amd64 !== undefined) {
+      caseArms.push(
+        `x86_64) url=${shellQuote(amd64.url)}; expected=${shellQuote(amd64.sha256)}; bin_subdir=${shellQuote(amd64.binSubdir)};;`,
+      );
+    }
+    if (arm64 !== undefined) {
+      caseArms.push(
+        `aarch64|arm64) url=${shellQuote(arm64.url)}; expected=${shellQuote(arm64.sha256)}; bin_subdir=${shellQuote(arm64.binSubdir)};;`,
+      );
+    }
+    caseArms.push(`*) echo "unsupported arch: $arch" >&2; exit 24;;`);
+    const caseStatement = `case "$arch" in ${caseArms.join(' ')} esac`;
+
     const shellCmd = [
       'set -eu',
       `target=${shellQuote(target)}`,
-      `bin_dir=${shellQuote(binDir)}`,
       `tmp_dir=${shellQuote(tmpDir)}`,
-      `url=${shellQuote(req.entry.url)}`,
-      `expected=${shellQuote(req.entry.sha256)}`,
+      'arch="$(uname -m)"',
+      caseStatement,
+      'bin_dir="$target/$bin_subdir"',
       'if [ -d "$bin_dir" ]; then exit 0; fi',
       req.entry.format === 'zip'
         ? 'archive="$(mktemp /tmp/runtime.XXXXXX.zip)"'
