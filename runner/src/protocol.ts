@@ -204,6 +204,7 @@ export type ReadIssueResultMessage = {
 export type RunnerToGatewayMessage =
   | ReadyMessage
   | StatusMessage
+  | HeartbeatMessage
   | FileMessage
   | TextMessage
   | UsageMessage
@@ -230,6 +231,17 @@ export type StatusMessage = {
   type: 'status';
   id: string;
   text: string;
+};
+
+/**
+ * A content-free liveness ping from the runner, emitted at most once per
+ * HEARTBEAT_THROTTLE_MS while the model is generating (thinking).
+ * The gateway resets the idle deadline and consumes this silently — it is
+ * never forwarded to Slack. Carries no content (privacy invariant).
+ */
+export type HeartbeatMessage = {
+  type: 'heartbeat';
+  id: string;
 };
 
 /**

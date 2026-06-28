@@ -128,6 +128,7 @@ async function main(): Promise<void> {
       image: dc.RUNNER_IMAGE,
       readyTimeoutMs: dc.RUNNER_READY_TIMEOUT_MS,
       turnTimeoutMs: dc.RUNNER_TURN_TIMEOUT_MS,
+      absoluteTurnTimeoutMs: dc.RUNNER_TURN_ABSOLUTE_TIMEOUT_MS,
       killGraceMs: dc.RUNNER_KILL_GRACE_MS,
       memory: dc.RUNNER_MEMORY,
       cpus: dc.RUNNER_CPUS,
