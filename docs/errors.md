@@ -20,7 +20,7 @@ Error **message bodies are never logged or audited**. A message body can echo pr
 
 `errorClass` and structured metadata (`name`, `status`, `type`, `code`, first stack frame) are content-free and safe for logs and the audit ledger.
 
-This rule is encoded in the protocol comment at `src/runner/protocol.ts:455-462` and enforced at `manager.ts` in both the relay path (lines 932-956) and the gateway catch. The `safeErrorDetail` helper in `runner/src/main.ts` and the `gatewayErrorMeta` function in `manager.ts` both produce metadata strings that contain no message body.
+This rule is encoded in the `RunnerErrorClass` comment in `protocol.ts` and enforced in `manager.ts` in both the runner-error relay branch (`reason === 'runner_error'` redacts the message, keeps the class) and the gateway `drain` catch. The `safeErrorDetail` helper in `runner/src/main.ts` and the `gatewayErrorMeta` function in `manager.ts` both produce metadata strings that contain no message body. (References here are by symbol rather than line number, which drifts.)
 
 ## `RunnerErrorClass` table
 
