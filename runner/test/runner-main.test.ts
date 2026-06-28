@@ -336,6 +336,28 @@ describe('runner main — basic flow', () => {
     expect(append).toContain('only after');
   });
 
+  it('appends subagent delegation guidance to the SDK system prompt', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-subagent'), makeSdkResult('done', 'sess-subagent')],
+    ]);
+    await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'msg-subagent', text: 'hello' })],
+      sdk,
+    );
+
+    const systemPrompt = sdk.calls[0]?.systemPrompt;
+    expect(systemPrompt).toMatchObject({
+      type: 'preset',
+      preset: 'claude_code',
+    });
+
+    const append = (systemPrompt as { append?: unknown }).append;
+    expect(typeof append).toBe('string');
+    expect(append).toContain('delegating');
+    expect(append).toContain('subagent (the Task tool)');
+    expect(append).toContain('context lean');
+  });
+
   it('runBuildSpec tells the coordinator to report_verification before publish', async () => {
     const text = await runBuildSpec(
       'owner/repo',

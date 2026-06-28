@@ -261,6 +261,14 @@ const RUNTIME_SYSTEM_PROMPT_ADDITION =
   'installs only pinned catalog entries onto /workspace/.runtimes and returns refusal as data. ' +
   'Do not curl or execute arbitrary runtime binaries yourself.';
 
+const SUBAGENT_SYSTEM_PROMPT_ADDITION =
+  'For broad investigation of a large cloned repo — mapping its structure, finding ' +
+  'every caller of a symbol, or learning how something is tested — prefer delegating ' +
+  'to a subagent (the Task tool) and working from its summary, rather than reading ' +
+  'many files into this conversation yourself. That keeps your own context lean, ' +
+  'which keeps turns fast. Use Grep/Glob/Read directly for targeted, surgical ' +
+  'lookups where a subagent would only add overhead.';
+
 // ── Spec-file helper ─────────────────────────────────────────────────────────
 
 /**
@@ -934,7 +942,7 @@ async function processTurn(
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
-          append: `${WORKSPACE_SYSTEM_PROMPT_ADDITION}\n\n${COMMIT_SYSTEM_PROMPT_ADDITION}\n\n${CLONE_SYSTEM_PROMPT_ADDITION}\n\n${PUBLISH_SYSTEM_PROMPT_ADDITION}\n\n${EXEC_SYSTEM_PROMPT_ADDITION}\n\n${RUNTIME_SYSTEM_PROMPT_ADDITION}`,
+          append: `${WORKSPACE_SYSTEM_PROMPT_ADDITION}\n\n${COMMIT_SYSTEM_PROMPT_ADDITION}\n\n${CLONE_SYSTEM_PROMPT_ADDITION}\n\n${PUBLISH_SYSTEM_PROMPT_ADDITION}\n\n${EXEC_SYSTEM_PROMPT_ADDITION}\n\n${RUNTIME_SYSTEM_PROMPT_ADDITION}\n\n${SUBAGENT_SYSTEM_PROMPT_ADDITION}`,
         },
       },
     });
