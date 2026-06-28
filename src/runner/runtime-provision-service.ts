@@ -4,12 +4,19 @@
  * callers name only a runtime, never a URL.
  */
 
+export type RuntimeArch = 'amd64' | 'arm64';
+
+export interface RuntimeArchArtifact {
+  url: string;       // https only
+  sha256: string;    // 64 hex, stored lowercased
+  binSubdir: string; // safe relative path (no '..', no leading '/')
+}
+
 export interface RuntimeCatalogEntry {
   version: string;
-  url: string;
-  sha256: string;
-  binSubdir: string;
   format: 'tar.gz' | 'zip';
+  /** At least one arch must be present. Keys constrained to RuntimeArch. */
+  arch: { readonly [A in RuntimeArch]?: RuntimeArchArtifact };
 }
 
 export interface RuntimeProvisionRequest {

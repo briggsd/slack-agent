@@ -927,9 +927,25 @@ describe('DockerGitNodeExecutor — runCheck', () => {
   });
 
   it('prepends provisioned runtime bin directories to PATH without injecting credentials', async () => {
+    // Python: both arches share the same binSubdir 'python/bin' — should be deduped to one dir.
+    // Bun: each arch has a distinct binSubdir — both dirs should appear.
     const catalogFixture = new Map<string, RuntimeCatalogEntry>([
-      ['python', { version: '3.12.0', url: 'https://example.com/python.tar.gz', sha256: 'abc123', binSubdir: 'python/bin', format: 'tar.gz' }],
-      ['bun', { version: '1.0.0', url: 'https://example.com/bun.tar.gz', sha256: 'def456', binSubdir: 'bun-linux-x64-baseline', format: 'tar.gz' }],
+      ['python', {
+        version: '3.12.0',
+        format: 'tar.gz',
+        arch: {
+          amd64: { url: 'https://example.com/python-amd64.tar.gz', sha256: 'a'.repeat(64), binSubdir: 'python/bin' },
+          arm64: { url: 'https://example.com/python-arm64.tar.gz', sha256: 'b'.repeat(64), binSubdir: 'python/bin' },
+        },
+      }],
+      ['bun', {
+        version: '1.0.0',
+        format: 'zip',
+        arch: {
+          amd64: { url: 'https://example.com/bun-amd64.zip', sha256: 'c'.repeat(64), binSubdir: 'bun-linux-x64-baseline' },
+          arm64: { url: 'https://example.com/bun-arm64.zip', sha256: 'd'.repeat(64), binSubdir: 'bun-linux-aarch64' },
+        },
+      }],
     ]);
     const { spawnFn, calls } = makeFakeSpawn(0);
     const exec = new DockerGitNodeExecutor({ image, spawn: spawnFn, runtimeCatalog: catalogFixture });
@@ -940,9 +956,17 @@ describe('DockerGitNodeExecutor — runCheck', () => {
     const cIdx = args.indexOf('-c');
     const shellCmd = args[cIdx + 1] ?? '';
 
-    // Both catalog-derived dirs appear, each guarded by an existence test
+    // Python's two arches share the same binSubdir — deduplicated to one dir entry
     expect(shellCmd).toContain('/workspace/.runtimes/python/python/bin');
+    // python/bin appears exactly once (deduplication)
+    const pythonMatches = [...shellCmd.matchAll(/\/workspace\/.runtimes\/python\/python\/bin/g)];
+    expect(pythonMatches).toHaveLength(1);
+
+    // Bun's two arches have distinct binSubdirs — both appear
     expect(shellCmd).toContain('/workspace/.runtimes/bun/bun-linux-x64-baseline');
+    expect(shellCmd).toContain('/workspace/.runtimes/bun/bun-linux-aarch64');
+
+    // All dirs guarded by existence test
     expect(shellCmd).toContain('[ -d ');
     expect(shellCmd).toContain('export PATH="${runtime_bins}$PATH"');
     expect(shellCmd).toContain('npm run lint');
@@ -1164,19 +1188,37 @@ describe('DockerGitNodeExecutor — runCheck', () => {
 describe('DockerGitNodeExecutor — provisionRuntime', () => {
   const image = 'slackbot-runner:test';
   const volume = 'slackbot-ws-team01-c123-t456';
-  const tarGzEntry = {
+  const tarGzEntry: RuntimeCatalogEntry = {
     version: '3.12.13+20260610',
-    url: 'https://example.test/python.tar.gz',
-    sha256: 'a'.repeat(64),
-    binSubdir: 'python/bin',
-    format: 'tar.gz' as const,
+    format: 'tar.gz',
+    arch: {
+      amd64: {
+        url: 'https://example.test/python-amd64.tar.gz',
+        sha256: 'a'.repeat(64),
+        binSubdir: 'python/bin',
+      },
+      arm64: {
+        url: 'https://example.test/python-arm64.tar.gz',
+        sha256: 'c'.repeat(64),
+        binSubdir: 'python/bin',
+      },
+    },
   };
-  const zipEntry = {
+  const zipEntry: RuntimeCatalogEntry = {
     version: '1.3.14',
-    url: 'https://example.test/bun.zip',
-    sha256: 'b'.repeat(64),
-    binSubdir: 'bun-linux-x64-baseline',
-    format: 'zip' as const,
+    format: 'zip',
+    arch: {
+      amd64: {
+        url: 'https://example.test/bun-amd64.zip',
+        sha256: 'b'.repeat(64),
+        binSubdir: 'bun-linux-x64-baseline',
+      },
+      arm64: {
+        url: 'https://example.test/bun-arm64.zip',
+        sha256: 'd'.repeat(64),
+        binSubdir: 'bun-linux-aarch64',
+      },
+    },
   };
 
   it('spawns a named no-credential provision container with sha256 verification before extraction (tar.gz)', async () => {
@@ -1206,13 +1248,26 @@ describe('DockerGitNodeExecutor — provisionRuntime', () => {
 
     const cIdx = args.indexOf('-c');
     const shellCmd = args[cIdx + 1] ?? '';
+
+    // idempotency check is present and comes after arch resolution
     expect(shellCmd).toContain('if [ -d "$bin_dir" ]; then exit 0; fi');
     expect(shellCmd).toContain('curl -L --fail');
-    expect(shellCmd).toContain(tarGzEntry.url);
+    // both arch urls and shas appear in the case arms
+    expect(shellCmd).toContain(tarGzEntry.arch.amd64!.url);
+    expect(shellCmd).toContain(tarGzEntry.arch.arm64!.url);
+    expect(shellCmd).toContain(tarGzEntry.arch.amd64!.sha256);
+    expect(shellCmd).toContain(tarGzEntry.arch.arm64!.sha256);
+    // arch selection tokens
+    expect(shellCmd).toContain('x86_64)');
+    expect(shellCmd).toContain('aarch64|arm64)');
+    // unsupported arch exit code (24, distinct from sha mismatch 23)
+    expect(shellCmd).toContain('exit 24');
     expect(shellCmd).toContain('sha256sum "$archive"');
-    expect(shellCmd).toContain(tarGzEntry.sha256);
     expect(shellCmd.indexOf('sha256sum "$archive"')).toBeLessThan(shellCmd.indexOf('tar -xzf "$archive"'));
-    expect(shellCmd).toContain('/workspace/.runtimes/python/python/bin');
+    // bin_dir derived from $target/$bin_subdir at runtime
+    expect(shellCmd).toContain('bin_dir="$target/$bin_subdir"');
+    // target contains the runtime name
+    expect(shellCmd).toContain('/workspace/.runtimes/python');
   });
 
   it('tar.gz entry: uses .tar.gz temp suffix and tar -xzf, NOT unzip', async () => {
