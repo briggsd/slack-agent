@@ -7,7 +7,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { PassThrough } from 'stream';
-import { runLoop, runBuildSpec } from '../src/main.js';
+import { runLoop, runBuildSpec, classifyResultError } from '../src/main.js';
 import type { ReadFileFn, WriteFileFn, MkdirFn, SdkQueryFn, ListFilesFn, ReadBinaryFileFn, ScannedFile } from '../src/main.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
@@ -121,6 +121,31 @@ function makeSdkResultError(errors: string[]): SDKMessage {
   };
 }
 
+function makeSdkResultErrorSubtype(subtype: 'error_during_execution' | 'error_max_turns' | 'error_max_budget_usd' | 'error_max_structured_output_retries'): SDKMessage {
+  return {
+    type: 'result',
+    subtype,
+    errors: [`SDK error: ${subtype}`],
+    session_id: 'session-abc',
+    is_error: true,
+    duration_ms: 100,
+    duration_api_ms: 90,
+    num_turns: 1,
+    stop_reason: null,
+    total_cost_usd: 0,
+    usage: {
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      server_tool_use: { web_search_requests: 0 },
+    },
+    modelUsage: {},
+    permission_denials: [],
+    uuid: '00000000-0000-0000-0000-000000000005',
+  };
+}
+
 function makeSdkToolProgress(toolName: string): SDKMessage {
   return {
     type: 'tool_progress',
@@ -184,6 +209,7 @@ type CollectedOutput = Array<{
   id?: string;
   text?: string;
   message?: string;
+  errorClass?: string;
   name?: string;
   data_base64?: string;
   size?: number;
@@ -428,6 +454,47 @@ describe('runner main — error handling', () => {
 
     const errorEvent = output.find((e) => e.type === 'error');
     expect(errorEvent).toBeDefined();
+  });
+
+  it('emits errorClass malformed_input on unparseable input line', async () => {
+    const sdk = new FakeAgentSdk([]);
+    const output = await runWithInput(['not valid json at all }{'], sdk);
+
+    const errorEvent = output.find((e) => e.type === 'error');
+    expect(errorEvent?.errorClass).toBe('malformed_input');
+  });
+
+  it.each([
+    ['error_during_execution', 'execution_error'],
+    ['error_max_turns', 'max_turns'],
+    ['error_max_budget_usd', 'budget_exceeded'],
+    ['error_max_structured_output_retries', 'output_retries'],
+  ] as const)('emits errorClass %s → %s for SDK result subtype', async (subtype, expectedClass) => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResultErrorSubtype(subtype)],
+    ]);
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'm1', text: 'go' })],
+      sdk,
+    );
+
+    const errorEvent = output.find((e) => e.type === 'error');
+    expect(errorEvent).toBeDefined();
+    expect(errorEvent?.errorClass).toBe(expectedClass);
+  });
+});
+
+describe('runner main — classifyResultError', () => {
+  it('maps all four SDK subtypes to the correct class', () => {
+    expect(classifyResultError('error_max_turns')).toBe('max_turns');
+    expect(classifyResultError('error_max_budget_usd')).toBe('budget_exceeded');
+    expect(classifyResultError('error_max_structured_output_retries')).toBe('output_retries');
+    expect(classifyResultError('error_during_execution')).toBe('execution_error');
+  });
+
+  it('maps an unrecognised subtype to execution_error (SDK catch-all)', () => {
+    expect(classifyResultError('some_future_subtype')).toBe('execution_error');
+    expect(classifyResultError('')).toBe('execution_error');
   });
 });
 

@@ -30,7 +30,9 @@ import type {
   GatewayToRunnerMessage,
   ApprovalVerdictMessage,
   ExecResultMessage,
+  RunnerErrorClass,
 } from './protocol.js';
+import { isRunnerErrorClass } from './protocol.js';
 import type { CloneService } from './clone-service.js';
 import type { CloneOutcome } from './clone-service.js';
 import type { PublishService } from './publish-service.js';
@@ -208,7 +210,10 @@ export class DockerRunner implements SessionRunner {
     child.once('close', onExit);
   }
 
-  private errorEvent(message: string, reason: ErrorReason): RunnerEvent {
+  private errorEvent(message: string, reason: ErrorReason, errorClass?: RunnerErrorClass): RunnerEvent {
+    if (errorClass !== undefined) {
+      return { type: 'error', message, reason, errorClass };
+    }
     return { type: 'error', message, reason };
   }
 
@@ -827,7 +832,11 @@ export class DockerRunner implements SessionRunner {
             deadline = Date.now() + turnTimeoutMs;
             continue;
           } else if (parsed.type === 'error' && parsed.id === id) {
-            yield self.errorEvent(parsed.message, 'runner_error');
+            yield self.errorEvent(
+              parsed.message,
+              'runner_error',
+              isRunnerErrorClass(parsed.errorClass) ? parsed.errorClass : undefined,
+            );
             break;
           }
           // Messages with different IDs ignored (shouldn't happen since turns are serial)

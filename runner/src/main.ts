@@ -12,7 +12,7 @@
 
 import { createInterface } from 'readline';
 import { z } from 'zod';
-import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { query, tool, createSdkMcpServer, AbortError } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type {
   UserMessage,
@@ -41,7 +41,22 @@ import { ProvisionCoordinator } from './provision.js';
 import type { ProvisionInput, ProvisionOutcome } from './provision.js';
 import { ReadIssueCoordinator } from './read-issue.js';
 import type { ReadIssueInput, ReadIssueOutcome } from './read-issue.js';
-import type { RunChecksKind } from './protocol.js';
+import type { RunChecksKind, RunnerErrorClass } from './protocol.js';
+
+/**
+ * Map an SDK result error subtype to the closed {@link RunnerErrorClass} enum.
+ * Any unrecognised subtype → `'execution_error'` (safest default: we know it was
+ * a result error, so the SDK catch-all is more accurate than `'unknown'`).
+ */
+export function classifyResultError(subtype: string): RunnerErrorClass {
+  switch (subtype) {
+    case 'error_max_turns': return 'max_turns';
+    case 'error_max_budget_usd': return 'budget_exceeded';
+    case 'error_max_structured_output_retries': return 'output_retries';
+    case 'error_during_execution': return 'execution_error';
+    default: return 'execution_error';
+  }
+}
 
 type VerificationInput = {
   verdict: 'pass' | 'fail';
@@ -741,7 +756,7 @@ export async function runLoop(opts: {
           return;
         }
         log(`malformed input line: ${parsed.error}`);
-        emit({ type: 'error', id: 'unknown', message: `malformed input: ${parsed.error}` });
+        emit({ type: 'error', id: 'unknown', message: `malformed input: ${parsed.error}`, errorClass: 'malformed_input' });
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
@@ -898,6 +913,7 @@ async function processTurn(
 
     let resultText: string | null = null;
     let turnError: string | null = null;
+    let turnErrorClass: RunnerErrorClass | null = null;
     let usageMsg: RunnerToGatewayMessage | null = null;
 
     for await (const event of stream) {
@@ -975,6 +991,7 @@ async function processTurn(
             (errors !== undefined && errors.length > 0
               ? errors.join('; ')
               : undefined) ?? `SDK error: ${event.subtype}`;
+          turnErrorClass = classifyResultError(event.subtype);
         }
         break;
       }
@@ -1010,18 +1027,19 @@ async function processTurn(
     }
 
     if (turnError !== null) {
-      emit({ type: 'error', id, message: turnError });
+      emit({ type: 'error', id, message: turnError, ...(turnErrorClass !== null ? { errorClass: turnErrorClass } : {}) });
     } else if (resultText !== null) {
       // Scan workspace for files written during this turn (success only)
       await emitNewFiles(id, turnStartMs, deps.listFiles, deps.readBinaryFile);
       emit({ type: 'text', id, text: resultText });
     } else {
-      emit({ type: 'error', id, message: 'no result received from SDK' });
+      emit({ type: 'error', id, message: 'no result received from SDK', errorClass: 'no_result' });
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     log(`error processing message: ${message}`);
-    emit({ type: 'error', id, message });
+    const errorClass: RunnerErrorClass = err instanceof AbortError ? 'aborted' : 'unknown';
+    emit({ type: 'error', id, message, errorClass });
   }
 
   return currentSessionId;

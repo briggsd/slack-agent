@@ -939,9 +939,9 @@ export class SessionManager {
           // treat-container-output-as-data invariants. The typed `reason` + session
           // key remain the durable signal.
           const safeDetail = event.reason === 'runner_error' ? null : event.message;
-          console.error(
-            `[session] turn error (${event.reason}) ${session.key}${safeDetail === null ? '' : `: ${safeDetail}`}`,
-          );
+          const safeClass = event.reason === 'runner_error' ? (event.errorClass ?? null) : null;
+          const logSuffix = safeDetail !== null ? `: ${safeDetail}` : safeClass !== null ? `: ${safeClass}` : '';
+          console.error(`[session] turn error (${event.reason}) ${session.key}${logSuffix}`);
           this.audit({
             session_key: session.key,
             team_id: session.teamId ?? null,
@@ -950,7 +950,7 @@ export class SessionManager {
             kind: 'error',
             tool: null,
             result: event.reason,
-            summary: safeDetail,
+            summary: event.reason === 'runner_error' ? safeClass : safeDetail,
           });
           await tryUpdate(`:x: Error: ${event.message}`);
           captured = { type: 'error', message: event.message, reason: event.reason };

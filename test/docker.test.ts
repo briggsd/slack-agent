@@ -243,6 +243,43 @@ describe('DockerRunner — send/receive', () => {
     expect((await iter.next()).done).toBe(true);
   });
 
+  it('threads a valid errorClass through the wire-parse site', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const gen = runner.send('go');
+    const iter = gen[Symbol.asyncIterator]();
+
+    const e1Promise = iter.next();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sent = JSON.parse(fake.stdinLines[0] ?? '{}') as { type: string; id: string };
+
+    fake.writeOut(JSON.stringify({ type: 'error', id: sent.id, message: 'max turns hit', errorClass: 'max_turns' }));
+
+    const e1 = await e1Promise;
+    expect(e1.value).toEqual({ type: 'error', message: 'max turns hit', reason: 'runner_error', errorClass: 'max_turns' });
+    expect((await iter.next()).done).toBe(true);
+  });
+
+  it('drops a bogus errorClass off the wire to undefined (validation)', async () => {
+    const { runner, fake } = await makeReadyRunner();
+
+    const gen = runner.send('go');
+    const iter = gen[Symbol.asyncIterator]();
+
+    const e1Promise = iter.next();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const sent = JSON.parse(fake.stdinLines[0] ?? '{}') as { type: string; id: string };
+
+    fake.writeOut(JSON.stringify({ type: 'error', id: sent.id, message: 'oops', errorClass: 'haxx' }));
+
+    const e1 = await e1Promise;
+    // errorClass not present (dropped) — no errorClass field on the event
+    expect(e1.value).toEqual({ type: 'error', message: 'oops', reason: 'runner_error' });
+    expect((await iter.next()).done).toBe(true);
+  });
+
   it('yields error on unexpected process exit during send', async () => {
     const { runner, fake } = await makeReadyRunner();
 
