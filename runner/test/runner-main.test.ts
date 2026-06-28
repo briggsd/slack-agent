@@ -554,7 +554,7 @@ describe('runner main — file detection', () => {
     expect(fileEvents).toHaveLength(0);
   });
 
-  it('skips oversized files and emits a status event', async () => {
+  it('skips oversized files and emits a single summary status event', async () => {
     const sdk = new FakeAgentSdk([
       [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
     ]);
@@ -573,18 +573,21 @@ describe('runner main — file detection', () => {
     const fileEvents = output.filter((e) => e.type === 'file');
     expect(fileEvents).toHaveLength(0);
 
-    const statusEvents = output.filter((e) => e.type === 'status');
-    expect(statusEvents.some((s) => s.text?.includes('big.bin'))).toBe(true);
-    expect(statusEvents.some((s) => s.text?.includes('too large') || s.text?.includes('skipped'))).toBe(true);
+    // Exactly one skip summary status — no per-file name in output
+    const skipStatuses = output.filter((e) => e.type === 'status' && e.text?.includes('not delivered'));
+    expect(skipStatuses).toHaveLength(1);
+    expect(skipStatuses[0]?.text).toMatch(/too large/);
+    // Summary must NOT include individual filenames
+    expect(skipStatuses[0]?.text).not.toContain('big.bin');
   });
 
-  it('enforces the max-files-per-turn cap (5 files)', async () => {
+  it('enforces the max-files-per-turn cap (5 files) — single summary status', async () => {
     const sdk = new FakeAgentSdk([
       [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
     ]);
     const fs = new InMemoryFs();
     const futureMs = Date.now() + 60_000;
-    // Add 7 small files
+    // Add 7 small files — 5 should be forwarded, 2 skipped
     for (let i = 1; i <= 7; i++) {
       const content = Buffer.from(`file ${i}`, 'utf-8');
       fs.addWorkspaceFile(`/workspace/f${i}.txt`, `f${i}.txt`, content, futureMs);
@@ -599,11 +602,91 @@ describe('runner main — file detection', () => {
     const fileEvents = output.filter((e) => e.type === 'file');
     expect(fileEvents).toHaveLength(5);
 
-    // Skipped files should produce status events
-    const statusEvents = output.filter(
-      (e) => e.type === 'status' && e.text?.includes('skipped'),
+    // Exactly ONE summary status — not one per skipped file
+    const skipStatuses = output.filter((e) => e.type === 'status' && e.text?.includes('not delivered'));
+    expect(skipStatuses).toHaveLength(1);
+    expect(skipStatuses[0]?.text).toMatch(/5-file limit/);
+    expect(skipStatuses[0]?.text).toContain('2 files not delivered');
+
+    // No per-file "skipped file …" statuses remain
+    const perFileSkips = output.filter((e) => e.type === 'status' && e.text?.startsWith('skipped file'));
+    expect(perFileSkips).toHaveLength(0);
+  });
+
+  it('emits one summary status naming all fired reasons for a mix of skip types', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
+    ]);
+    const fs = new InMemoryFs();
+    const futureMs = Date.now() + 60_000;
+    // Add 5 small files to hit the count cap, plus one oversized file that would also be skipped
+    for (let i = 1; i <= 5; i++) {
+      const content = Buffer.from(`file ${i}`, 'utf-8');
+      fs.addWorkspaceFile(`/workspace/f${i}.txt`, `f${i}.txt`, content, futureMs);
+    }
+    // This oversized file comes after the 5 small ones; fileCount cap hits first but
+    // we add it to trigger skippedCountCap (since fileCount=5 before reading this)
+    const hugeSize = 9 * 1024 * 1024;
+    fs.workspaceFiles.push({ path: '/workspace/big.bin', name: 'big.bin', size: hugeSize, mtimeMs: futureMs });
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'm1', text: 'hi' })],
+      sdk,
+      fs,
     );
-    expect(statusEvents.length).toBeGreaterThanOrEqual(2);
+
+    // All 5 small files forwarded
+    const fileEvents = output.filter((e) => e.type === 'file');
+    expect(fileEvents).toHaveLength(5);
+
+    // One summary status for the skipped oversized file (hit count cap)
+    const skipStatuses = output.filter((e) => e.type === 'status' && e.text?.includes('not delivered'));
+    expect(skipStatuses).toHaveLength(1);
+    // 1 file skipped due to count cap
+    expect(skipStatuses[0]?.text).toMatch(/1 file not delivered/);
+    expect(skipStatuses[0]?.text).toMatch(/5-file limit/);
+
+    // No per-file skipped statuses
+    const perFileSkips = output.filter((e) => e.type === 'status' && e.text?.startsWith('skipped file'));
+    expect(perFileSkips).toHaveLength(0);
+  });
+
+  it('emits one summary status for an over-total-size skip', async () => {
+    const sdk = new FakeAgentSdk([
+      [makeSdkInit('sess-1'), makeSdkResult('done', 'sess-1')],
+    ]);
+    const fs = new InMemoryFs();
+    const futureMs = Date.now() + 60_000;
+    // Three files each "reported" as 6 MiB (under the 8 MiB per-file limit).
+    // File 1 + File 2 total 12 MiB (< 16 MiB) → forwarded.
+    // File 3 would push total to 18 MiB (> 16 MiB) → skipped by total cap.
+    // Use a tiny dummy buffer for readBinaryFile and override the metadata size.
+    const sixMiB = 6 * 1024 * 1024;
+    const dummy = Buffer.from('x');
+    for (const name of ['a.bin', 'b.bin', 'c.bin']) {
+      fs.addWorkspaceFile(`/workspace/${name}`, name, dummy, futureMs);
+      // Override size so cap logic sees 6 MiB (addWorkspaceFile sets size = buffer.length)
+      fs.workspaceFiles[fs.workspaceFiles.length - 1]!.size = sixMiB;
+    }
+
+    const output = await runWithInput(
+      [JSON.stringify({ type: 'user_message', id: 'm1', text: 'hi' })],
+      sdk,
+      fs,
+    );
+
+    // First two files forwarded (6+6=12 MiB); third skipped (12+6=18 MiB > 16 MiB)
+    const fileEvents = output.filter((e) => e.type === 'file');
+    expect(fileEvents).toHaveLength(2);
+
+    const skipStatuses = output.filter((e) => e.type === 'status' && e.text?.includes('not delivered'));
+    expect(skipStatuses).toHaveLength(1);
+    expect(skipStatuses[0]?.text).toMatch(/byte total/);
+    expect(skipStatuses[0]?.text).toContain('1 file not delivered');
+
+    // No per-file skipped statuses
+    const perFileSkips = output.filter((e) => e.type === 'status' && e.text?.startsWith('skipped file'));
+    expect(perFileSkips).toHaveLength(0);
   });
 
   it('skips dotfiles and node_modules entries', async () => {
