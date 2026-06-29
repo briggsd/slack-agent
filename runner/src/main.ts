@@ -488,13 +488,26 @@ export async function runReadIssue(
   if (!outcome.ok) {
     return `READ ISSUE DID NOT COMPLETE: ${outcome.reason}. Tell the user the short failure reason.`;
   }
-  const { title, state, author, body } = outcome.issue;
-  return [
+  const { title, state, author, body, comments } = outcome.issue;
+  const parts: string[] = [
     `ISSUE #${input.number} (${state}) — ${title}`,
     `Author: ${author}`,
     '',
     body,
-  ].join('\n');
+    '',
+    `--- COMMENTS (${comments.length}) ---`,
+  ];
+  if (comments.length === 0) {
+    parts.push('', 'No comments.');
+  } else {
+    for (let i = 0; i < comments.length; i++) {
+      const c = comments[i];
+      if (c !== undefined) {
+        parts.push('', `[${i + 1}] ${c.author}:`, c.body);
+      }
+    }
+  }
+  return parts.join('\n');
 }
 
 function publishInputFromArgs(args: {
@@ -1450,9 +1463,10 @@ function buildCommitMcpServer(
 
   const readIssueTool = tool(
     'read_issue',
-    'Read a repository issue (title, body, state, author) through the gateway credential path. ' +
+    'Read a repository issue (title, body, state, author) plus up to 30 general comments ' +
+      '(issue thread / general PR comments incl. CI review summaries) through the gateway credential path. ' +
       'Pass the "owner/name" repo and the issue number. The gateway holds credentials; the token ' +
-      'never enters the container. The issue body is capped at 16384 characters.',
+      'never enters the container. The issue body and each comment body are capped at 16384 characters.',
     readIssueSchema,
     async (args) => {
       const text = await runReadIssue(readIssueInputFromArgs(args), readIssueFn);

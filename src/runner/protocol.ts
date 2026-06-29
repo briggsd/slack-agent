@@ -195,7 +195,7 @@ export type ReadIssueResultMessage = {
   type: 'read_issue_result';
   id: string;       // echoes the request_read_issue this answers
   ok: boolean;
-  issue?: { title: string; body: string; state: 'open' | 'closed'; author: string }; // present iff ok
+  issue?: { title: string; body: string; state: 'open' | 'closed'; author: string; comments: { author: string; body: string }[] }; // present iff ok
   reason?: string;  // present iff !ok — short, token-free
 };
 

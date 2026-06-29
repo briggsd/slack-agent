@@ -388,7 +388,24 @@ export function parseInbound(line: string): InboundParsed {
       ) {
         return { kind: 'bad', error: 'unexpected read_issue_result shape' };
       }
-      const issueTyped = issue as { title: string; body: string; state: 'open' | 'closed'; author: string };
+      const rawIssue = issue as Record<string, unknown>;
+      const rawComments = rawIssue['comments'];
+      const comments: { author: string; body: string }[] = Array.isArray(rawComments)
+        ? (rawComments as unknown[]).map((c: unknown) => {
+            const entry = c as Record<string, unknown>;
+            return {
+              author: typeof entry['author'] === 'string' ? entry['author'] : '',
+              body: typeof entry['body'] === 'string' ? entry['body'] : '',
+            };
+          })
+        : [];
+      const issueTyped = {
+        title: rawIssue['title'] as string,
+        body: rawIssue['body'] as string,
+        state: rawIssue['state'] as 'open' | 'closed',
+        author: rawIssue['author'] as string,
+        comments,
+      };
       msg = { type: 'read_issue_result', id, ok: true, issue: issueTyped };
     } else if (typeof obj['reason'] === 'string') {
       msg = { type: 'read_issue_result', id, ok: false, reason: obj['reason'] };
