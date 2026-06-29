@@ -19,7 +19,12 @@ import { isSafeRepoSlug } from './parse.js';
 /** Maximum issue body length returned to the agent (untrusted external text). */
 export const READ_ISSUE_BODY_MAX = 16_384;
 
-/** Maximum number of comments returned per issue read (oldest-first). */
+/**
+ * Maximum number of comments returned per issue read. We keep the NEWEST ones:
+ * GitHub returns comments oldest-first, and the most recent comment is the one
+ * the agent most needs (e.g. the CI review-factory's summary is posted last), so
+ * an over-long thread drops its oldest entries, not its newest.
+ */
 export const READ_ISSUE_COMMENTS_MAX = 30;
 
 function isSafeOwnerRepoSlug(repo: string): boolean {
@@ -58,20 +63,28 @@ export class RealReadIssueService implements ReadIssueService {
 
     try {
       const provider = providerFor(lease.host);
-      const raw = await provider.getIssue({
-        repo: req.repo,
-        number: req.number,
-        token: lease.token,
-        fetchFn: this.fetchFn,
-      });
+      // The issue and its comments are independent reads under the same lease —
+      // fetch them concurrently so the gateway-serviced tool blocks the agent
+      // turn for one round-trip, not two. A failure in either rejects the
+      // Promise.all and falls into the catch below (comments errors fail the read
+      // rather than silently dropping review feedback).
+      const [raw, rawComments] = await Promise.all([
+        provider.getIssue({
+          repo: req.repo,
+          number: req.number,
+          token: lease.token,
+          fetchFn: this.fetchFn,
+        }),
+        provider.getIssueComments({
+          repo: req.repo,
+          number: req.number,
+          token: lease.token,
+          fetchFn: this.fetchFn,
+        }),
+      ]);
       const body = raw.body.length > READ_ISSUE_BODY_MAX ? raw.body.slice(0, READ_ISSUE_BODY_MAX) : raw.body;
-      const rawComments = await provider.getIssueComments({
-        repo: req.repo,
-        number: req.number,
-        token: lease.token,
-        fetchFn: this.fetchFn,
-      });
-      const comments = rawComments.slice(0, READ_ISSUE_COMMENTS_MAX).map((c) => ({
+      // Keep the newest READ_ISSUE_COMMENTS_MAX (GitHub returns oldest-first).
+      const comments = rawComments.slice(-READ_ISSUE_COMMENTS_MAX).map((c) => ({
         author: c.author,
         body: c.body.length > READ_ISSUE_BODY_MAX ? c.body.slice(0, READ_ISSUE_BODY_MAX) : c.body,
       }));

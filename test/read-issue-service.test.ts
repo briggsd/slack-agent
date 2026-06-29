@@ -166,8 +166,14 @@ describe('RealReadIssueService', () => {
 
     expect(outcome.ok).toBe(true);
     if (outcome.ok) {
+      // Keeps the NEWEST 30 (GitHub returns oldest-first): comments 5..34 survive,
+      // the oldest five are dropped, and the most recent comment is last.
       expect(outcome.issue.comments).toHaveLength(READ_ISSUE_COMMENTS_MAX);
-      expect(outcome.issue.comments[0]).toEqual({ author: 'user0', body: 'comment 0' });
+      expect(outcome.issue.comments[0]).toEqual({ author: 'user5', body: 'comment 5' });
+      expect(outcome.issue.comments[READ_ISSUE_COMMENTS_MAX - 1]).toEqual({
+        author: `user${READ_ISSUE_COMMENTS_MAX + 4}`,
+        body: `comment ${READ_ISSUE_COMMENTS_MAX + 4}`,
+      });
     }
     expect(broker.revokes).toHaveLength(1);
   });
