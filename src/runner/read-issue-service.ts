@@ -14,11 +14,17 @@ export interface ReadIssueServiceRequest {
   number: number;
 }
 
+export interface IssueComment {
+  author: string;  // commenter login, '' if absent
+  body: string;    // capped at READ_ISSUE_BODY_MAX
+}
+
 export interface IssueData {
   title: string;
   body: string;
   state: 'open' | 'closed';
   author: string;
+  comments: IssueComment[];
 }
 
 export type ReadIssueOutcome =

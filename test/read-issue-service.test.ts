@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { FakeBroker } from '../src/broker/fake.js';
-import { RealReadIssueService, READ_ISSUE_BODY_MAX } from '../src/oneshot/read-issue-service.js';
+import { RealReadIssueService, READ_ISSUE_BODY_MAX, READ_ISSUE_COMMENTS_MAX } from '../src/oneshot/read-issue-service.js';
 
 function makeResponse(body: unknown, status = 200): Response {
   return {
@@ -46,15 +46,23 @@ describe('RealReadIssueService', () => {
     expect(broker.leases).toHaveLength(0);
   });
 
-  it('happy path: leases, fetches issue, revokes, returns issue data', async () => {
+  it('happy path: leases, fetches issue and comments, revokes, returns issue data with comments', async () => {
     const broker = new FakeBroker('test-gh-token');
-    const fakeFetch = (): Promise<Response> =>
-      Promise.resolve(makeResponse({
+    let callCount = 0;
+    const fakeFetch = (url: string | URL | Request): Promise<Response> => {
+      callCount++;
+      if (String(url).includes('/comments')) {
+        return Promise.resolve(makeResponse([
+          { body: 'First comment', user: { login: 'commenter1' } },
+        ]));
+      }
+      return Promise.resolve(makeResponse({
         title: 'Bug: NPE in login',
         body: 'Steps to reproduce...',
         state: 'open',
         user: { login: 'reporter' },
       }));
+    };
 
     const svc = new RealReadIssueService(broker, fakeFetch as typeof fetch);
 
@@ -67,8 +75,10 @@ describe('RealReadIssueService', () => {
         body: 'Steps to reproduce...',
         state: 'open',
         author: 'reporter',
+        comments: [{ author: 'commenter1', body: 'First comment' }],
       },
     });
+    expect(callCount).toBe(2);
     expect(broker.leases).toHaveLength(1);
     expect(broker.leases[0]).toMatchObject({ host: 'github', repo: 'owner/repo' });
     expect(broker.revokes).toHaveLength(1);
@@ -77,13 +87,17 @@ describe('RealReadIssueService', () => {
   it('caps an oversized body at READ_ISSUE_BODY_MAX', async () => {
     const broker = new FakeBroker();
     const oversizedBody = 'x'.repeat(READ_ISSUE_BODY_MAX + 1000);
-    const fakeFetch = (): Promise<Response> =>
-      Promise.resolve(makeResponse({
+    const fakeFetch = (url: string | URL | Request): Promise<Response> => {
+      if (String(url).includes('/comments')) {
+        return Promise.resolve(makeResponse([]));
+      }
+      return Promise.resolve(makeResponse({
         title: 'Big issue',
         body: oversizedBody,
         state: 'open',
         user: { login: 'author' },
       }));
+    };
 
     const svc = new RealReadIssueService(broker, fakeFetch as typeof fetch);
     const outcome = await svc.readIssue({ host: 'github', repo: 'owner/repo', number: 1 });
@@ -127,5 +141,87 @@ describe('RealReadIssueService', () => {
     }
     // No revoke since we never got a lease
     expect(broker.revokes).toHaveLength(0);
+  });
+
+  it('returns comments capped at READ_ISSUE_COMMENTS_MAX (count cap)', async () => {
+    const broker = new FakeBroker();
+    const manyComments = Array.from({ length: READ_ISSUE_COMMENTS_MAX + 5 }, (_, i) => ({
+      body: `comment ${i}`,
+      user: { login: `user${i}` },
+    }));
+    const fakeFetch = (url: string | URL | Request): Promise<Response> => {
+      if (String(url).includes('/comments')) {
+        return Promise.resolve(makeResponse(manyComments));
+      }
+      return Promise.resolve(makeResponse({
+        title: 'Issue with many comments',
+        body: 'body',
+        state: 'open',
+        user: { login: 'op' },
+      }));
+    };
+
+    const svc = new RealReadIssueService(broker, fakeFetch as typeof fetch);
+    const outcome = await svc.readIssue({ host: 'github', repo: 'owner/repo', number: 2 });
+
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.issue.comments).toHaveLength(READ_ISSUE_COMMENTS_MAX);
+      expect(outcome.issue.comments[0]).toEqual({ author: 'user0', body: 'comment 0' });
+    }
+    expect(broker.revokes).toHaveLength(1);
+  });
+
+  it('caps each comment body at READ_ISSUE_BODY_MAX', async () => {
+    const broker = new FakeBroker();
+    const longBody = 'y'.repeat(READ_ISSUE_BODY_MAX + 500);
+    const fakeFetch = (url: string | URL | Request): Promise<Response> => {
+      if (String(url).includes('/comments')) {
+        return Promise.resolve(makeResponse([
+          { body: longBody, user: { login: 'verbose' } },
+        ]));
+      }
+      return Promise.resolve(makeResponse({
+        title: 'Issue',
+        body: 'short body',
+        state: 'open',
+        user: { login: 'op' },
+      }));
+    };
+
+    const svc = new RealReadIssueService(broker, fakeFetch as typeof fetch);
+    const outcome = await svc.readIssue({ host: 'github', repo: 'owner/repo', number: 3 });
+
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.issue.comments).toHaveLength(1);
+      expect(outcome.issue.comments[0]?.body.length).toBe(READ_ISSUE_BODY_MAX);
+    }
+    expect(broker.revokes).toHaveLength(1);
+  });
+
+  it('returns ok:false when comments fetch fails and still revokes the lease', async () => {
+    const broker = new FakeBroker();
+    const fakeFetch = (url: string | URL | Request): Promise<Response> => {
+      if (String(url).includes('/comments')) {
+        return Promise.resolve(makeResponse({ message: 'Forbidden' }, 403));
+      }
+      return Promise.resolve(makeResponse({
+        title: 'Issue',
+        body: 'body',
+        state: 'open',
+        user: { login: 'op' },
+      }));
+    };
+
+    const svc = new RealReadIssueService(broker, fakeFetch as typeof fetch);
+    const outcome = await svc.readIssue({ host: 'github', repo: 'owner/repo', number: 4 });
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.reason).toContain('403');
+    }
+    // Lease must still be revoked even though comments fetch failed
+    expect(broker.revokes).toHaveLength(1);
   });
 });

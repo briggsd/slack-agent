@@ -17,7 +17,7 @@ function recorder(outcome: ReadIssueOutcome): {
 }
 
 describe('runReadIssue', () => {
-  it('returns formatted issue text on success', async () => {
+  it('returns formatted issue text on success with no comments', async () => {
     const r = recorder({
       ok: true,
       issue: {
@@ -25,6 +25,7 @@ describe('runReadIssue', () => {
         body: 'Steps to reproduce.',
         state: 'open',
         author: 'reporter',
+        comments: [],
       },
     });
 
@@ -36,6 +37,8 @@ describe('runReadIssue', () => {
     expect(text).toContain('Fix the bug');
     expect(text).toContain('Author: reporter');
     expect(text).toContain('Steps to reproduce.');
+    expect(text).toContain('--- COMMENTS (0) ---');
+    expect(text).toContain('No comments.');
   });
 
   it('returns the failure reason text on failure', async () => {
@@ -55,6 +58,7 @@ describe('runReadIssue', () => {
         body: '',
         state: 'closed',
         author: 'closer',
+        comments: [],
       },
     });
 
@@ -62,5 +66,48 @@ describe('runReadIssue', () => {
 
     expect(text).toContain('closed');
     expect(text).toContain('Author: closer');
+  });
+
+  it('renders comments section with numbered entries', async () => {
+    const r = recorder({
+      ok: true,
+      issue: {
+        title: 'Reviewed PR',
+        body: 'PR body.',
+        state: 'open',
+        author: 'author1',
+        comments: [
+          { author: 'alice', body: 'LGTM!' },
+          { author: 'bob', body: 'Please add tests.' },
+        ],
+      },
+    });
+
+    const text = await runReadIssue({ host: 'github', repo: 'owner/repo', number: 10 }, r.readIssue);
+
+    expect(text).toContain('--- COMMENTS (2) ---');
+    expect(text).toContain('[1] alice:');
+    expect(text).toContain('LGTM!');
+    expect(text).toContain('[2] bob:');
+    expect(text).toContain('Please add tests.');
+    expect(text).not.toContain('No comments.');
+  });
+
+  it('empty thread shows header and No comments. sentinel', async () => {
+    const r = recorder({
+      ok: true,
+      issue: {
+        title: 'Empty thread',
+        body: 'No discussion yet.',
+        state: 'open',
+        author: 'op',
+        comments: [],
+      },
+    });
+
+    const text = await runReadIssue({ host: 'github', repo: 'owner/repo', number: 5 }, r.readIssue);
+
+    expect(text).toContain('--- COMMENTS (0) ---');
+    expect(text).toContain('No comments.');
   });
 });

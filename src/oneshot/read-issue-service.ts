@@ -19,6 +19,9 @@ import { isSafeRepoSlug } from './parse.js';
 /** Maximum issue body length returned to the agent (untrusted external text). */
 export const READ_ISSUE_BODY_MAX = 16_384;
 
+/** Maximum number of comments returned per issue read (oldest-first). */
+export const READ_ISSUE_COMMENTS_MAX = 30;
+
 function isSafeOwnerRepoSlug(repo: string): boolean {
   return repo.split('/').length === 2 && isSafeRepoSlug(repo);
 }
@@ -54,14 +57,25 @@ export class RealReadIssueService implements ReadIssueService {
     }
 
     try {
-      const raw = await providerFor(lease.host).getIssue({
+      const provider = providerFor(lease.host);
+      const raw = await provider.getIssue({
         repo: req.repo,
         number: req.number,
         token: lease.token,
         fetchFn: this.fetchFn,
       });
       const body = raw.body.length > READ_ISSUE_BODY_MAX ? raw.body.slice(0, READ_ISSUE_BODY_MAX) : raw.body;
-      return { ok: true, issue: { ...raw, body } };
+      const rawComments = await provider.getIssueComments({
+        repo: req.repo,
+        number: req.number,
+        token: lease.token,
+        fetchFn: this.fetchFn,
+      });
+      const comments = rawComments.slice(0, READ_ISSUE_COMMENTS_MAX).map((c) => ({
+        author: c.author,
+        body: c.body.length > READ_ISSUE_BODY_MAX ? c.body.slice(0, READ_ISSUE_BODY_MAX) : c.body,
+      }));
+      return { ok: true, issue: { ...raw, body, comments } };
     } catch (err) {
       return { ok: false, reason: safeReasonFrom(err) };
     } finally {

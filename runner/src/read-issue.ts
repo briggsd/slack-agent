@@ -11,7 +11,7 @@ import { RequestCoordinator } from './request-coordinator.js';
 
 /** The outcome of reading an issue, as the read_issue tool sees it. */
 export type ReadIssueOutcome =
-  | { ok: true; issue: { title: string; body: string; state: 'open' | 'closed'; author: string } }
+  | { ok: true; issue: { title: string; body: string; state: 'open' | 'closed'; author: string; comments: { author: string; body: string }[] } }
   | { ok: false; reason: string };
 
 export interface ReadIssueInput {

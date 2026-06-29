@@ -18,6 +18,7 @@ export class FakeReadIssueService implements ReadIssueService {
       body: 'Fake issue body',
       state: 'open',
       author: 'fake-author',
+      comments: [],
     },
   };
 

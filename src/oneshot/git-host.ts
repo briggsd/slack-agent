@@ -83,6 +83,13 @@ export interface GitHostProvider {
     token: string;
     fetchFn: FetchFn;
   }): Promise<{ title: string; body: string; state: 'open' | 'closed'; author: string }>;
+  /** Read general comments on an issue/PR (issues/{n}/comments). Returns all comments from a single page. */
+  getIssueComments(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+  }): Promise<Array<{ author: string; body: string }>>;
 }
 
 /** GitHub implementation. Credentials travel as Bearer tokens; never embedded in URLs. */
@@ -313,6 +320,38 @@ export class GithubProvider implements GitHostProvider {
     const author = typeof data.user?.login === 'string' ? data.user.login : '';
 
     return { title, body, state, author };
+  }
+
+  async getIssueComments(req: {
+    repo: string;
+    number: number;
+    token: string;
+    fetchFn: FetchFn;
+  }): Promise<Array<{ author: string; body: string }>> {
+    const url = `https://api.github.com/repos/${req.repo}/issues/${req.number}/comments?per_page=100`;
+    const res = await req.fetchFn(url, {
+      headers: {
+        Authorization: `Bearer ${req.token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'slack-agent',
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub API error ${res.status} fetching issue comments${await safeReason(res)}`);
+    }
+
+    const data = (await res.json()) as unknown;
+    if (!Array.isArray(data)) {
+      throw new Error('GitHub API returned a non-array issue comments list');
+    }
+
+    return data.map((entry: unknown) => {
+      const e = entry as { body?: unknown; user?: { login?: unknown } };
+      const body = (e.body === null || e.body === undefined || typeof e.body !== 'string') ? '' : e.body;
+      const author = typeof e.user?.login === 'string' ? e.user.login : '';
+      return { author, body };
+    });
   }
 
   async getChangeRequestState(req: {

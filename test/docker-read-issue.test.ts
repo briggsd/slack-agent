@@ -106,6 +106,7 @@ describe('DockerRunner — request_read_issue round-trip', () => {
       body: 'Steps to reproduce the bug...',
       state: 'open',
       author: 'reporter1',
+      comments: [],
     });
     const { runner, fake } = await makeReadyRunner({ readIssueService });
 
@@ -136,6 +137,7 @@ describe('DockerRunner — request_read_issue round-trip', () => {
         body: 'Steps to reproduce the bug...',
         state: 'open',
         author: 'reporter1',
+        comments: [],
       },
     });
 

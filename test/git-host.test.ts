@@ -199,6 +199,91 @@ describe('GithubProvider — PR mutation APIs', () => {
     });
   });
 
+  it('getIssueComments GETs comments with per_page=100 and parses author+body', async () => {
+    const fetchCalls: { url: string; init: RequestInit }[] = [];
+    const fakeFetch = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      fetchCalls.push({ url: String(url), init: init ?? {} });
+      return Promise.resolve(makeResponse([
+        { body: 'First comment', user: { login: 'alice' } },
+        { body: 'Second comment', user: { login: 'bob' } },
+      ]));
+    };
+
+    const result = await provider.getIssueComments({
+      repo: 'owner/repo',
+      number: 42,
+      token: 'tok-comments',
+      fetchFn: fakeFetch as typeof fetch,
+    });
+
+    expect(result).toEqual([
+      { author: 'alice', body: 'First comment' },
+      { author: 'bob', body: 'Second comment' },
+    ]);
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]?.url).toBe('https://api.github.com/repos/owner/repo/issues/42/comments?per_page=100');
+    const headers = fetchCalls[0]?.init.headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer tok-comments');
+    expect(headers['Accept']).toBe('application/vnd.github+json');
+    expect(headers['User-Agent']).toBe('slack-agent');
+  });
+
+  it('getIssueComments maps null body to empty string', async () => {
+    const fakeFetch = (): Promise<Response> =>
+      Promise.resolve(makeResponse([
+        { body: null, user: { login: 'author1' } },
+        { body: undefined, user: { login: 'author2' } },
+      ]));
+
+    const result = await provider.getIssueComments({
+      repo: 'owner/repo',
+      number: 1,
+      token: 'tok',
+      fetchFn: fakeFetch as typeof fetch,
+    });
+
+    expect(result[0]?.body).toBe('');
+    expect(result[0]?.author).toBe('author1');
+    expect(result[1]?.body).toBe('');
+    expect(result[1]?.author).toBe('author2');
+  });
+
+  it('getIssueComments throws on non-ok response without leaking the token', async () => {
+    const token = 'secret-comments-token';
+    const fakeFetch = (): Promise<Response> =>
+      Promise.resolve(makeResponse({ message: 'Forbidden' }, 403));
+
+    await expect(provider.getIssueComments({
+      repo: 'owner/repo',
+      number: 42,
+      token,
+      fetchFn: fakeFetch as typeof fetch,
+    })).rejects.toThrow('GitHub API error 403 fetching issue comments');
+
+    await provider.getIssueComments({
+      repo: 'owner/repo',
+      number: 42,
+      token,
+      fetchFn: fakeFetch as typeof fetch,
+    }).catch((err: unknown) => {
+      if (err instanceof Error) {
+        expect(err.message).not.toContain(token);
+      }
+    });
+  });
+
+  it('getIssueComments throws when the response body is not an array', async () => {
+    const fakeFetch = (): Promise<Response> =>
+      Promise.resolve(makeResponse({ message: 'unexpected object' }));
+
+    await expect(provider.getIssueComments({
+      repo: 'owner/repo',
+      number: 42,
+      token: 'tok',
+      fetchFn: fakeFetch as typeof fetch,
+    })).rejects.toThrow('GitHub API returned a non-array issue comments list');
+  });
+
   it('addChangeRequestComment POSTs an issue comment body', async () => {
     const fetchCalls: { url: string; init: RequestInit }[] = [];
     const fakeFetch = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
