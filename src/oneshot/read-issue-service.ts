@@ -23,7 +23,13 @@ export const READ_ISSUE_BODY_MAX = 16_384;
  * Maximum number of comments returned per issue read. We keep the NEWEST ones:
  * GitHub returns comments oldest-first, and the most recent comment is the one
  * the agent most needs (e.g. the CI review-factory's summary is posted last), so
- * an over-long thread drops its oldest entries, not its newest.
+ * within the fetched page we drop the oldest entries, not the newest.
+ *
+ * Caveat (bounded): getIssueComments fetches a single per_page=100 page, so on a
+ * thread with MORE than 100 comments that page holds the oldest 100 and the truly
+ * newest comment is not fetched at all. That edge (>100 comments on one issue/PR)
+ * is out of scope for this slice; last-page Link pagination is tracked as a
+ * follow-up. Realistic bot-read threads are far under 100.
  */
 export const READ_ISSUE_COMMENTS_MAX = 30;
 
@@ -83,7 +89,8 @@ export class RealReadIssueService implements ReadIssueService {
         }),
       ]);
       const body = raw.body.length > READ_ISSUE_BODY_MAX ? raw.body.slice(0, READ_ISSUE_BODY_MAX) : raw.body;
-      // Keep the newest READ_ISSUE_COMMENTS_MAX (GitHub returns oldest-first).
+      // Keep the newest READ_ISSUE_COMMENTS_MAX of the fetched page (GitHub returns
+      // oldest-first). See READ_ISSUE_COMMENTS_MAX for the >100-comment caveat.
       const comments = rawComments.slice(-READ_ISSUE_COMMENTS_MAX).map((c) => ({
         author: c.author,
         body: c.body.length > READ_ISSUE_BODY_MAX ? c.body.slice(0, READ_ISSUE_BODY_MAX) : c.body,
